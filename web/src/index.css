@@ -1,0 +1,9 @@
+html {
+  min-width: 320px;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}

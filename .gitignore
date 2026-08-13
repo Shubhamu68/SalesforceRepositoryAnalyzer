@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.sfdx/
+.env
+.env.*
+*.log

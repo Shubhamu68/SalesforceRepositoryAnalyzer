@@ -1,0 +1,185 @@
+{
+  "personas": [
+    {
+      "name": "OMS View Only",
+      "permissionSetGroups": [
+        "Order_Management_View_Access"
+      ],
+      "permissionSets": [
+        "Named_Credential_Access_PS"
+      ],
+      "mutingPermissionSets": []
+    },
+    {
+      "name": "Order Management Specialist OTC",
+      "permissionSetGroups": [
+        "Order_Management_OTC_PS_Group"
+      ],
+      "permissionSets": [
+        "Named_Credential_Access_PS",
+        "OMS_Edit_and_Subscribe_Report"
+      ],
+      "mutingPermissionSets": [
+        "Order_Management_OTC_PS_Group_Muted"
+      ]
+    },
+    {
+      "name": "Order Management Specialist Core",
+      "permissionSetGroups": [
+        "Order_Management_Core_PS_Group"
+      ],
+      "permissionSets": [
+        "Named_Credential_Access_PS",
+        "OMS_Edit_and_Subscribe_Report"
+      ],
+      "mutingPermissionSets": [
+        "Order_Management_Core_PS_Group_Muted"
+      ]
+    },
+    {
+      "name": "Order Management Specialist OTC Team Lead",
+      "permissionSetGroups": [
+        "Order_Management_OTC_TeamLead_PS_Group"
+      ],
+      "permissionSets": [
+        "Named_Credential_Access_PS",
+        "OMS_Edit_and_Subscribe_Report"
+      ],
+      "mutingPermissionSets": [
+        "Order_Management_OTC_TeamLead_PS_Group_Muted1"
+      ]
+    },
+    {
+      "name": "Order Management Specialist CORE Team Lead",
+      "permissionSetGroups": [
+        "Order_Management_Core_TeamLead_PS_Group"
+      ],
+      "permissionSets": [
+        "Named_Credential_Access_PS",
+        "OMS_Edit_and_Subscribe_Report"
+      ],
+      "mutingPermissionSets": [
+        "Order_Management_Core_TeamLead_PS_Group_Muted"
+      ]
+    },
+    {
+      "name": "Master Data Specialist",
+      "permissionSetGroups": [
+        "Master_Data_Specialist_PS_Group"
+      ],
+      "permissionSets": [
+        "Named_Credential_Access_PS"
+      ],
+      "mutingPermissionSets": []
+    },
+    {
+      "name": "Senior Master Data Specialist",
+      "permissionSetGroups": [
+        "Senior_Master_Data_Specialist_PS_Group"
+      ],
+      "permissionSets": [
+        "Named_Credential_Access_PS"
+      ],
+      "mutingPermissionSets": []
+    },
+    {
+      "name": "Master Data Manager",
+      "permissionSetGroups": [
+        "Master_Data_Manager_PS_Group"
+      ],
+      "permissionSets": [
+        "Named_Credential_Access_PS",
+        "OMS_Edit_and_Subscribe_Report"
+      ],
+      "mutingPermissionSets": []
+    },
+    {
+      "name": "BFA",
+      "permissionSetGroups": [
+        "BFA_PS_Group"
+      ],
+      "permissionSets": [
+        "Named_Credential_Access_PS"
+      ],
+      "mutingPermissionSets": []
+    },
+    {
+      "name": "Administrator",
+      "permissionSetGroups": [
+        "Order_Management_Administrator_PS_Group"
+      ],
+      "permissionSets": [
+        "Named_Credential_Access_PS",
+        "OMS_Edit_and_Subscribe_Report"
+      ],
+      "mutingPermissionSets": [
+        "Order_Management_Administrator_PS_Group_Muted"
+      ]
+    },
+    {
+      "name": "SuperUser",
+      "permissionSetGroups": [
+        "Order_Management_Super_User_PS_Group"
+      ],
+      "permissionSets": [
+        "Named_Credential_Access_PS",
+        "OMS_Edit_and_Subscribe_Report"
+      ],
+      "mutingPermissionSets": []
+    },
+    {
+      "name": "Mulesoft View",
+      "permissionSetGroups": [
+        "Order_Management_MuleSoft_Access_PS_Group"
+      ],
+      "permissionSets": [
+        "Named_Credential_Access_PS"
+      ],
+      "mutingPermissionSets": []
+    },
+    {
+      "name": "OFA Core",
+      "permissionSetGroups": [
+        "Order_Management_OFA_Core_PS_group"
+      ],
+      "permissionSets": [
+        "Named_Credential_Access_PS",
+        "OMS_Edit_and_Subscribe_Report"
+      ],
+      "mutingPermissionSets": [
+        "Order_Management_OFA_Core_PS_Group_Muted"
+      ]
+    },
+    {
+      "name": "OFA OTC",
+      "permissionSetGroups": [
+        "Order_Management_OFA_OTC_PS_group"
+      ],
+      "permissionSets": [
+        "Named_Credential_Access_PS",
+        "OMS_Edit_and_Subscribe_Report"
+      ],
+      "mutingPermissionSets": [
+        "Order_Management_OFA_OTC_PS_Group_Muted"
+      ]
+    },
+    {
+      "name": "System Admin",
+      "permissionSetGroups": [],
+      "permissionSets": [
+        "OMS_IT_System_Admin",
+        "Named_Credential_Access_PS",
+        "OMS_Edit_and_Subscribe_Report"
+      ],
+      "mutingPermissionSets": []
+    },
+    {
+      "name": "Mulesoft Integration",
+      "permissionSetGroups": [
+        "Order_Management_MuleSoft_Integration_PS_Group"
+      ],
+      "permissionSets": [],
+      "mutingPermissionSets": []
+    }
+  ]
+}
