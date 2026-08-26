@@ -4,22 +4,27 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 
-import { SoqlQuery } from "../models/SoqlQuery.js";
+import {
+  SoqlQuery,
+  SoqlSubquery,
+} from "../models/SoqlQuery.js";
 
 export async function scanApexSoql(
   repositoryPath: string
 ): Promise<SoqlQuery[]> {
-  const apexFiles = await findApexClasses(
-    repositoryPath
-  );
+  const apexFiles =
+    await findApexClasses(
+      repositoryPath
+    );
 
   const queries: SoqlQuery[] = [];
 
   for (const filePath of apexFiles) {
-    const source = await readFile(
-      filePath,
-      "utf-8"
-    );
+    const source =
+      await readFile(
+        filePath,
+        "utf-8"
+      );
 
     const fileQueries =
       extractSoqlQueries(
@@ -27,13 +32,18 @@ export async function scanApexSoql(
         filePath
       );
 
-    queries.push(...fileQueries);
+    queries.push(
+      ...fileQueries
+    );
   }
 
   return queries.sort(
     (a, b) =>
-      a.filePath.localeCompare(b.filePath) ||
-      a.lineNumber - b.lineNumber
+      a.filePath.localeCompare(
+        b.filePath
+      ) ||
+      a.lineNumber -
+        b.lineNumber
   );
 }
 
@@ -54,16 +64,18 @@ async function walkDirectory(
   directoryPath: string,
   results: string[]
 ): Promise<void> {
-  const entries = await readdir(
-    directoryPath,
-    { withFileTypes: true }
-  );
+  const entries =
+    await readdir(
+      directoryPath,
+      { withFileTypes: true }
+    );
 
   for (const entry of entries) {
-    const fullPath = path.join(
-      directoryPath,
-      entry.name
-    );
+    const fullPath =
+      path.join(
+        directoryPath,
+        entry.name
+      );
 
     if (entry.isDirectory()) {
       await walkDirectory(
@@ -78,12 +90,17 @@ async function walkDirectory(
       continue;
     }
 
-    if (!entry.name.toLowerCase().endsWith(".cls")) {
+    if (
+      !entry.name
+        .toLowerCase()
+        .endsWith(".cls")
+    ) {
       continue;
     }
 
-    // Exclude test classes:
-    // *Test*.cls / *test*.cls
+    /*
+     * Exclude test classes.
+     */
     if (
       entry.name
         .toLowerCase()
@@ -125,12 +142,13 @@ function extractSoqlQueries(
       break;
     }
 
-    const queryText = source
-      .slice(
-        openBracket + 1,
-        closeBracket
-      )
-      .trim();
+    const queryText =
+      source
+        .slice(
+          openBracket + 1,
+          closeBracket
+        )
+        .trim();
 
     if (isStaticSoql(queryText)) {
       const parsed =
@@ -146,14 +164,19 @@ function extractSoqlQueries(
       }
     }
 
-    index = closeBracket + 1;
+    index =
+      closeBracket + 1;
   }
 
   return queries;
 }
 
-function isStaticSoql(queryText: string): boolean {
-  return /^\s*SELECT\b/i.test(queryText);
+function isStaticSoql(
+  queryText: string
+): boolean {
+  return /^\s*SELECT\b/i.test(
+    queryText
+  );
 }
 
 function findNextQueryOpeningBracket(
@@ -182,7 +205,9 @@ function findNextQueryOpeningBracket(
       source.slice(index + 1);
 
     if (
-      /^\s*SELECT\b/i.test(remainder)
+      /^\s*SELECT\b/i.test(
+        remainder
+      )
     ) {
       return index;
     }
@@ -207,8 +232,11 @@ function findMatchingBracket(
     index < source.length;
     index++
   ) {
-    const current = source[index];
-    const next = source[index + 1];
+    const current =
+      source[index];
+
+    const next =
+      source[index + 1];
 
     if (inLineComment) {
       if (current === "\n") {
@@ -321,8 +349,11 @@ function isInsideStringOrComment(
     index < targetIndex;
     index++
   ) {
-    const current = source[index];
-    const next = source[index + 1];
+    const current =
+      source[index];
+
+    const next =
+      source[index + 1];
 
     if (inLineComment) {
       if (current === "\n") {
@@ -418,58 +449,367 @@ function parseSoqlQuery(
   source: string,
   openingBracketIndex: number
 ): SoqlQuery | null {
+  const parsed =
+    parseSelectStatement(
+      queryText
+    );
+
+  if (!parsed) {
+    return null;
+  }
+
+  const withUserMode =
+    /\bWITH\s+USER_MODE\b/i.test(
+      queryText
+    );
+
+  return {
+    filePath,
+
+    lineNumber:
+      getLineNumber(
+        source,
+        openingBracketIndex
+      ),
+
+    query: queryText,
+
+    object: parsed.fromName,
+
+    fields: parsed.fields,
+
+    subqueries:
+      parsed.subqueries,
+
+    withUserMode,
+
+    securityMode:
+      withUserMode
+        ? "USER_MODE"
+        : "NO_USER_MODE",
+  };
+}
+
+interface ParsedSelectStatement {
+  fromName: string;
+  fields: string[];
+  subqueries: SoqlSubquery[];
+}
+
+function parseSelectStatement(
+  queryText: string
+): ParsedSelectStatement | null {
+  const trimmed =
+    queryText.trim();
+
+  if (
+    !/^SELECT\b/i.test(
+      trimmed
+    )
+  ) {
+    return null;
+  }
+
+  const selectStart =
+    findKeywordAtTopLevel(
+      trimmed,
+      "SELECT",
+      0
+    );
+
+  if (selectStart !== 0) {
+    return null;
+  }
+
+  const fromIndex =
+    findKeywordAtTopLevel(
+      trimmed,
+      "FROM",
+      "SELECT".length
+    );
+
+  if (fromIndex === -1) {
+    return null;
+  }
+
+  const selectClause =
+    trimmed
+      .slice(
+        "SELECT".length,
+        fromIndex
+      )
+      .trim();
+
+  const afterFrom =
+    trimmed
+      .slice(
+        fromIndex + "FROM".length
+      )
+      .trim();
+
   const fromMatch =
-    queryText.match(
-      /\bFROM\s+([A-Za-z_][A-Za-z0-9_]*)/i
+    afterFrom.match(
+      /^([A-Za-z_][A-Za-z0-9_]*)/
     );
 
   if (!fromMatch) {
     return null;
   }
 
-  const object =
+  const fromName =
     fromMatch[1];
 
-  const selectMatch =
-    queryText.match(
-      /^\s*SELECT\s+([\s\S]*?)\bFROM\b/i
+  const fields: string[] = [];
+  const subqueries: SoqlSubquery[] = [];
+
+  const selectItems =
+    splitTopLevelCommaSeparated(
+      selectClause
     );
 
-  if (!selectMatch) {
-    return null;
+  for (const item of selectItems) {
+    const trimmedItem =
+      item.trim();
+
+    if (!trimmedItem) {
+      continue;
+    }
+
+    const subqueryText =
+      unwrapSubquery(
+        trimmedItem
+      );
+
+    if (subqueryText) {
+      const parsedSubquery =
+        parseSelectStatement(
+          subqueryText
+        );
+
+      if (parsedSubquery) {
+        subqueries.push({
+          relationshipName:
+            parsedSubquery.fromName,
+
+          fields:
+            parsedSubquery.fields,
+
+          subqueries:
+            parsedSubquery.subqueries,
+        });
+
+        continue;
+      }
+    }
+
+    addField(
+      fields,
+      trimmedItem
+    );
   }
 
-  const fields =
-    extractFields(
-      selectMatch[1]
-    );
-
-  const withUserMode =
-  /\bWITH\s+USER_MODE\b/i.test(
-    queryText
-  );
-
-return {
-  filePath,
-  lineNumber:
-    getLineNumber(
-      source,
-      openingBracketIndex
-    ),
-  query: queryText,
-  object,
-  fields,
-  withUserMode,
-  securityMode: withUserMode
-    ? "USER_MODE"
-    : "NO_USER_MODE",
-};
+  return {
+    fromName,
+    fields,
+    subqueries,
+  };
 }
 
-function extractFields(
-  selectClause: string
+function unwrapSubquery(
+  value: string
+): string | undefined {
+  const trimmed =
+    value.trim();
+
+  if (
+    !trimmed.startsWith("(") ||
+    !trimmed.endsWith(")")
+  ) {
+    return undefined;
+  }
+
+  if (
+    !isMatchingOuterParentheses(
+      trimmed
+    )
+  ) {
+    return undefined;
+  }
+
+  const inner =
+    trimmed
+      .slice(1, -1)
+      .trim();
+
+  if (
+    !/^SELECT\b/i.test(
+      inner
+    )
+  ) {
+    return undefined;
+  }
+
+  return inner;
+}
+
+function isMatchingOuterParentheses(
+  value: string
+): boolean {
+  let depth = 0;
+  let inSingleQuote = false;
+
+  for (
+    let index = 0;
+    index < value.length;
+    index++
+  ) {
+    const current =
+      value[index];
+
+    if (inSingleQuote) {
+      if (
+        current === "\\" &&
+        value[index + 1]
+      ) {
+        index++;
+        continue;
+      }
+
+      if (current === "'") {
+        inSingleQuote = false;
+      }
+
+      continue;
+    }
+
+    if (current === "'") {
+      inSingleQuote = true;
+      continue;
+    }
+
+    if (current === "(") {
+      depth++;
+      continue;
+    }
+
+    if (current === ")") {
+      depth--;
+
+      /*
+       * The outer opening parenthesis
+       * closed before the final character.
+       */
+      if (
+        depth === 0 &&
+        index !== value.length - 1
+      ) {
+        return false;
+      }
+    }
+  }
+
+  return depth === 0;
+}
+
+function findKeywordAtTopLevel(
+  value: string,
+  keyword: string,
+  startIndex: number
+): number {
+  let depth = 0;
+  let inSingleQuote = false;
+
+  for (
+    let index = startIndex;
+    index < value.length;
+    index++
+  ) {
+    const current =
+      value[index];
+
+    if (inSingleQuote) {
+      if (
+        current === "\\" &&
+        value[index + 1]
+      ) {
+        index++;
+        continue;
+      }
+
+      if (current === "'") {
+        inSingleQuote = false;
+      }
+
+      continue;
+    }
+
+    if (current === "'") {
+      inSingleQuote = true;
+      continue;
+    }
+
+    if (current === "(") {
+      depth++;
+      continue;
+    }
+
+    if (current === ")") {
+      depth--;
+      continue;
+    }
+
+    if (depth !== 0) {
+      continue;
+    }
+
+    if (
+      value
+        .slice(
+          index,
+          index + keyword.length
+        )
+        .toUpperCase() !==
+      keyword.toUpperCase()
+    ) {
+      continue;
+    }
+
+    const previous =
+      index === 0
+        ? " "
+        : value[index - 1];
+
+    const next =
+      index + keyword.length >=
+      value.length
+        ? " "
+        : value[
+            index + keyword.length
+          ];
+
+    if (
+      isWordBoundary(previous) &&
+      isWordBoundary(next)
+    ) {
+      return index;
+    }
+  }
+
+  return -1;
+}
+
+function isWordBoundary(
+  value: string
+): boolean {
+  return !/[A-Za-z0-9_]/.test(
+    value
+  );
+}
+
+function splitTopLevelCommaSeparated(
+  value: string
 ): string[] {
-  const fields: string[] = [];
+  const values: string[] = [];
 
   let current = "";
   let depth = 0;
@@ -477,81 +817,91 @@ function extractFields(
 
   for (
     let index = 0;
-    index < selectClause.length;
+    index < value.length;
     index++
   ) {
     const currentChar =
-      selectClause[index];
+      value[index];
+
+    if (inSingleQuote) {
+      current += currentChar;
+
+      if (
+        currentChar === "\\" &&
+        value[index + 1]
+      ) {
+        current +=
+          value[index + 1];
+
+        index++;
+        continue;
+      }
+
+      if (currentChar === "'") {
+        inSingleQuote = false;
+      }
+
+      continue;
+    }
 
     if (currentChar === "'") {
-      inSingleQuote = !inSingleQuote;
+      inSingleQuote = true;
       current += currentChar;
       continue;
     }
 
-    if (!inSingleQuote) {
-      if (currentChar === "(") {
-        depth++;
-      }
+    if (currentChar === "(") {
+      depth++;
+      current += currentChar;
+      continue;
+    }
 
-      if (currentChar === ")") {
-        depth--;
-      }
+    if (currentChar === ")") {
+      depth--;
+      current += currentChar;
+      continue;
+    }
 
-      if (
-        currentChar === "," &&
-        depth === 0
-      ) {
-        addField(
-          fields,
-          current
-        );
+    if (
+      currentChar === "," &&
+      depth === 0
+    ) {
+      values.push(
+        current.trim()
+      );
 
-        current = "";
-        continue;
-      }
+      current = "";
+      continue;
     }
 
     current += currentChar;
   }
 
-  addField(fields, current);
+  if (current.trim()) {
+    values.push(
+      current.trim()
+    );
+  }
 
-  return fields;
+  return values;
 }
 
 function addField(
   fields: string[],
   value: string
 ): void {
-  let field = value
-    .trim()
-    .replace(/\s+/g, " ");
+  let field =
+    value
+      .trim()
+      .replace(/\s+/g, " ");
 
   if (!field) {
     return;
   }
 
-  // Ignore subquery blocks for now.
-  if (
-    field.startsWith("(") &&
-    field.toUpperCase().includes("SELECT")
-  ) {
-    return;
-  }
-
-  // --------------------------------------------------
-  // Unwrap SOQL functions such as:
-  //
-  // FORMAT(SomeDate__c)
-  // COUNT(Id)
-  // MAX(LastModifiedDate)
-  //
-  // Aggregate functions are ignored entirely.
-  // Non-aggregate functions expose their inner
-  // field for FLS analysis.
-  // --------------------------------------------------
-
+  /*
+   * Unwrap supported SOQL functions.
+   */
   const functionMatch =
     field.match(
       /^([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*(.+?)\s*\)$/s
@@ -581,9 +931,6 @@ function addField(
       return;
     }
 
-    // FORMAT(field), DISTANCE(...), etc.
-    // For FORMAT specifically, the inner
-    // field is what needs FLS checking.
     if (
       functionName === "FORMAT"
     ) {
@@ -600,10 +947,9 @@ function addField(
     }
   }
 
-  // --------------------------------------------------
-  // Remove simple SOQL aliases
-  // --------------------------------------------------
-
+  /*
+   * Remove simple aliases.
+   */
   const aliasMatch =
     field.match(
       /^(.+?)\s+([A-Za-z_][A-Za-z0-9_]*)$/i

@@ -10,14 +10,48 @@ const parser = new XMLParser({
   ignoreAttributes: true,
 });
 
-interface RelationshipMetadata {
+export interface RelationshipMetadata {
   relationshipName: string;
   sourceField: string;
+
+  // The object on which the lookup/master-detail
+  // field actually exists.
+  childObject: string;
+
+  // The parent object(s) referenced by the field.
   targetObjects: string[];
 }
 
+/*
+ * Parent Object
+ *   ->
+ * Child Relationship Name
+ *   ->
+ * Relationship Metadata
+ *
+ * Example metadata on Contact:
+ *
+ * <referenceTo>Client_Customer__c</referenceTo>
+ * <relationshipName>Contacts</relationshipName>
+ *
+ * Produces:
+ *
+ * Client_Customer__c
+ *   ->
+ * Contacts
+ *   ->
+ * {
+ *   relationshipName: "Contacts",
+ *   sourceField: "Client_Customer__c",
+ *   childObject: "Contact",
+ *   targetObjects: ["Client_Customer__c"]
+ * }
+ */
 export type RelationshipMap =
-  Map<string, Map<string, RelationshipMetadata>>;
+  Map<
+    string,
+    Map<string, RelationshipMetadata>
+  >;
 
 export async function buildRelationshipMap(
   objectsDirectory: string
@@ -35,12 +69,12 @@ export async function buildRelationshipMap(
       continue;
     }
 
-    const objectName =
+    const childObject =
       objectEntry.name;
 
     const fieldsDirectory = path.join(
       objectsDirectory,
-      objectName,
+      childObject,
       "fields"
     );
 
@@ -54,12 +88,6 @@ export async function buildRelationshipMap(
     } catch {
       continue;
     }
-
-    const objectRelationships =
-      new Map<
-        string,
-        RelationshipMetadata
-      >();
 
     for (const fieldEntry of fieldEntries) {
       if (
@@ -110,26 +138,57 @@ export async function buildRelationshipMap(
       }
 
       const sourceField =
-        path
-          .basename(
-            fieldEntry.name,
-            ".field-meta.xml"
+        path.basename(
+          fieldEntry.name,
+          ".field-meta.xml"
+        );
+
+      /*
+       * The field exists on childObject.
+       *
+       * Example:
+       *
+       * Contact.Client_Customer__c
+       *   referenceTo       = Client_Customer__c
+       *   relationshipName = Contacts
+       *
+       * Therefore a nested query from
+       * Client_Customer__c using FROM Contacts
+       * resolves to Contact.
+       *
+       * So the map must be built in this direction:
+       *
+       * Parent Object + Relationship Name
+       *   -> Child Object
+       */
+      for (const parentObject of referenceTo) {
+        if (
+          !relationshipMap.has(
+            parentObject
+          )
+        ) {
+          relationshipMap.set(
+            parentObject,
+            new Map()
           );
-
-      objectRelationships.set(
-        relationshipName,
-        {
-          relationshipName,
-          sourceField,
-          targetObjects: referenceTo,
         }
-      );
-    }
 
-    relationshipMap.set(
-      objectName,
-      objectRelationships
-    );
+        const parentRelationships =
+          relationshipMap.get(
+            parentObject
+          )!;
+
+        parentRelationships.set(
+          relationshipName,
+          {
+            relationshipName,
+            sourceField,
+            childObject,
+            targetObjects: referenceTo,
+          }
+        );
+      }
+    }
   }
 
   return relationshipMap;
@@ -162,7 +221,8 @@ function normalizeStringArray(
   }
 
   if (typeof value === "string") {
-    const normalized = value.trim();
+    const normalized =
+      value.trim();
 
     return normalized
       ? [normalized]
