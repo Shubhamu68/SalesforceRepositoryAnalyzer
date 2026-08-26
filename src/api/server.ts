@@ -7,6 +7,8 @@ import { PersonaPermissionResolver } from "../analyzer/PersonaPermissionResolver
 import { PersonaAccessService } from "../services/PersonaAccessService.js";
 import { PersonaFieldAccessService } from "../services/PersonaFieldAccessService.js";
 import { AccessQueryService } from "../services/AccessQueryService.js";
+import { SoqlAnalysisService } from "../services/SoqlAnalysisService.js";
+import { SoqlSecurityAnalyzer } from "../analyzer/soqlSecurityAnalyzer.js";
 import { createMetadataRouter } from "./metadataRoutes.js";
 
 const app = express();
@@ -14,10 +16,6 @@ const app = express();
 app.use(express.json());
 
 const PORT = 3000;
-
-// --------------------------------------------------
-// Repository configuration
-// --------------------------------------------------
 
 const repositoryPath =
   process.env.SALESFORCE_REPOSITORY_PATH;
@@ -28,14 +26,16 @@ if (!repositoryPath) {
   );
 }
 
-const paths = await scanRepository(repositoryPath);
+const outputDirectory =
+  "C:\\Users\\703394232\\Desktop\\SalesforceAnalyzerOutputReports";
+
+const paths =
+  await scanRepository(repositoryPath);
+
 app.use(
   "/api",
   createMetadataRouter(paths.defaultPath)
 );
-// --------------------------------------------------
-// Services
-// --------------------------------------------------
 
 const personaConfigLoader =
   new PersonaConfigLoader(
@@ -65,25 +65,39 @@ const accessQueryService =
     personaFieldAccessService
   );
 
+const soqlSecurityAnalyzer =
+  new SoqlSecurityAnalyzer(
+    personaPermissionResolver,
+    path.join(
+      paths.defaultPath,
+      "objects"
+    )
+  );
+
+const soqlAnalysisService =
+  new SoqlAnalysisService(
+    repositoryPath,
+    soqlSecurityAnalyzer,
+    outputDirectory
+  );
+
 // --------------------------------------------------
 // Personas
 // --------------------------------------------------
 
-app.get("/api/personas", async (_req, res) => {
-  try {
-    const personas =
-      await personaConfigLoader.getAllPersonas();
+app.get(
+  "/api/personas",
+  async (_req, res) => {
+    try {
+      const personas =
+        await personaConfigLoader.getAllPersonas();
 
-    res.json(personas);
-  } catch (error) {
-    res.status(500).json({
-      error:
-        error instanceof Error
-          ? error.message
-          : String(error),
-    });
+      res.json(personas);
+    } catch (error) {
+      handleApiError(error, res);
+    }
   }
-});
+);
 
 // --------------------------------------------------
 // Object access
@@ -114,12 +128,7 @@ app.get(
 
       res.json(result);
     } catch (error) {
-      res.status(500).json({
-        error:
-          error instanceof Error
-            ? error.message
-            : String(error),
-      });
+      handleApiError(error, res);
     }
   }
 );
@@ -144,22 +153,51 @@ app.get(
           req.params.fieldName
         );
 
-      if (!result) {
-        res.status(404).json({
-          error: "Field not found",
+      res.json(result);
+    } catch (error) {
+      handleApiError(error, res);
+    }
+  }
+);
+
+// --------------------------------------------------
+// SOQL security analysis
+// --------------------------------------------------
+
+app.post(
+  "/api/soql-analysis",
+  async (req, res) => {
+    try {
+      const personaName =
+        typeof req.body?.personaName === "string"
+          ? req.body.personaName.trim()
+          : "";
+
+      if (!personaName) {
+        res.status(400).json({
+          error: "personaName is required",
         });
 
         return;
       }
 
-      res.json(result);
-    } catch (error) {
-      res.status(500).json({
-        error:
-          error instanceof Error
-            ? error.message
-            : String(error),
+      const persona =
+        await personaConfigLoader.getPersona(
+          personaName
+        );
+
+      const result =
+        await soqlAnalysisService.analyze(
+          persona
+        );
+
+      res.json({
+        personaName: result.personaName,
+        summary: result.summary,
+        outputFolder: outputDirectory,
       });
+    } catch (error) {
+      handleApiError(error, res);
     }
   }
 );
@@ -168,11 +206,42 @@ app.get(
 // Health check
 // --------------------------------------------------
 
-app.get("/api/health", (_req, res) => {
-  res.json({
-    status: "ok",
+app.get(
+  "/api/health",
+  (_req, res) => {
+    res.json({
+      status: "ok",
+      repositoryName:
+        path.basename(repositoryPath),
+    });
+  }
+);
+
+function handleApiError(
+  error: unknown,
+  res: express.Response
+): void {
+  const message =
+    error instanceof Error
+      ? error.message
+      : String(error);
+
+  if (
+    message.startsWith(
+      "Persona not found:"
+    )
+  ) {
+    res.status(404).json({
+      error: message,
+    });
+
+    return;
+  }
+
+  res.status(500).json({
+    error: message,
   });
-});
+}
 
 app.listen(PORT, () => {
   console.log(

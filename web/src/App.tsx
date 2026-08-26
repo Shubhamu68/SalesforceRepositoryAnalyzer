@@ -31,7 +31,21 @@ type FieldAccessResult = {
   mutedBy: string[];
 };
 
-type CheckType = "object" | "field";
+type SoqlAnalysisResult = {
+  personaName: string;
+  summary: {
+    queriesAnalyzed: number;
+    totalFindings: number;
+    errors: number;
+    reviews: number;
+    affectedApexClasses: number;
+    userModeQueries: number;
+    noUserModeQueries: number;
+  };
+  outputFolder: string;
+};
+
+type CheckType = "object" | "field" | "soql";
 
 function App() {
   const [personas, setPersonas] = useState<Persona[]>([]);
@@ -63,7 +77,10 @@ function App() {
     useState(false);
 
   const [result, setResult] = useState<
-    ObjectAccessResult | FieldAccessResult | null
+    | ObjectAccessResult
+    | FieldAccessResult
+    | SoqlAnalysisResult
+    | null
   >(null);
 
   const [error, setError] = useState("");
@@ -221,7 +238,10 @@ function App() {
       return;
     }
 
-    if (!objectName.trim()) {
+    if (
+      checkType !== "soql" &&
+      !objectName.trim()
+    ) {
       setError("Please select an object.");
       return;
     }
@@ -237,37 +257,70 @@ function App() {
     setChecking(true);
 
     try {
-      const encodedPersona =
-        encodeURIComponent(selectedPersona);
+      let response: Response;
 
-      const encodedObject =
-        encodeURIComponent(objectName.trim());
+      if (checkType === "soql") {
+        response = await fetch(
+          "/api/soql-analysis",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type":
+                "application/json",
+            },
+            body: JSON.stringify({
+              personaName:
+                selectedPersona,
+            }),
+          }
+        );
+      } else {
+        const encodedPersona =
+          encodeURIComponent(
+            selectedPersona
+          );
 
-      let url =
-        `/api/personas/${encodedPersona}/objects/${encodedObject}`;
+        const encodedObject =
+          encodeURIComponent(
+            objectName.trim()
+          );
 
-      if (checkType === "field") {
-        const encodedField =
-          encodeURIComponent(fieldName.trim());
+        let url =
+          `/api/personas/${encodedPersona}/objects/${encodedObject}`;
 
-        url += `/fields/${encodedField}`;
+        if (checkType === "field") {
+          const encodedField =
+            encodeURIComponent(
+              fieldName.trim()
+            );
+
+          url += `/fields/${encodedField}`;
+        }
+
+        response = await fetch(url);
       }
-
-      const response = await fetch(url);
 
       if (response.status === 404) {
         setError(
           checkType === "object"
             ? "Object not found."
-            : "Field not found."
+            : checkType === "field"
+              ? "Field not found."
+              : "Persona not found."
         );
 
         return;
       }
 
       if (!response.ok) {
+        const body =
+          await response.json().catch(
+            () => null
+          );
+
         throw new Error(
-          "Unable to perform the access check."
+          body?.error ??
+            "Unable to perform the check."
         );
       }
 
@@ -481,6 +534,79 @@ function App() {
     );
   }
 
+  function renderSoqlResult(
+    analysis: SoqlAnalysisResult
+  ) {
+    const summaryItems = [
+      [
+        "Queries Analysed",
+        analysis.summary.queriesAnalyzed,
+      ],
+      [
+        "Errors",
+        analysis.summary.errors,
+      ],
+      [
+        "Reviews",
+        analysis.summary.reviews,
+      ],
+      [
+        "Affected Classes",
+        analysis.summary.affectedApexClasses,
+      ],
+      [
+        "USER_MODE",
+        analysis.summary.userModeQueries,
+      ],
+      [
+        "No USER_MODE",
+        analysis.summary.noUserModeQueries,
+      ],
+    ];
+
+    return (
+      <div className="result-card">
+        <div className="result-header">
+          <span className="result-type">
+            SOQL ANALYSIS
+          </span>
+
+          <h2>{analysis.personaName}</h2>
+        </div>
+
+        <div className="permission-grid">
+          {summaryItems.map(
+            ([label, value]) => (
+              <div
+                className="permission-row"
+                key={String(label)}
+              >
+                <span>{label}</span>
+                <strong>{value}</strong>
+              </div>
+            )
+          )}
+        </div>
+
+        <div className="source-section">
+          <h3>Analysis completed</h3>
+
+          <p className="muted">
+            The TXT reports and Excel summary were
+            generated successfully.
+          </p>
+
+          <div className="source-item">
+            <strong>Output folder</strong>
+            <span>
+              {analysis.outputFolder}
+            </span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="app-shell">
       <header className="app-header">
@@ -551,8 +677,8 @@ function App() {
               <h2>What do you want to check?</h2>
 
               <p>
-                Choose object-level or
-                field-level access.
+                Choose object access, field access,
+                or repository-wide SOQL analysis.
               </p>
             </div>
           </div>
@@ -591,6 +717,24 @@ function App() {
 
               <span>Field</span>
             </label>
+
+            <label className="radio-option">
+              <input
+                type="radio"
+                checked={
+                  checkType === "soql"
+                }
+                onChange={() => {
+                  setCheckType("soql");
+                  setResult(null);
+                  setError("");
+                }}
+              />
+
+              <span>
+                SOQL Security Analysis
+              </span>
+            </label>
           </div>
         </section>
 
@@ -607,6 +751,13 @@ function App() {
             </div>
           </div>
 
+          {checkType === "soql" ? (
+            <p className="muted">
+              Scan all Apex SOQL queries against
+              the selected persona.
+            </p>
+          ) : (
+            <>
           <label className="field-label">
             Object Name
 
@@ -785,14 +936,21 @@ function App() {
             </label>
           )}
 
+            </>
+          )}
+
           <button
             className="check-button"
             onClick={handleCheck}
             disabled={checking}
           >
             {checking
-              ? "Checking..."
-              : "Check Access"}
+              ? checkType === "soql"
+                ? "Analysing..."
+                : "Checking..."
+              : checkType === "soql"
+                ? "Run SOQL Analysis"
+                : "Check Access"}
           </button>
         </section>
 
@@ -814,9 +972,13 @@ function App() {
               ? renderObjectResult(
                   result as ObjectAccessResult
                 )
-              : renderFieldResult(
-                  result as FieldAccessResult
-                )}
+              : checkType === "field"
+                ? renderFieldResult(
+                    result as FieldAccessResult
+                  )
+                : renderSoqlResult(
+                    result as SoqlAnalysisResult
+                  )}
           </section>
         )}
       </main>
