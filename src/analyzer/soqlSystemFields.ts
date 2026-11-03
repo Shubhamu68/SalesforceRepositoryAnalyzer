@@ -47,3 +47,21 @@ export function isIgnoredField(
 
   return false;
 }
+
+// Standard Account address fields excluded from SOQL FLS analysis.
+const EXCLUDED_OBJECT_FIELDS = new Set([
+  "account.billingcity",
+  "account.billingcountry",
+  "account.billingpostalcode",
+  "account.billingstate",
+  "account.billingstreet",
+]);
+
+export function isExcludedObjectField(
+  objectName: string,
+  fieldName: string
+): boolean {
+  return EXCLUDED_OBJECT_FIELDS.has(
+    `${objectName.trim()}.${fieldName.trim()}`.toLowerCase()
+  );
+}
