@@ -10,6 +10,7 @@ import { AccessQueryService } from "../services/AccessQueryService.js";
 import { SoqlAnalysisService } from "../services/SoqlAnalysisService.js";
 import { SoqlSecurityAnalyzer } from "../analyzer/soqlSecurityAnalyzer.js";
 import { createMetadataRouter } from "./metadataRoutes.js";
+import { ObjectAccessMatrixService } from "../services/ObjectAccessMatrixService.js";
 
 const app = express();
 
@@ -81,6 +82,12 @@ const soqlAnalysisService =
     outputDirectory
   );
 
+const objectAccessMatrixService = new ObjectAccessMatrixService(
+  personaConfigLoader,
+  personaPermissionResolver,
+  paths.mutingPermissionSetsPath
+);
+
 // --------------------------------------------------
 // Personas
 // --------------------------------------------------
@@ -98,6 +105,24 @@ app.get(
     }
   }
 );
+
+// --------------------------------------------------
+// Object Access Matrix: all configured personas for one object
+// --------------------------------------------------
+
+app.get("/api/objects/:objectName/persona-access", async (req, res) => {
+  try {
+    const result = await objectAccessMatrixService.analyze(req.params.objectName);
+    res.json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.startsWith("Invalid object API name")) {
+      res.status(400).json({ error: message });
+      return;
+    }
+    handleApiError(error, res);
+  }
+});
 
 // --------------------------------------------------
 // Object access

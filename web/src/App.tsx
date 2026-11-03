@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import "./App.css";
+import ObjectAccessMatrix from "./components/ObjectAccessMatrix";
 
 type Persona = {
   name: string;
@@ -46,6 +47,7 @@ type SoqlAnalysisResult = {
 };
 
 type CheckType = "object" | "field" | "soql";
+type Page = "dashboard" | "access" | "soql" | "matrix" | "reports";
 
 function App() {
   const [personas, setPersonas] = useState<Persona[]>([]);
@@ -95,7 +97,7 @@ function App() {
     useState(false);
 
   const [checking, setChecking] = useState(false);
-  const [page, setPage] = useState<"dashboard" | "access" | "soql" | "reports">("dashboard");
+  const [page, setPage] = useState<Page>("dashboard");
   const [repositoryName, setRepositoryName] = useState<string>("");
   const [apiConnected, setApiConnected] = useState(false);
   const [lastSoql, setLastSoql] = useState<SoqlAnalysisResult | null>(null);
@@ -114,7 +116,7 @@ function App() {
       .catch(() => setApiConnected(false));
   }, []);
 
-  function navigate(next: "dashboard" | "access" | "soql" | "reports") {
+  function navigate(next: Page) {
     setPage(next);
     setError("");
     if (next === "soql") {
@@ -807,7 +809,7 @@ function App() {
           <button className={page === "dashboard" ? "active" : ""} onClick={() => navigate("dashboard")}><span className="nav-symbol">▦</span>Dashboard</button>
           <button className={page === "access" ? "active" : ""} onClick={() => navigate("access")}><span className="nav-symbol">◇</span>Access Checker</button>
           <button className={page === "soql" ? "active" : ""} onClick={() => navigate("soql")}><span className="nav-symbol">◎</span>SOQL Security Analysis</button>
-          <button className="upcoming" disabled title="Planned next feature"><span className="nav-symbol">▤</span>Object Access Matrix<span className="new-label">Soon</span></button>
+          <button className={page === "matrix" ? "active" : ""} onClick={() => navigate("matrix")}><span className="nav-symbol">▤</span>Object Access Matrix</button>
           <button className={page === "reports" ? "active" : ""} onClick={() => navigate("reports")}><span className="nav-symbol">▧</span>Reports</button>
         </nav>
         <div className="sidebar-bottom">
@@ -820,8 +822,8 @@ function App() {
         <div className="page-heading">
           <div>
             <div className="breadcrumb">WORKSPACE / {page.toUpperCase()}</div>
-            <h1>{page === "dashboard" ? "Security overview" : page === "access" ? "Access Checker" : page === "soql" ? "SOQL Security Analysis" : "Generated reports"}</h1>
-            <p>{page === "dashboard" ? "Explore persona access and SOQL security across your Salesforce repository." : page === "access" ? "Inspect effective object and field permissions for a selected persona." : page === "soql" ? "Scan Apex queries for persona-specific security findings." : "Review where the latest generated analysis reports are saved."}</p>
+            <h1>{page === "dashboard" ? "Security overview" : page === "access" ? "Access Checker" : page === "soql" ? "SOQL Security Analysis" : page === "matrix" ? "Object Access Matrix" : "Generated reports"}</h1>
+            <p>{page === "dashboard" ? "Explore persona access and SOQL security across your Salesforce repository." : page === "access" ? "Inspect effective object and field permissions for a selected persona." : page === "soql" ? "Scan Apex queries for persona-specific security findings." : page === "matrix" ? "Compare effective object permissions across all configured personas." : "Review where the latest generated analysis reports are saved."}</p>
           </div>
           {page === "dashboard" && <button className="primary-button" onClick={() => navigate("soql")}>▷  Run SOQL Analysis</button>}
         </div>
@@ -850,6 +852,8 @@ function App() {
             )}
           </>
         )}
+
+        {page === "matrix" && <ObjectAccessMatrix objects={objects} loadingObjects={loadingObjects} />}
 
         {page === "reports" && <section className="panel reports-panel"><div className="panel-heading"><div><h2>Latest SOQL analysis reports</h2><p>Files are written by the backend, not downloaded by the browser.</p></div></div>{lastSoql ? <><div className="detail-line"><span>Persona</span><strong>{lastSoql.personaName}</strong></div><div className="detail-line"><span>Report folder</span><strong className="path-text">{lastSoql.outputFolder}</strong></div><div className="detail-line"><span>Findings</span><strong>{lastSoql.summary.totalFindings}</strong></div><button className="secondary-button" onClick={() => navigator.clipboard.writeText(lastSoql.outputFolder)}>Copy folder path</button></> : <div className="empty-reports"><span>▧</span><h3>No reports from this session</h3><p>Run SOQL Security Analysis to generate TXT and Excel reports.</p><button className="primary-button" onClick={() => navigate("soql")}>Run SOQL Analysis</button></div>}</section>}
       </main>

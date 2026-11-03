@@ -4,5 +4,6 @@ export interface PermissionSetGroup {
   name: string;
   label: string;
   permissionSetNames: string[];
+  mutingPermissionSetNames: string[];
   permissionSets: PermissionSet[];
 }
