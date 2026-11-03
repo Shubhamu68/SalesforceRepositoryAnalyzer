@@ -23,6 +23,10 @@ export async function parsePermissionSetGroup(
     group.permissionSets
   ).map(String);
 
+  const mutingPermissionSetNames = normalizeArray(
+    group.mutingPermissionSets
+  ).map(String);
+
   const permissionSets: PermissionSet[] = [];
 
   for (const permissionSetName of permissionSetNames) {
@@ -51,6 +55,7 @@ export async function parsePermissionSetGroup(
         .replace(".permissionsetgroup-meta.xml", ""),
     label: group.label ?? "",
     permissionSetNames,
+    mutingPermissionSetNames,
     permissionSets,
   };
 }

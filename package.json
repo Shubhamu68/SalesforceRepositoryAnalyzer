@@ -9,7 +9,8 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "analyze": "tsx src/index.ts",
-    "api": "tsx src/api/server.ts"
+    "api": "tsx src/api/server.ts",
+    "test:matrix": "tsx --test tests/objectAccessMatrix.test.ts"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
