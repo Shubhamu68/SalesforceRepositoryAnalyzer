@@ -10,7 +10,8 @@
     "start": "node dist/index.js",
     "analyze": "tsx src/index.ts",
     "api": "tsx src/api/server.ts",
-    "test:matrix": "tsx --test tests/objectAccessMatrix.test.ts"
+    "test:matrix": "tsx --test tests/objectAccessMatrix.test.ts",
+    "test:stack": "tsx --test tests/stackTraceImpact.test.ts"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",

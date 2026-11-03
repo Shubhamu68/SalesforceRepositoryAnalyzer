@@ -11,6 +11,7 @@ import { SoqlAnalysisService } from "../services/SoqlAnalysisService.js";
 import { SoqlSecurityAnalyzer } from "../analyzer/soqlSecurityAnalyzer.js";
 import { createMetadataRouter } from "./metadataRoutes.js";
 import { ObjectAccessMatrixService } from "../services/ObjectAccessMatrixService.js";
+import { StackTraceImpactService } from "../services/StackTraceImpactService.js";
 
 const app = express();
 
@@ -87,6 +88,32 @@ const objectAccessMatrixService = new ObjectAccessMatrixService(
   personaPermissionResolver,
   paths.mutingPermissionSetsPath
 );
+
+const stackTraceImpactService = new StackTraceImpactService(
+  repositoryPath,
+  path.join(paths.defaultPath, "objects"),
+  personaConfigLoader,
+  personaPermissionResolver,
+  paths.mutingPermissionSetsPath
+);
+
+// --------------------------------------------------
+// Stack trace to recursive SOQL persona impact
+// --------------------------------------------------
+app.post("/api/stack-trace-impact", async (req, res) => {
+  try {
+    const stackTrace = typeof req.body?.stackTrace === "string" ? req.body.stackTrace : "";
+    const result = await stackTraceImpactService.analyze(stackTrace);
+    res.json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.startsWith("Enter an Apex stack trace") || message.startsWith("No Apex Class frames") || message.startsWith("No unique Apex method")) {
+      res.status(400).json({ error: message });
+      return;
+    }
+    handleApiError(error, res);
+  }
+});
 
 // --------------------------------------------------
 // Personas

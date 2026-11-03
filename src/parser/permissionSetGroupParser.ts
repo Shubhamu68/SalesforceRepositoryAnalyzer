@@ -1,10 +1,11 @@
 import { XMLParser } from "fast-xml-parser";
-import { readFile } from "node:fs/promises";
+import { readFile, access } from "node:fs/promises";
 import path from "node:path";
 
 import { PermissionSet } from "../models/PermissionSet.js";
 import { PermissionSetGroup } from "../models/PermissionSetGroup.js";
 import { parsePermissionSet } from "./permissionSetParser.js";
+import { isKnownSalesforcePermissionSet } from "../config/knownSalesforcePermissionSets.js";
 
 const parser = new XMLParser({
   ignoreAttributes: true,
@@ -42,6 +43,13 @@ export async function parsePermissionSetGroup(
 
       permissionSets.push(permissionSet);
     } catch {
+      if (isKnownSalesforcePermissionSet(permissionSetName)) {
+        try {
+          await access(permissionSetFilePath);
+        } catch {
+          continue; // Salesforce-owned metadata is unavailable in this repository.
+        }
+      }
       console.warn(
         `Could not find or parse Permission Set: ${permissionSetName}`
       );

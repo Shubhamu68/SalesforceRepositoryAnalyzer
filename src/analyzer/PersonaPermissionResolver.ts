@@ -1,4 +1,6 @@
 import path from "node:path";
+import { access } from "node:fs/promises";
+import { isKnownSalesforcePermissionSet } from "../config/knownSalesforcePermissionSets.js";
 
 import { Persona } from "../models/Persona.js";
 import { PermissionSet } from "../models/PermissionSet.js";
@@ -119,6 +121,13 @@ export class PersonaPermissionResolver {
 
         permissionSets.push(permissionSet);
       } catch {
+        if (isKnownSalesforcePermissionSet(permissionSetName)) {
+          try {
+            await access(filePath);
+          } catch {
+            continue; // Known Salesforce-owned Permission Set not supplied in SFDX metadata.
+          }
+        }
         console.warn(
           `Could not find or parse Permission Set: ${permissionSetName}`
         );

@@ -113,7 +113,7 @@ async function walkDirectory(
   }
 }
 
-function extractSoqlQueries(
+export function extractSoqlQueries(
   source: string,
   filePath: string
 ): SoqlQuery[] {
