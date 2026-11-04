@@ -15,6 +15,7 @@ interface Snapshot {
 }
 
 let cached: Map<string, boolean> | undefined;
+let cachedNamedFields: Map<string, string[]> | undefined;
 
 function snapshotPath(): string {
   const configured = process.env.FIELD_PERMISSIONABILITY_SNAPSHOT_PATH?.trim();
@@ -41,6 +42,7 @@ function load(): Map<string, boolean> {
     throw new Error(`Invalid field permissionability snapshot format: ${filePath}`);
   }
   const entries = new Map<string, boolean>();
+  const namedFields = new Map<string, string[]>();
   for (const [objectName, fields] of Object.entries((parsed as Snapshot).objects)) {
     if (!objectName || !fields || typeof fields !== "object" || Array.isArray(fields)) {
       throw new Error(`Invalid object metadata in ${filePath}: ${objectName}`);
@@ -52,8 +54,12 @@ function load(): Map<string, boolean> {
       const key = `${objectName}.${fieldName}`.toLowerCase();
       if (entries.has(key)) throw new Error(`Duplicate field in ${filePath}: ${objectName}.${fieldName}`);
       entries.set(key, permissionable);
+      const objectFields = namedFields.get(objectName) ?? [];
+      objectFields.push(fieldName);
+      namedFields.set(objectName, objectFields);
     }
   }
+  cachedNamedFields = namedFields;
   cached = entries;
   return entries;
 }
@@ -61,4 +67,10 @@ function load(): Map<string, boolean> {
 export function getFieldPermissionability(objectName: string, fieldName: string): FieldPermissionability {
   if (!objectName.trim() || !fieldName.trim()) return undefined;
   return load().get(`${objectName.trim()}.${fieldName.trim()}`.toLowerCase());
+}
+
+/** Field names available in the existing org snapshot, for conservative relationship inference. */
+export function listPermissionabilitySnapshotFields(): Map<string, string[]> {
+  load();
+  return new Map([...cachedNamedFields!].map(([name, fields]) => [name, [...fields]]));
 }

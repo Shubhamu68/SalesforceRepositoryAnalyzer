@@ -14,6 +14,7 @@ export class PersonaFieldAccessService {
       read: field.readable,
       edit: field.editable,
       permissionable: field.permissionable,
+      schemaRequired: field.schemaRequired,
       readGrantedBy: field.readGrantedBy,
       editGrantedBy: field.editGrantedBy,
       mutedBy: field.mutedBy,

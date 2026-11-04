@@ -9,6 +9,8 @@ export interface EffectiveFieldPermission {
   editable: boolean;
   /** Salesforce EntityParticle.IsPermissionable; undefined if not in snapshot. */
   permissionable?: boolean;
+  /** CustomField.required from the repository field-definition XML. */
+  schemaRequired?: boolean;
 
   readGrantedBy: PermissionSource[];
   editGrantedBy: PermissionSource[];

@@ -30,6 +30,7 @@ type FieldAccessResult = {
   read: boolean;
   edit: boolean;
   permissionable?: boolean;
+  schemaRequired?: boolean;
   readGrantedBy: PermissionSource[];
   editGrantedBy: PermissionSource[];
   mutedBy: string[];
@@ -488,7 +489,13 @@ function App() {
         <div className="source-section">
           <h3>Read granted by</h3>
 
-          {access.permissionable === false && access.read && (
+          {access.schemaRequired && (
+            <p className="muted">
+              This field is universally required in Salesforce field metadata.
+              No separate Profile or Permission Set FLS grant is expected; object access is still required.
+            </p>
+          )}
+          {access.permissionable === false && !access.schemaRequired && access.read && (
             <p className="muted">
               Salesforce metadata marks this field as non-permissionable.
               Its Read access follows object Read; an individual FLS grant is not required.
@@ -496,7 +503,9 @@ function App() {
           )}
           {access.readGrantedBy.length === 0 ? (
             <p className="muted">
-              {access.permissionable === false
+              {access.schemaRequired
+                ? "Read follows object Read (universally required field)."
+                : access.permissionable === false
                 ? "No explicit field Read grant required."
                 : "No direct grant found."}
             </p>
@@ -530,7 +539,9 @@ function App() {
 
           {access.editGrantedBy.length === 0 ? (
             <p className="muted">
-              No direct grant found.
+              {access.schemaRequired && access.edit
+                ? "Edit follows object Edit (universally required field)."
+                : "No direct grant found."}
             </p>
           ) : (
             access.editGrantedBy.map(

@@ -4,6 +4,7 @@ import type { PermissionSetGrant } from "../models/PermissionSetGrant.js";
 import type { PermissionSource } from "./permissionAggregator.js";
 import type { EffectiveFieldPermission } from "./fieldPermissionAggregator.js";
 import { getFieldPermissionability } from "./fieldPermissionability.js";
+import { isSchemaRequiredField } from "./schemaRequiredFields.js";
 import {
   MATRIX_PERMISSION_KEYS,
   type MatrixPermission,
@@ -161,6 +162,7 @@ export function createPersonaAccessEvaluator(
     const objectAccess = evaluateObject(objectName);
     const fieldName = dot < 0 ? "" : fullFieldName.slice(dot + 1);
     const permissionable = getFieldPermissionability(objectName, fieldName);
+    const schemaRequired = isSchemaRequiredField(resolved.metadataObjectsDirectory, objectName, fieldName);
     const readGrantedBy: PermissionSource[] = [];
     const editGrantedBy: PermissionSource[] = [];
     const mutedBy: string[] = [];
@@ -198,11 +200,13 @@ export function createPersonaAccessEvaluator(
     ])).values()];
     const result = {
       field: fullFieldName,
-      // A non-permissionable field needs no separate FLS grant, but it
-      // still requires object Read. Do not infer field Edit from this flag.
-      readable: objectAccess.access.read && (permissionable === false || readGrantedBy.length > 0),
-      editable: objectAccess.access.edit && editGrantedBy.length > 0,
+      // Universally required custom fields cannot have individual FLS entries
+      // in Profile/PS XML. Object permission is still necessary. Required-on-
+      // layout fields are NOT exempt from FLS.
+      readable: objectAccess.access.read && (schemaRequired || permissionable === false || readGrantedBy.length > 0),
+      editable: objectAccess.access.edit && (schemaRequired || editGrantedBy.length > 0),
       permissionable,
+      schemaRequired,
       readGrantedBy: dedupe(readGrantedBy),
       editGrantedBy: dedupe(editGrantedBy),
       mutedBy: [...new Set(mutedBy)],

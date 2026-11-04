@@ -6,6 +6,7 @@ export interface FieldAccessCheckResult {
   read: boolean;
   edit: boolean;
   permissionable?: boolean;
+  schemaRequired?: boolean;
 
   readGrantedBy: PermissionSource[];
   editGrantedBy: PermissionSource[];

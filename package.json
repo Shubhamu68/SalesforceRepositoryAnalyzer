@@ -11,7 +11,8 @@
     "analyze": "tsx src/index.ts",
     "api": "tsx src/api/server.ts",
     "test:matrix": "tsx --test tests/objectAccessMatrix.test.ts",
-    "import:field-metadata": "node scripts/import-field-permissionability.mjs"
+    "import:field-metadata": "node scripts/import-field-permissionability.mjs",
+    "export:relationships": "node scripts/export-relationship-schema.mjs"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
