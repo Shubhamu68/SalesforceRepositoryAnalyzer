@@ -29,6 +29,7 @@ type FieldAccessResult = {
   field: string;
   read: boolean;
   edit: boolean;
+  permissionable?: boolean;
   readGrantedBy: PermissionSource[];
   editGrantedBy: PermissionSource[];
   mutedBy: string[];
@@ -487,9 +488,17 @@ function App() {
         <div className="source-section">
           <h3>Read granted by</h3>
 
+          {access.permissionable === false && access.read && (
+            <p className="muted">
+              Salesforce metadata marks this field as non-permissionable.
+              Its Read access follows object Read; an individual FLS grant is not required.
+            </p>
+          )}
           {access.readGrantedBy.length === 0 ? (
             <p className="muted">
-              No direct grant found.
+              {access.permissionable === false
+                ? "No explicit field Read grant required."
+                : "No direct grant found."}
             </p>
           ) : (
             access.readGrantedBy.map(

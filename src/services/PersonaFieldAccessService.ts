@@ -13,6 +13,7 @@ export class PersonaFieldAccessService {
       field: field.field,
       read: field.readable,
       edit: field.editable,
+      permissionable: field.permissionable,
       readGrantedBy: field.readGrantedBy,
       editGrantedBy: field.editGrantedBy,
       mutedBy: field.mutedBy,

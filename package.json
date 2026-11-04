@@ -10,7 +10,8 @@
     "start": "node dist/index.js",
     "analyze": "tsx src/index.ts",
     "api": "tsx src/api/server.ts",
-    "test:matrix": "tsx --test tests/objectAccessMatrix.test.ts"
+    "test:matrix": "tsx --test tests/objectAccessMatrix.test.ts",
+    "import:field-metadata": "node scripts/import-field-permissionability.mjs"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",

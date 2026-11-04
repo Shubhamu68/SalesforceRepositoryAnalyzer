@@ -3,6 +3,7 @@ import type { PermissionSet } from "../models/PermissionSet.js";
 import type { PermissionSetGrant } from "../models/PermissionSetGrant.js";
 import type { PermissionSource } from "./permissionAggregator.js";
 import type { EffectiveFieldPermission } from "./fieldPermissionAggregator.js";
+import { getFieldPermissionability } from "./fieldPermissionability.js";
 import {
   MATRIX_PERMISSION_KEYS,
   type MatrixPermission,
@@ -158,6 +159,8 @@ export function createPersonaAccessEvaluator(
     const dot = fullFieldName.indexOf(".");
     const objectName = dot < 0 ? "" : fullFieldName.slice(0, dot);
     const objectAccess = evaluateObject(objectName);
+    const fieldName = dot < 0 ? "" : fullFieldName.slice(dot + 1);
+    const permissionable = getFieldPermissionability(objectName, fieldName);
     const readGrantedBy: PermissionSource[] = [];
     const editGrantedBy: PermissionSource[] = [];
     const mutedBy: string[] = [];
@@ -195,8 +198,11 @@ export function createPersonaAccessEvaluator(
     ])).values()];
     const result = {
       field: fullFieldName,
-      readable: objectAccess.access.read && readGrantedBy.length > 0,
+      // A non-permissionable field needs no separate FLS grant, but it
+      // still requires object Read. Do not infer field Edit from this flag.
+      readable: objectAccess.access.read && (permissionable === false || readGrantedBy.length > 0),
       editable: objectAccess.access.edit && editGrantedBy.length > 0,
+      permissionable,
       readGrantedBy: dedupe(readGrantedBy),
       editGrantedBy: dedupe(editGrantedBy),
       mutedBy: [...new Set(mutedBy)],

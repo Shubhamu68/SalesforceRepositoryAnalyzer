@@ -11,7 +11,7 @@ import { PersonaConfigLoader } from "../config/PersonaConfigLoader.js";
 import { PersonaPermissionResolver, type ResolvedPersonaPermissions } from "../analyzer/PersonaPermissionResolver.js";
 import { createPersonaAccessEvaluator } from "../analyzer/personaAccessEvaluator.js";
 import { buildRelationshipMap, type RelationshipMap } from "../analyzer/salesforceRelationshipResolver.js";
-import { isAggregateExpression, isExcludedObjectField, isIgnoredField } from "../analyzer/soqlSystemFields.js";
+import { isAggregateExpression, isIgnoredField } from "../analyzer/soqlSystemFields.js";
 import {
   createApexMethodIndex, parseApexStackTrace, resolveMethodCalls, maskApex, type ApexMethod,
 } from "../scanner/apexMethodScanner.js";
@@ -283,7 +283,7 @@ export function collectQueryFields(query: SoqlQuery, relationships: Relationship
     const resolved = resolveSelectedField(baseObject, candidate, relationships);
     if (!resolved) { unresolved.push(`${baseObject}.${label}`); return; }
     objects.add(resolved.object);
-    if (isIgnoredField(resolved.field) || isExcludedObjectField(resolved.object, resolved.field)) return;
+    if (isIgnoredField(resolved.field, resolved.object)) return;
     fields.set(`${resolved.object}.${resolved.field}`.toLowerCase(), { ...resolved, source: label });
   };
   for (const field of query.fields) add(query.object, field);

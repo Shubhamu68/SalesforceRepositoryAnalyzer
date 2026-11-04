@@ -1,3 +1,5 @@
+import { getFieldPermissionability } from "./fieldPermissionability.js";
+
 export const SOQL_SYSTEM_FIELDS = new Set([
   "id",
   "ownerid",
@@ -30,38 +32,16 @@ export function isAggregateExpression(
 }
 
 export function isIgnoredField(
-  fieldName: string
+  fieldName: string,
+  objectName?: string
 ): boolean {
-  const normalized =
-    fieldName.trim().toLowerCase();
-
-  if (isSystemField(normalized)) {
-    return true;
+  // Snapshot-backed fields are checked centrally by the effective-access
+  // evaluator. In particular, do not skip a field marked permissionable=true.
+  if (objectName && getFieldPermissionability(objectName, fieldName) !== undefined) {
+    return false;
   }
 
-  // Salesforce address compound sub-fields
-  // represented with the __s suffix.
-  if (normalized.endsWith("__s")) {
-    return true;
-  }
-
-  return false;
-}
-
-// Standard Account address fields excluded from SOQL FLS analysis.
-const EXCLUDED_OBJECT_FIELDS = new Set([
-  "account.billingcity",
-  "account.billingcountry",
-  "account.billingpostalcode",
-  "account.billingstate",
-  "account.billingstreet",
-]);
-
-export function isExcludedObjectField(
-  objectName: string,
-  fieldName: string
-): boolean {
-  return EXCLUDED_OBJECT_FIELDS.has(
-    `${objectName.trim()}.${fieldName.trim()}`.toLowerCase()
-  );
+  // Legacy fallback for fields outside the current snapshot.
+  const normalized = fieldName.trim().toLowerCase();
+  return isSystemField(normalized) || normalized.endsWith("__s");
 }

@@ -5,6 +5,7 @@ export interface FieldAccessCheckResult {
 
   read: boolean;
   edit: boolean;
+  permissionable?: boolean;
 
   readGrantedBy: PermissionSource[];
   editGrantedBy: PermissionSource[];
