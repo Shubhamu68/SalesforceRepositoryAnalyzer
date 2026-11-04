@@ -7,6 +7,8 @@ export interface EffectiveFieldPermission {
 
   readable: boolean;
   editable: boolean;
+  /** Salesforce EntityParticle.IsPermissionable; undefined if not in snapshot. */
+  permissionable?: boolean;
 
   readGrantedBy: PermissionSource[];
   editGrantedBy: PermissionSource[];

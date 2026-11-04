@@ -105,6 +105,12 @@ export class PersonaConfigLoader {
         );
       }
 
+      if (item.profile !== undefined && (
+        typeof item.profile !== "string" || item.profile.trim().length === 0
+      )) {
+        throw new Error(`Persona '${item.name}' has an invalid 'profile'. Provide a Profile metadata filename without the .profile-meta.xml extension.`);
+      }
+
       this.validateStringArray(
         item.permissionSetGroups,
         "permissionSetGroups",

@@ -50,7 +50,8 @@ const personaPermissionResolver =
   new PersonaPermissionResolver(
     paths.permissionSetsPath,
     paths.permissionSetGroupsPath,
-    paths.mutingPermissionSetsPath
+    paths.mutingPermissionSetsPath,
+    paths.profilesPath
   );
 
 // --------------------------------------------------

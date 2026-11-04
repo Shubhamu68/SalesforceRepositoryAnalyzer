@@ -15,8 +15,7 @@ import {
 
 import {
   isIgnoredField,
-  isAggregateExpression,
-  isExcludedObjectField
+  isAggregateExpression
 } from "./soqlSystemFields.js";
 
 export function buildSoqlFieldInventory(
@@ -157,8 +156,7 @@ function addFieldsToInventory(
     } = resolved;
 
     if (
-      isIgnoredField(field) ||
-      isExcludedObjectField(object, field)
+      isIgnoredField(field, object)
     ) {
       continue;
     }

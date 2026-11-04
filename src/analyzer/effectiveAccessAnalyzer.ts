@@ -1,166 +1,27 @@
-import { PermissionSet } from "../models/PermissionSet.js";
-import {
-  aggregateObjectPermissions,
-} from "./permissionAggregator.js";
-import {
-  aggregateFieldPermissions,
-} from "./fieldPermissionAggregator.js";
-import { EffectiveObjectAccess } from "../models/EffectiveObjectAccess.js";
-import { PermissionSetGrant } from "../models/PermissionSetGrant.js";
+import type { ResolvedPersonaPermissions } from "./PersonaPermissionResolver.js";
+import { createPersonaAccessEvaluator } from "./personaAccessEvaluator.js";
+import type { EffectiveObjectAccess } from "../models/EffectiveObjectAccess.js";
 
-interface EffectiveAccessInput {
-  permissionSetGrants: PermissionSetGrant[];
-  mutingPermissionSets: PermissionSet[];
-}
-
-export function buildEffectiveAccess(
-  input: EffectiveAccessInput
-): EffectiveObjectAccess[] {
-  const objectPermissions =
-    aggregateObjectPermissions(
-      input.permissionSetGrants
-    );
-
-  const fieldPermissions =
-    aggregateFieldPermissions(
-      input.permissionSetGrants
-    );
-
-  const mutingGrants: PermissionSetGrant[] =
-    input.mutingPermissionSets.map(
-      (permissionSet) => ({
-        permissionSet,
-        type: "directPermissionSet",
-      })
-    );
-
-  const mutedObjectPermissions =
-    aggregateObjectPermissions(
-      mutingGrants
-    );
-
-  const mutedFieldPermissions =
-    aggregateFieldPermissions(
-      mutingGrants
-    );
-
-  return objectPermissions.map(
-    (objectPermission) => {
-      const mutedObjectPermission =
-        mutedObjectPermissions.find(
-          (permission) =>
-            permission.object === objectPermission.object
-        );
-
-      const fields =
-        fieldPermissions.filter((field) =>
-          field.field.startsWith(
-            `${objectPermission.object}.`
-          )
-        );
-
-      const mutedFields =
-        mutedFieldPermissions.filter((field) =>
-          field.field.startsWith(
-            `${objectPermission.object}.`
-          )
-        );
-
-      const mutedPermissionSetNames =
-        input.mutingPermissionSets.map(
-          (permissionSet) => permissionSet.name
-        );
-
-      return {
-        object: objectPermission.object,
-
-        read:
-          objectPermission.allowRead &&
-          !mutedObjectPermission?.allowRead,
-
-        create:
-          objectPermission.allowCreate &&
-          !mutedObjectPermission?.allowCreate,
-
-        edit:
-          objectPermission.allowEdit &&
-          !mutedObjectPermission?.allowEdit,
-
-        delete:
-          objectPermission.allowDelete &&
-          !mutedObjectPermission?.allowDelete,
-
-        viewAllRecords:
-          objectPermission.viewAllRecords &&
-          !mutedObjectPermission?.viewAllRecords,
-
-        modifyAllRecords:
-          objectPermission.modifyAllRecords &&
-          !mutedObjectPermission?.modifyAllRecords,
-
-        viewAllFields:
-          objectPermission.viewAllFields &&
-          !mutedObjectPermission?.viewAllFields,
-
-        readGrantedBy:
-          objectPermission.readGrantedBy,
-
-        createGrantedBy:
-          objectPermission.createGrantedBy,
-
-        editGrantedBy:
-          objectPermission.editGrantedBy,
-
-        deleteGrantedBy:
-          objectPermission.deleteGrantedBy,
-
-        readMutedBy:
-          mutedObjectPermission?.allowRead
-            ? mutedPermissionSetNames
-            : [],
-
-        createMutedBy:
-          mutedObjectPermission?.allowCreate
-            ? mutedPermissionSetNames
-            : [],
-
-        editMutedBy:
-          mutedObjectPermission?.allowEdit
-            ? mutedPermissionSetNames
-            : [],
-
-        deleteMutedBy:
-          mutedObjectPermission?.allowDelete
-            ? mutedPermissionSetNames
-            : [],
-
-        fields: fields.map((field) => {
-          const mutedField =
-            mutedFields.find(
-              (permission) =>
-                permission.field === field.field
-            );
-
-          return {
-            ...field,
-
-            readable:
-              field.readable &&
-              !mutedField?.readable,
-
-            editable:
-              field.editable &&
-              !mutedField?.editable,
-
-            mutedBy:
-              mutedField?.readable || mutedField?.editable
-                ? input.mutingPermissionSets.map(
-                    (permissionSet) => permissionSet.name
-                  )
-                : [],
-          };
-        }),
-      };
-    }
-  );
+/** Enumerated effective access; for a queried object absent in XML, evaluate it directly. */
+export function buildEffectiveAccess(resolved: ResolvedPersonaPermissions): EffectiveObjectAccess[] {
+  const evaluator = createPersonaAccessEvaluator(resolved);
+  return evaluator.knownObjects().map((object) => {
+    const { access, sources } = evaluator.evaluateObject(object);
+    return {
+      object,
+      ...access,
+      readGrantedBy: sources.read.grantedBy,
+      createGrantedBy: sources.create.grantedBy,
+      editGrantedBy: sources.edit.grantedBy,
+      deleteGrantedBy: sources.delete.grantedBy,
+      readMutedBy: sources.read.mutedBy.map((m) => m.mutingPermissionSet),
+      createMutedBy: sources.create.mutedBy.map((m) => m.mutingPermissionSet),
+      editMutedBy: sources.edit.mutedBy.map((m) => m.mutingPermissionSet),
+      deleteMutedBy: sources.delete.mutedBy.map((m) => m.mutingPermissionSet),
+      fields: [...new Set(resolved.permissionSetGrants.flatMap((g) =>
+        g.permissionSet.fieldPermissions.map((f) => f.field)))]
+        .filter((name) => name.toLowerCase().startsWith(`${object.toLowerCase()}.`))
+        .map(evaluator.evaluateField),
+    };
+  });
 }

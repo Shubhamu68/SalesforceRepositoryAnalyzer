@@ -2,6 +2,7 @@
   "personas": [
     {
       "name": "OMS View Only",
+      "profile": "OMS Standard User",
       "permissionSetGroups": [
         "Order_Management_View_Access"
       ],
@@ -12,6 +13,7 @@
     },
     {
       "name": "Order Management Specialist OTC",
+      "profile": "CSR",
       "permissionSetGroups": [
         "Order_Management_OTC_PS_Group"
       ],
@@ -25,6 +27,7 @@
     },
     {
       "name": "Order Management Specialist Core",
+      "profile": "CSR",
       "permissionSetGroups": [
         "Order_Management_Core_PS_Group"
       ],
@@ -38,6 +41,7 @@
     },
     {
       "name": "Order Management Specialist OTC Team Lead",
+      "profile": "Team Lead",
       "permissionSetGroups": [
         "Order_Management_OTC_TeamLead_PS_Group"
       ],
@@ -51,6 +55,7 @@
     },
     {
       "name": "Order Management Specialist CORE Team Lead",
+      "profile": "Team Lead",
       "permissionSetGroups": [
         "Order_Management_Core_TeamLead_PS_Group"
       ],
@@ -64,6 +69,7 @@
     },
     {
       "name": "Master Data Specialist",
+      "profile": "OMS Standard User",
       "permissionSetGroups": [
         "Master_Data_Specialist_PS_Group"
       ],
@@ -74,6 +80,7 @@
     },
     {
       "name": "Senior Master Data Specialist",
+      "profile": "OMS Standard User",
       "permissionSetGroups": [
         "Senior_Master_Data_Specialist_PS_Group"
       ],
@@ -84,6 +91,7 @@
     },
     {
       "name": "Master Data Manager",
+      "profile": "OMS Standard User",
       "permissionSetGroups": [
         "Master_Data_Manager_PS_Group"
       ],
@@ -95,6 +103,7 @@
     },
     {
       "name": "BFA",
+      "profile": "BFA",
       "permissionSetGroups": [
         "BFA_PS_Group"
       ],
@@ -105,6 +114,7 @@
     },
     {
       "name": "Administrator",
+      "profile": "Administrator",
       "permissionSetGroups": [
         "Order_Management_Administrator_PS_Group"
       ],
@@ -118,6 +128,7 @@
     },
     {
       "name": "SuperUser",
+      "profile": "OMS Standard User",
       "permissionSetGroups": [
         "Order_Management_Super_User_PS_Group"
       ],
@@ -129,6 +140,7 @@
     },
     {
       "name": "Mulesoft View",
+      "profile": "OMS Standard User",
       "permissionSetGroups": [
         "Order_Management_MuleSoft_Access_PS_Group"
       ],
@@ -139,6 +151,7 @@
     },
     {
       "name": "OFA Core",
+      "profile": "OFA Core",
       "permissionSetGroups": [
         "Order_Management_OFA_Core_PS_group"
       ],
@@ -152,6 +165,7 @@
     },
     {
       "name": "OFA OTC",
+      "profile": "OFA OTC",
       "permissionSetGroups": [
         "Order_Management_OFA_OTC_PS_group"
       ],
@@ -165,6 +179,7 @@
     },
     {
       "name": "System Admin",
+      "profile": "Admin",
       "permissionSetGroups": [],
       "permissionSets": [
         "OMS_IT_System_Admin",
@@ -175,6 +190,7 @@
     },
     {
       "name": "Mulesoft Integration",
+      "profile": "Salesforce API Only System Integrations",
       "permissionSetGroups": [
         "Order_Management_MuleSoft_Integration_PS_Group"
       ],
