@@ -7,7 +7,7 @@ import {
   buildRelationshipMap,
 } from "./salesforceRelationshipResolver.js";
 import {
-  buildSoqlFieldInventory,
+  buildSoqlFieldInventory, type UnresolvedSoqlField,
 } from "./soqlFieldInventoryBuilder.js";
 
 export class SoqlSecurityAnalyzer {
@@ -49,10 +49,12 @@ export class SoqlSecurityAnalyzer {
     // 4. Build normalized SOQL inventory
     // --------------------------------------------------
 
+    const unresolvedFields: UnresolvedSoqlField[] = [];
     const inventory =
       buildSoqlFieldInventory(
         queries,
-        relationshipMap
+        relationshipMap,
+        (entry) => unresolvedFields.push(entry)
       );
 
     // --------------------------------------------------
@@ -240,6 +242,25 @@ export class SoqlSecurityAnalyzer {
       }
     }
 
+    // Never silently drop relationship paths missing from the repository or
+    // Describe snapshot. They need REVIEW rather than a false clean result.
+    const reported = new Set<string>();
+    for (const unresolved of unresolvedFields) {
+      const id = `${unresolved.query.filePath}:${unresolved.query.lineNumber}:${unresolved.baseObject}:${unresolved.fieldPath}`.toLowerCase();
+      if (reported.has(id)) continue;
+      reported.add(id);
+      findings.push({
+        severity: "REVIEW",
+        filePath: unresolved.query.filePath,
+        lineNumber: unresolved.query.lineNumber,
+        object: unresolved.baseObject,
+        field: unresolved.fieldPath,
+        query: unresolved.query.query,
+        withUserMode: unresolved.query.withUserMode,
+        reason: `Could not resolve relationship path ${unresolved.baseObject}.${unresolved.fieldPath}. ` +
+          `Verify relationship metadata; field access was not assessed.`,
+      });
+    }
     return findings;
   }
 }

@@ -10,7 +10,6 @@ import {
 
 import {
   RelationshipMap,
-  RelationshipMetadata,
 } from "./salesforceRelationshipResolver.js";
 
 import {
@@ -18,9 +17,12 @@ import {
   isAggregateExpression
 } from "./soqlSystemFields.js";
 
+export interface UnresolvedSoqlField { baseObject: string; fieldPath: string; query: SoqlQuery }
+
 export function buildSoqlFieldInventory(
   queries: SoqlQuery[],
-  relationshipMap: RelationshipMap
+  relationshipMap: RelationshipMap,
+  onUnresolved?: (field: UnresolvedSoqlField) => void
 ): SoqlFieldInventory {
   const inventory: SoqlFieldInventory =
     new Map();
@@ -35,7 +37,8 @@ export function buildSoqlFieldInventory(
       query.object,
       query.fields,
       query,
-      relationshipMap
+      relationshipMap,
+      onUnresolved
     );
 
     /*
@@ -46,7 +49,8 @@ export function buildSoqlFieldInventory(
       query.object,
       query.subqueries,
       query,
-      relationshipMap
+      relationshipMap,
+      onUnresolved
     );
   }
 
@@ -58,36 +62,15 @@ function processSubqueries(
   parentObject: string,
   subqueries: SoqlSubquery[],
   rootQuery: SoqlQuery,
-  relationshipMap: RelationshipMap
+  relationshipMap: RelationshipMap,
+  onUnresolved?: (field: UnresolvedSoqlField) => void
 ): void {
   for (const subquery of subqueries) {
-    const relationship =
-      findRelationshipIgnoreCase(
-        relationshipMap.get(
-          parentObject
-        ),
-        subquery.relationshipName
-      );
-
-    /*
-     * We could not resolve:
-     *
-     * Parent Object
-     *   +
-     * Child Relationship Name
-     *   ->
-     * Actual Child Object
-     *
-     * In this case, skip this subquery rather
-     * than incorrectly assigning its fields to
-     * the parent object.
-     */
-    if (!relationship) {
+    const childObject = relationshipMap.childObject(parentObject, subquery.relationshipName);
+    if (!childObject) {
+      onUnresolved?.({ baseObject: parentObject, fieldPath: `(SELECT ... FROM ${subquery.relationshipName})`, query: rootQuery });
       continue;
     }
-
-    const childObject =
-      relationship.childObject;
 
     /*
      * Process fields directly selected from
@@ -98,7 +81,8 @@ function processSubqueries(
       childObject,
       subquery.fields,
       rootQuery,
-      relationshipMap
+      relationshipMap,
+      onUnresolved
     );
 
     /*
@@ -118,7 +102,8 @@ function processSubqueries(
       childObject,
       subquery.subqueries,
       rootQuery,
-      relationshipMap
+      relationshipMap,
+      onUnresolved
     );
   }
 }
@@ -128,7 +113,8 @@ function addFieldsToInventory(
   baseObject: string,
   fieldsToProcess: string[],
   query: SoqlQuery,
-  relationshipMap: RelationshipMap
+  relationshipMap: RelationshipMap,
+  onUnresolved?: (field: UnresolvedSoqlField) => void
 ): void {
   for (const queryField of fieldsToProcess) {
     if (
@@ -139,14 +125,10 @@ function addFieldsToInventory(
       continue;
     }
 
-    const resolved =
-      resolveFieldPath(
-        baseObject,
-        queryField,
-        relationshipMap
-      );
+    const resolved = relationshipMap.resolveField(baseObject, queryField);
 
     if (!resolved) {
+      onUnresolved?.({ baseObject, fieldPath: queryField, query });
       continue;
     }
 
@@ -215,137 +197,3 @@ function addFieldsToInventory(
   }
 }
 
-interface ResolvedField {
-  object: string;
-  field: string;
-}
-
-function resolveFieldPath(
-  baseObject: string,
-  fieldPath: string,
-  relationshipMap: RelationshipMap
-): ResolvedField | undefined {
-  const parts =
-    fieldPath
-      .split(".")
-      .map(
-        (part) => part.trim()
-      )
-      .filter(Boolean);
-
-  if (parts.length === 0) {
-    return undefined;
-  }
-
-  /*
-   * Simple field.
-   *
-   * Example:
-   *
-   * Name
-   */
-  if (parts.length === 1) {
-    return {
-      object: baseObject,
-      field: parts[0],
-    };
-  }
-
-  /*
-   * Parent relationship traversal.
-   *
-   * Example:
-   *
-   * Account.Owner.Name
-   *
-   * The existing relationship metadata map
-   * is used to walk each relationship.
-   */
-  let currentObject =
-    baseObject;
-
-  for (
-    let index = 0;
-    index < parts.length - 1;
-    index++
-  ) {
-    const relationshipName =
-      parts[index];
-
-    const relationship =
-      findRelationshipIgnoreCase(
-        relationshipMap.get(
-          currentObject
-        ),
-        relationshipName
-      );
-
-    if (!relationship) {
-      return undefined;
-    }
-
-    /*
-     * A relationship field can theoretically
-     * reference multiple objects.
-     *
-     * We cannot safely determine one field
-     * object for polymorphic relationships,
-     * so leave those for future explicit
-     * handling.
-     */
-    if (
-      relationship.targetObjects.length !==
-      1
-    ) {
-      return undefined;
-    }
-
-    currentObject =
-      relationship.targetObjects[0];
-  }
-
-  return {
-    object: currentObject,
-    field:
-      parts[
-        parts.length - 1
-      ],
-  };
-}
-
-function findRelationshipIgnoreCase(
-  relationships:
-    | Map<
-        string,
-        RelationshipMetadata
-      >
-    | undefined,
-  relationshipName: string
-): RelationshipMetadata | undefined {
-  if (!relationships) {
-    return undefined;
-  }
-
-  const normalized =
-    relationshipName
-      .trim()
-      .toLowerCase();
-
-  for (
-    const [
-      name,
-      relationship,
-    ] of relationships.entries()
-  ) {
-    if (
-      name
-        .trim()
-        .toLowerCase() ===
-      normalized
-    ) {
-      return relationship;
-    }
-  }
-
-  return undefined;
-}

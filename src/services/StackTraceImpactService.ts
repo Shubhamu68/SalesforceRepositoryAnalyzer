@@ -2,16 +2,15 @@ import path from "node:path";
 import { access } from "node:fs/promises";
 import { isKnownSalesforcePermissionSet } from "../config/knownSalesforcePermissionSets.js";
 import type { Persona } from "../models/Persona.js";
-import type { SoqlQuery, SoqlSubquery } from "../models/SoqlQuery.js";
 import type {
   StackTraceImpactResult, StackQueryImpact, QueryPersonaImpact, StackPersonaImpact,
-  ResolvedQueryField, MissingReadPermission, ImpactStatus, ReachableMethod,
+  MissingReadPermission, ImpactStatus, ReachableMethod,
 } from "../models/StackTraceImpact.js";
 import { PersonaConfigLoader } from "../config/PersonaConfigLoader.js";
 import { PersonaPermissionResolver, type ResolvedPersonaPermissions } from "../analyzer/PersonaPermissionResolver.js";
 import { createPersonaAccessEvaluator } from "../analyzer/personaAccessEvaluator.js";
-import { buildRelationshipMap, type RelationshipMap } from "../analyzer/salesforceRelationshipResolver.js";
-import { isAggregateExpression, isIgnoredField } from "../analyzer/soqlSystemFields.js";
+import { buildRelationshipMap } from "../analyzer/salesforceRelationshipResolver.js";
+import { collectQueryFields } from "../analyzer/soqlQueryFieldResolver.js";
 import {
   createApexMethodIndex, parseApexStackTrace, resolveMethodCalls, maskApex, type ApexMethod,
 } from "../scanner/apexMethodScanner.js";
@@ -159,23 +158,41 @@ export class StackTraceImpactService {
         const impacts: QueryPersonaImpact[] = prepared.map((person) => {
           const missing: MissingReadPermission[] = [];
           const notes: string[] = [];
-          const objects = unique([query.object, ...inventory.objects]);
           const evaluator = createPersonaAccessEvaluator(person.resolved);
+          // Object Read findings are scoped to explicit FROM objects, not every
+          // parent traversed by a dotted field path (e.g. OriginalOrderItem.Order).
+          // This restores the pre-deep-resolution reporting scope without losing
+          // recursive field-level analysis on the final related object.
+          const fromObjects = new Set(inventory.queriedObjects.map((name) => name.toLowerCase()));
+          const objects = unique([...inventory.objects, ...inventory.fields.map((field) => field.object)]);
           const grants = new Map(objects.map((name) => [name.toLowerCase(),
             evaluator.evaluateObject(name)
           ]));
-          for (const objectName of objects) {
+          for (const objectName of inventory.queriedObjects) {
             if (!grants.get(objectName.toLowerCase())!.access.read) {
               missing.push({ object: objectName, reason: "OBJECT_READ" });
             }
           }
+          const uncheckedRelatedObjectRead = new Set<string>();
           for (const field of inventory.fields) {
             if (securityMode === "SECURITY_ENFORCED" && /^(WHERE|ORDER BY) /i.test(field.source)) continue;
             const objectAccess = grants.get(field.object.toLowerCase())?.access;
-            if (!objectAccess?.read || objectAccess.viewAllFields) continue;
-            if (!evaluator.evaluateField(`${field.object}.${field.field}`).readable) {
+            if (objectAccess?.viewAllFields) continue;
+            const fieldGrant = evaluator.evaluateField(`${field.object}.${field.field}`);
+            // evaluateField.readable includes object Read. For related objects,
+            // check FLS separately: absence of the object grant must not turn an
+            // explicitly granted or schema-required field into a false FLS error.
+            const hasFieldRead = fieldGrant.schemaRequired === true || fieldGrant.permissionable === false || fieldGrant.readGrantedBy.length > 0;
+            if (fromObjects.has(field.object.toLowerCase()) && !objectAccess?.read) continue;
+            if (!hasFieldRead) {
               missing.push({ object: field.object, field: field.field, reason: "FIELD_READ" });
             }
+            if (!fromObjects.has(field.object.toLowerCase()) && !objectAccess?.read) {
+              uncheckedRelatedObjectRead.add(field.object);
+            }
+          }
+          if (uncheckedRelatedObjectRead.size) {
+            notes.push(`Object Read for related objects (${[...uncheckedRelatedObjectRead].join(", ")}) was not assessed as a separate finding; field FLS was still checked. Runtime access may require further review.`);
           }
           if (securityMode === "UNSPECIFIED") notes.push("No explicit query mode; access enforcement depends on the Apex API version and context.");
           if (securityMode === "SYSTEM_MODE") notes.push("WITH SYSTEM_MODE does not enforce FLS at query execution.");
@@ -184,7 +201,7 @@ export class StackTraceImpactService {
           if (person.externalSkipped) notes.push("Salesforce-owned Order Management Permission Set was excluded because its metadata is absent. A missing grant is a potential gap, not a confirmed runtime failure.");
           if (inventory.unresolved.length) notes.push("Some relationship fields could not be resolved.");
           if (inventory.limitations.length) notes.push("Some filter/sort expressions could not be fully evaluated.");
-          const unverified = person.incomplete || person.externalSkipped || inventory.unresolved.length > 0 || inventory.limitations.length > 0;
+          const unverified = person.incomplete || person.externalSkipped || inventory.unresolved.length > 0 || inventory.limitations.length > 0 || uncheckedRelatedObjectRead.size > 0;
           let status: ImpactStatus;
           if (missing.length) status = enforcesSelectedFls ? "AT_RISK" : "REVIEW";
           else if (unverified) status = "REVIEW"; // Incomplete evidence must not become "No gaps".
@@ -250,109 +267,3 @@ export class StackTraceImpactService {
   }
 }
 
-interface QueryFieldCollection {
-  fields: ResolvedQueryField[];
-  objects: string[];
-  unresolved: string[];
-  limitations: string[];
-}
-
-// Salesforce's repository supplies custom lookups, but standard relationship paths
-// (e.g. OrderSummary.Account.Name) need a small, explicit mapping.
-const STANDARD_CHILD_RELATIONSHIPS: Record<string, Record<string, string>> = {
-  account: { contacts: "Contact", opportunities: "Opportunity", cases: "Case" },
-};
-
-const STANDARD_PARENT_RELATIONSHIPS: Record<string, Record<string, string>> = {
-  ordersummary: { account: "Account" },
-  order: { account: "Account" },
-  opportunity: { account: "Account", contact: "Contact" },
-  contact: { account: "Account" },
-  case: { account: "Account", contact: "Contact" },
-  account: { parent: "Account" },
-};
-
-export function collectQueryFields(query: SoqlQuery, relationships: RelationshipMap): QueryFieldCollection {
-  const fields = new Map<string, ResolvedQueryField>();
-  const objects = new Set<string>([query.object]);
-  const unresolved: string[] = [];
-  const limitations: string[] = [];
-  const add = (baseObject: string, fieldPath: string, label = fieldPath) => {
-    const candidate = fieldPath.trim();
-    if (!candidate || isAggregateExpression(candidate)) return;
-    const resolved = resolveSelectedField(baseObject, candidate, relationships);
-    if (!resolved) { unresolved.push(`${baseObject}.${label}`); return; }
-    objects.add(resolved.object);
-    if (isIgnoredField(resolved.field, resolved.object)) return;
-    fields.set(`${resolved.object}.${resolved.field}`.toLowerCase(), { ...resolved, source: label });
-  };
-  for (const field of query.fields) add(query.object, field);
-
-  const traverseSubquery = (parent: string, subquery: SoqlSubquery) => {
-    const child = findChildRelationship(parent, subquery.relationshipName, relationships);
-    if (!child) {
-      unresolved.push(`${parent}.(SELECT ... FROM ${subquery.relationshipName})`);
-      return;
-    }
-    objects.add(child);
-    for (const field of subquery.fields) add(child, field, `${subquery.relationshipName}.${field}`);
-    for (const nested of subquery.subqueries) traverseSubquery(child, nested);
-  };
-  for (const subquery of query.subqueries) traverseSubquery(query.object, subquery);
-
-  // WHERE / ORDER BY: support basic field references. Complex expressions remain explicitly unverified.
-  const withoutSubqueries = maskApex(query.query).replace(/\(\s*SELECT\b[\s\S]*?\)/gi, " ");
-  const whereClause = withoutSubqueries.match(/\bWHERE\b([\s\S]*?)(?=\b(?:GROUP\s+BY|ORDER\s+BY|LIMIT|OFFSET|WITH\s+(?:USER_MODE|SECURITY_ENFORCED|SYSTEM_MODE)|FOR\s+UPDATE)\b|$)/i)?.[1];
-  if (whereClause) {
-    let found = 0;
-    const predicate = /\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*(?:=|!=|<>|>=|<=|>|<|\b(?:NOT\s+)?(?:IN|LIKE|INCLUDES|EXCLUDES)\b)/gi;
-    for (const match of whereClause.matchAll(predicate)) {
-      add(query.object, match[1], `WHERE ${match[1]}`);
-      found++;
-    }
-    if (!found || /\b(?:TYPEOF|DISTANCE|GEOLOCATION)\s*\(/i.test(whereClause)) limitations.push("Complex WHERE expression may reference additional fields.");
-  }
-  const orderClause = withoutSubqueries.match(/\bORDER\s+BY\b([\s\S]*?)(?=\b(?:LIMIT|OFFSET|WITH\s+(?:USER_MODE|SECURITY_ENFORCED|SYSTEM_MODE)|FOR\s+UPDATE)\b|$)/i)?.[1];
-  if (orderClause) for (const part of orderClause.split(",")) {
-    const item = part.trim().match(/^([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\b/);
-    if (item) add(query.object, item[1], `ORDER BY ${item[1]}`);
-    else limitations.push(`Unresolved ORDER BY expression: ${part.trim().slice(0, 60)}`);
-  }
-  if (/\b(?:GROUP\s+BY|HAVING|TYPEOF)\b/i.test(withoutSubqueries)) limitations.push("GROUP BY, HAVING or TYPEOF requires manual field review.");
-  if (query.subqueries.length && /\(\s*SELECT[\s\S]*?\bWHERE\b/i.test(query.query)) {
-    limitations.push("Child subquery filter fields require manual review.");
-  }
-  return { fields: [...fields.values()], objects: [...objects], unresolved: unique(unresolved), limitations: unique(limitations) };
-}
-
-function findChildRelationship(parent: string, name: string, relationships: RelationshipMap): string | undefined {
-  const standard = STANDARD_CHILD_RELATIONSHIPS[parent.toLowerCase()]?.[name.toLowerCase()];
-  if (standard) return standard;
-  const parentMap = [...relationships].find(([object]) => equal(object, parent))?.[1];
-  if (!parentMap) return undefined;
-  return [...parentMap].find(([key]) => equal(key, name))?.[1].childObject;
-}
-
-function resolveSelectedField(base: string, pathName: string, map: RelationshipMap): { object: string; field: string } | undefined {
-  const parts = pathName.split(".").map((part) => part.trim());
-  if (!parts.length || parts.some((part) => !/^[A-Za-z_]\w*$/.test(part))) return undefined;
-  let object = base;
-  for (const relationship of parts.slice(0, -1)) {
-    const standard = STANDARD_PARENT_RELATIONSHIPS[object.toLowerCase()]?.[relationship.toLowerCase()];
-    if (standard) { object = standard; continue; }
-    // Reverse the repository's parent-to-child lookup map to resolve child-to-parent SOQL.
-    const candidates: string[] = [];
-    for (const [parent, childRelationships] of map) {
-      for (const info of childRelationships.values()) {
-        if (!equal(info.childObject, object)) continue;
-        const expectedName = info.sourceField.endsWith("__c")
-          ? `${info.sourceField.slice(0, -3)}__r` : info.sourceField.replace(/Id$/i, "");
-        if (equal(expectedName, relationship) && info.targetObjects.length === 1) candidates.push(parent);
-      }
-    }
-    const matches = unique(candidates.map((name) => name.toLowerCase()));
-    if (matches.length !== 1) return undefined; // Includes polymorphic and unresolved standard relationships.
-    object = candidates[0];
-  }
-  return { object, field: parts.at(-1)! };
-}

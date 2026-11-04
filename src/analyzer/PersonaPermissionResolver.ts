@@ -21,6 +21,8 @@ export interface ResolvedPersonaPermissions {
   permissionSetGrants: PermissionSetGrant[];
   /** Mutes are scoped to the PSG that owns them, never to the profile or direct PS. */
   mutesByGroup: Map<string, PermissionSet[]>;
+  /** Object field-definition XML directory used for schema-required FLS policy. */
+  metadataObjectsDirectory?: string;
 }
 
 const sameName = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
@@ -131,6 +133,7 @@ export class PersonaPermissionResolver {
       mutingPermissionSets: [...allMuting.values()],
       permissionSetGrants,
       mutesByGroup,
+      metadataObjectsDirectory: path.join(path.dirname(this.permissionSetsDirectory), "objects"),
     };
   }
 }
