@@ -1,58 +1,29 @@
-import { Persona } from "../models/Persona.js";
-import { AccessCheckResult } from "../models/AccessCheckResult.js";
+import type { Persona } from "../models/Persona.js";
+import type { AccessCheckResult } from "../models/AccessCheckResult.js";
 import { PersonaPermissionResolver } from "../analyzer/PersonaPermissionResolver.js";
-import { buildEffectiveAccess } from "../analyzer/effectiveAccessAnalyzer.js";
+import { createPersonaAccessEvaluator } from "../analyzer/personaAccessEvaluator.js";
 
 export class PersonaAccessService {
-  constructor(
-    private readonly personaPermissionResolver: PersonaPermissionResolver
-  ) {}
+  constructor(private readonly resolver: PersonaPermissionResolver) {}
 
-  async getObjectAccess(
-    persona: Persona,
-    objectName: string
-  ): Promise<AccessCheckResult | null> {
-    const resolved =
-      await this.personaPermissionResolver.resolve(persona);
-
-    const effectiveAccess = buildEffectiveAccess({
-      permissionSetGrants:
-        resolved.permissionSetGrants,
-      mutingPermissionSets:
-        resolved.mutingPermissionSets,
-    });
-
-    const access = effectiveAccess.find(
-      (item) =>
-        item.object.toLowerCase() ===
-        objectName.toLowerCase()
-    );
-
-    if (!access) {
-      return null;
-    }
-
+  async getObjectAccess(persona: Persona, objectName: string): Promise<AccessCheckResult | null> {
+    const resolved = await this.resolver.resolve(persona);
+    const evaluator = createPersonaAccessEvaluator(resolved);
+    const { access, sources } = evaluator.evaluateObject(objectName);
+    // Preserve the former 404 for names not represented in metadata, unless
+    // a global permission genuinely grants object access without an XML entry.
+    if (!evaluator.knownObjects().some((name) => name.toLowerCase() === objectName.toLowerCase()) &&
+        !Object.values(access).some(Boolean)) return null;
     return {
-      object: access.object,
-
-      read: access.read,
-      create: access.create,
-      edit: access.edit,
-      delete: access.delete,
-
-      viewAllRecords: access.viewAllRecords,
-      modifyAllRecords: access.modifyAllRecords,
-      viewAllFields: access.viewAllFields,
-
-      readGrantedBy: access.readGrantedBy,
-      createGrantedBy: access.createGrantedBy,
-      editGrantedBy: access.editGrantedBy,
-      deleteGrantedBy: access.deleteGrantedBy,
-
-      readMutedBy: access.readMutedBy,
-      createMutedBy: access.createMutedBy,
-      editMutedBy: access.editMutedBy,
-      deleteMutedBy: access.deleteMutedBy,
+      object: objectName, ...access,
+      readGrantedBy: sources.read.grantedBy,
+      createGrantedBy: sources.create.grantedBy,
+      editGrantedBy: sources.edit.grantedBy,
+      deleteGrantedBy: sources.delete.grantedBy,
+      readMutedBy: sources.read.mutedBy.map((m) => m.mutingPermissionSet),
+      createMutedBy: sources.create.mutedBy.map((m) => m.mutingPermissionSet),
+      editMutedBy: sources.edit.mutedBy.map((m) => m.mutingPermissionSet),
+      deleteMutedBy: sources.delete.mutedBy.map((m) => m.mutingPermissionSet),
     };
   }
 }

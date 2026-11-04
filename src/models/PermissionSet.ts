@@ -6,4 +6,6 @@ export interface PermissionSet {
   label: string;
   objectPermissions: ObjectPermission[];
   fieldPermissions: FieldPermission[];
+  /** Enabled system permissions such as ViewAllData and ModifyAllData. */
+  userPermissions?: Record<string, boolean>;
 }

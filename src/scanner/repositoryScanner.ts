@@ -7,6 +7,8 @@ export interface SalesforceMetadataPaths {
   permissionSetsPath: string;
   permissionSetGroupsPath: string;
   mutingPermissionSetsPath: string;
+  /** Optional until personas are mapped to profiles. */
+  profilesPath: string;
 }
 
 export async function scanRepository(
@@ -34,6 +36,8 @@ export async function scanRepository(
     "mutingpermissionsets"
   );
 
+  const profilesPath = path.join(defaultPath, "profiles");
+
   await ensureDirectory(defaultPath);
   await ensureDirectory(permissionSetsPath);
   await ensureDirectory(permissionSetGroupsPath);
@@ -45,6 +49,7 @@ export async function scanRepository(
     permissionSetsPath,
     permissionSetGroupsPath,
     mutingPermissionSetsPath,
+    profilesPath,
   };
 }
 

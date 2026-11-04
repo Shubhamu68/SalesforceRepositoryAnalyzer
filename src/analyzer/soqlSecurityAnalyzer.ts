@@ -2,7 +2,7 @@ import { SoqlQuery } from "../models/SoqlQuery.js";
 import { SoqlSecurityFinding } from "../models/SoqlSecurityFinding.js";
 import { Persona } from "../models/Persona.js";
 import { PersonaPermissionResolver } from "./PersonaPermissionResolver.js";
-import { buildEffectiveAccess } from "./effectiveAccessAnalyzer.js";
+import { createPersonaAccessEvaluator } from "./personaAccessEvaluator.js";
 import {
   buildRelationshipMap,
 } from "./salesforceRelationshipResolver.js";
@@ -31,17 +31,10 @@ export class SoqlSecurityAnalyzer {
       );
 
     // --------------------------------------------------
-    // 2. Build effective permissions once
+    // 2. Use the same centralized access evaluator as the matrix and stack trace.
     // --------------------------------------------------
-
-    const effectiveAccess =
-      buildEffectiveAccess({
-        permissionSetGrants:
-          resolved.permissionSetGrants,
-
-        mutingPermissionSets:
-          resolved.mutingPermissionSets,
-      });
+    const evaluator = createPersonaAccessEvaluator(resolved);
+    const knownObjects = new Set(evaluator.knownObjects().map((name) => name.toLowerCase()));
 
     // --------------------------------------------------
     // 3. Build relationship metadata once
@@ -63,52 +56,6 @@ export class SoqlSecurityAnalyzer {
       );
 
     // --------------------------------------------------
-    // 5. Build object + field access maps
-    // --------------------------------------------------
-
-    const objectAccessMap = new Map<
-      string,
-      {
-        read: boolean;
-        viewAllFields: boolean;
-      }
-    >();
-
-    const fieldAccessMap = new Map<
-      string,
-      boolean
-    >();
-
-    for (
-      const objectAccess of effectiveAccess
-    ) {
-      const objectKey =
-        objectAccess.object
-          .trim()
-          .toLowerCase();
-
-      objectAccessMap.set(
-        objectKey,
-        {
-          read: objectAccess.read,
-          viewAllFields:
-            objectAccess.viewAllFields,
-        }
-      );
-
-      for (
-        const field of objectAccess.fields
-      ) {
-        fieldAccessMap.set(
-          field.field
-            .trim()
-            .toLowerCase(),
-          field.readable
-        );
-      }
-    }
-
-    // --------------------------------------------------
     // 6. Check unique object/field combinations
     // --------------------------------------------------
 
@@ -125,10 +72,7 @@ export class SoqlSecurityAnalyzer {
           .trim()
           .toLowerCase();
 
-      const objectAccess =
-        objectAccessMap.get(
-          objectKey
-        );
+      const objectAccess = evaluator.evaluateObject(objectName).access;
 
       for (
         const [
@@ -145,7 +89,7 @@ export class SoqlSecurityAnalyzer {
         // No object permission information
         // --------------------------------------------
 
-        if (!objectAccess) {
+        if (!objectAccess.read && !knownObjects.has(objectKey)) {
           for (const reference of references) {
             findings.push({
               severity: "REVIEW",
@@ -251,10 +195,7 @@ export class SoqlSecurityAnalyzer {
         // It is NOT an unresolved field.
         // --------------------------------------------
 
-        const fieldRead =
-          fieldAccessMap.get(
-            fieldKey
-          ) ?? false;
+        const fieldRead = evaluator.evaluateField(fieldKey).readable;
 
         if (!fieldRead) {
           for (

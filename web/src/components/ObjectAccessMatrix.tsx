@@ -15,7 +15,8 @@ type PermissionAccess = Record<PermissionKey, boolean>;
 
 type PermissionSource = {
   permissionSet: string;
-  type: "permissionSetGroup" | "directPermissionSet";
+  type: "permissionSetGroup" | "directPermissionSet" | "profile";
+  viaSystemPermission?: "ViewAllData" | "ModifyAllData";
   permissionSetGroup?: string;
 };
 
@@ -90,7 +91,8 @@ function PermissionDetail({
                 <small>
                   {source.type === "permissionSetGroup"
                     ? `Through PSG: ${source.permissionSetGroup}`
-                    : "Direct Permission Set"}
+                    : source.type === "profile" ? "Profile" : "Direct Permission Set"}
+                  {source.viaSystemPermission ? ` · ${source.viaSystemPermission}` : ""}
                 </small>
               </span>
             </div>

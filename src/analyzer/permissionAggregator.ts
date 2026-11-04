@@ -3,8 +3,10 @@ import { PermissionSetGrant } from "../models/PermissionSetGrant.js";
 
 export interface PermissionSource {
   permissionSet: string;
-  type: "permissionSetGroup" | "directPermissionSet";
+  type: "permissionSetGroup" | "directPermissionSet" | "profile";
   permissionSetGroup?: string;
+  /** For a global object permission contributed by a system permission. */
+  viaSystemPermission?: "ViewAllData" | "ModifyAllData";
 }
 
 export interface EffectiveObjectPermission {
