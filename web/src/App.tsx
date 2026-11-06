@@ -102,11 +102,27 @@ function App() {
     useState(false);
 
   const [checking, setChecking] = useState(false);
-  const [page, setPage] = useState<Page>(new URLSearchParams(window.location.search).has("sfConnection") ? "salesforce" : "dashboard");
+  const [page, setPage] = useState<Page>("dashboard");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem("sra.sidebarCollapsed") === "true";
+    } catch {
+      return false;
+    }
+  });
   const [repositoryName, setRepositoryName] = useState<string>("");
   const [apiConnected, setApiConnected] = useState(false);
+  const [salesforceConnection, setSalesforceConnection] = useState<"connected" | "connecting" | "unavailable" | "not-configured">("connecting");
   const [lastSoql, setLastSoql] = useState<SoqlAnalysisResult | null>(null);
   const [lastRunAt, setLastRunAt] = useState<Date | null>(null);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("sra.sidebarCollapsed", String(sidebarCollapsed));
+    } catch {
+      // The sidebar still works when browser storage is unavailable.
+    }
+  }, [sidebarCollapsed]);
 
   useEffect(() => {
     fetch("/api/health")
@@ -119,6 +135,23 @@ function App() {
         setApiConnected(true);
       })
       .catch(() => setApiConnected(false));
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    async function refreshSalesforceConnection() {
+      try {
+        const response = await fetch("/api/salesforce/status", { cache: "no-store" });
+        if (!response.ok) throw new Error("Salesforce status unavailable");
+        const data: { connected?: boolean; connecting?: boolean; configured?: boolean } = await response.json();
+        if (active) setSalesforceConnection(data.connected ? "connected" : data.connecting ? "connecting" : data.configured ? "unavailable" : "not-configured");
+      } catch {
+        if (active) setSalesforceConnection("unavailable");
+      }
+    }
+    void refreshSalesforceConnection();
+    const interval = window.setInterval(() => { void refreshSalesforceConnection(); }, 5000);
+    return () => { active = false; window.clearInterval(interval); };
   }, []);
 
   function navigate(next: Page) {
@@ -820,13 +853,37 @@ function App() {
   );
 
   return (
-    <div className="workspace">
+    <div className={`workspace${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
       <header className="topbar">
+        <button
+          className="sidebar-toggle"
+          type="button"
+          onClick={() => setSidebarCollapsed((previous) => !previous)}
+          aria-label={sidebarCollapsed ? "Expand workspace sidebar" : "Collapse workspace sidebar"}
+          title={sidebarCollapsed ? "Expand workspace sidebar" : "Collapse workspace sidebar"}
+          aria-expanded={!sidebarCollapsed}
+          aria-controls="workspace-sidebar"
+        >
+          <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <rect x="3" y="4" width="18" height="16" rx="2" />
+            <path d="M9 4v16" />
+            {sidebarCollapsed ? <path d="m13 9 3 3-3 3" /> : <path d="m16 9-3 3 3 3" />}
+          </svg>
+        </button>
         <div className="brand-mark" aria-hidden="true">⬡</div>
         <div className="brand-name"><strong>Salesforce</strong><span>Repository Analyzer</span></div>
-        <div className="topbar-right"><span className={apiConnected ? "connection online" : "connection offline"}><span className="connection-dot" />{apiConnected ? "API connected" : "API unavailable"}</span><span className="avatar">RA</span></div>
+        <div className="topbar-right">
+          <span className={apiConnected ? "connection online" : "connection offline"} title="Repository Analyzer API connection status">
+            <span className="connection-dot" />{apiConnected ? "API connected" : "API unavailable"}
+          </span>
+          <span className={`connection ${salesforceConnection === "connected" ? "online" : "offline"}`} title="Salesforce org authentication status">
+            <span className="connection-dot" />
+            {salesforceConnection === "connected" ? "Salesforce Org connected" : salesforceConnection === "connecting" ? "Salesforce Org connecting…" : salesforceConnection === "not-configured" ? "Salesforce Org not configured" : "Salesforce Org unavailable"}
+          </span>
+          <span className="avatar">RA</span>
+        </div>
       </header>
-      <aside className="sidebar">
+      <aside id="workspace-sidebar" className="sidebar" hidden={sidebarCollapsed}>
         <div className="sidebar-label">WORKSPACE</div>
         <nav className="side-links" aria-label="Main navigation">
           <button className={page === "dashboard" ? "active" : ""} onClick={() => navigate("dashboard")}><span className="nav-symbol">▦</span>Dashboard</button>
@@ -834,8 +891,8 @@ function App() {
           <button className={page === "soql" ? "active" : ""} onClick={() => navigate("soql")}><span className="nav-symbol">◎</span>SOQL Security Analysis</button>
           <button className={page === "matrix" ? "active" : ""} onClick={() => navigate("matrix")}><span className="nav-symbol">▤</span>Object Access Matrix</button>
           <button className={page === "stack" ? "active" : ""} onClick={() => navigate("stack")}><span className="nav-symbol">⌁</span>Stack Trace Impact</button>
-          <button className={page === "reports" ? "active" : ""} onClick={() => navigate("reports")}><span className="nav-symbol">▧</span>Reports</button>
           <button className={page === "salesforce" ? "active" : ""} onClick={() => navigate("salesforce")}><span className="nav-symbol">☁</span>Salesforce Org</button>
+          <button className={page === "reports" ? "active" : ""} onClick={() => navigate("reports")}><span className="nav-symbol">▧</span>Reports</button>
         </nav>
         <div className="sidebar-bottom">
           <div className="side-info-card"><div className="side-info-title">Repository</div><div className="side-repo">{apiConnected ? "● Connected" : "○ Not connected"}</div><div className="side-info-text" title={repositoryName}>{repositoryName || "Loading…"}</div></div>
@@ -848,7 +905,7 @@ function App() {
           <div>
             <div className="breadcrumb">WORKSPACE / {page.toUpperCase()}</div>
             <h1>{page === "dashboard" ? "Security overview" : page === "access" ? "Access Checker" : page === "soql" ? "SOQL Security Analysis" : page === "matrix" ? "Object Access Matrix" : page === "stack" ? "Stack Trace Impact Analyzer" : page === "salesforce" ? "Salesforce Org Connectivity" : "Generated reports"}</h1>
-            <p>{page === "dashboard" ? "Explore persona access and SOQL security across your Salesforce repository." : page === "access" ? "Inspect effective object and field permissions for a selected persona." : page === "soql" ? "Scan Apex queries for persona-specific security findings." : page === "matrix" ? "Compare effective object permissions across all configured personas." : page === "stack" ? "Trace reachable SOQL queries from an Apex stack trace and compare access across all personas." : page === "salesforce" ? "Sign in to Salesforce and verify standard and Tooling API queries." : "Review where the latest generated analysis reports are saved."}</p>
+            <p>{page === "dashboard" ? "Explore persona access and SOQL security across your Salesforce repository." : page === "access" ? "Inspect effective object and field permissions for a selected persona." : page === "soql" ? "Scan Apex queries for persona-specific security findings." : page === "matrix" ? "Compare effective object permissions across all configured personas." : page === "stack" ? "Trace reachable SOQL queries from an Apex stack trace and compare access across all personas." : page === "salesforce" ? "Automatically connect to Salesforce and verify standard and Tooling API queries." : "Review where the latest generated analysis reports are saved."}</p>
           </div>
           {page === "dashboard" && <button className="primary-button" onClick={() => navigate("soql")}>▷  Run SOQL Analysis</button>}
         </div>
@@ -860,7 +917,7 @@ function App() {
             </div>
             <div className="dashboard-grid">
               <section className="panel severity-panel"><h2>Finding severity</h2>{soqlSummary ? <><div className="severity-visual" style={{ background: `conic-gradient(#f04452 0 ${soqlSummary.totalFindings ? 100 * soqlSummary.errors / soqlSummary.totalFindings : 0}%, #f5a23c 0 100%)` }}><div><strong>{soqlSummary.totalFindings}</strong><span>Total findings</span></div></div><div className="legend"><span><i className="dot red-dot"/>Errors <strong>{soqlSummary.errors}</strong></span><span><i className="dot orange-dot"/>Reviews <strong>{soqlSummary.reviews}</strong></span></div></> : <div className="empty-visual"><span>◌</span><p>No analysis completed yet</p><small>Run SOQL Security Analysis to populate this chart.</small></div>}</section>
-              <section className="panel summary-panel"><h2>Repository & latest analysis</h2><div className="detail-line"><span>Repository</span><strong title={repositoryName}>{repositoryName || "Not loaded"}</strong></div><div className="detail-line"><span>API status</span><strong className={apiConnected ? "text-success" : "text-danger"}>{apiConnected ? "Connected" : "Unavailable"}</strong></div><div className="detail-line"><span>Last analysed</span><strong>{lastRunAt ? lastRunAt.toLocaleString() : "Not yet run"}</strong></div><div className="detail-line"><span>Persona</span><strong>{lastSoql?.personaName || "—"}</strong></div><div className="detail-line"><span>Reports folder</span><strong title={lastSoql?.outputFolder}>{lastSoql?.outputFolder || "—"}</strong></div></section>
+              <section className="panel summary-panel"><h2>Repository & latest analysis</h2><div className="detail-line"><span>Repository</span><strong title={repositoryName}>{repositoryName || "Not loaded"}</strong></div><div className="detail-line"><span>API status</span><strong className={apiConnected ? "text-success" : "text-danger"}>{apiConnected ? "Connected" : "Unavailable"}</strong></div><div className="detail-line"><span>Salesforce org</span><strong className={salesforceConnection === "connected" ? "text-success" : ""}>{salesforceConnection === "connected" ? "Connected automatically" : salesforceConnection === "connecting" ? "Connecting…" : salesforceConnection === "not-configured" ? "Not configured" : "Connection unavailable"}</strong></div><div className="detail-line"><span>Last analysed</span><strong>{lastRunAt ? lastRunAt.toLocaleString() : "Not yet run"}</strong></div><div className="detail-line"><span>Persona</span><strong>{lastSoql?.personaName || "—"}</strong></div><div className="detail-line"><span>Reports folder</span><strong title={lastSoql?.outputFolder}>{lastSoql?.outputFolder || "—"}</strong></div></section>
             </div>
             <section className="panel shortcuts-panel"><div className="panel-heading"><div><h2>Quick actions</h2><p>Choose an analysis workflow.</p></div></div><div className="quick-actions"><button onClick={() => navigate("access")}><span className="shortcut-icon">◇</span><strong>Check object or field access</strong><small>Resolve permissions for a persona</small><span className="shortcut-arrow">→</span></button><button onClick={() => navigate("soql")}><span className="shortcut-icon">◎</span><strong>Scan SOQL security</strong><small>Generate findings and reports</small><span className="shortcut-arrow">→</span></button><button onClick={() => navigate("reports")}><span className="shortcut-icon">▧</span><strong>View report location</strong><small>Find generated Excel and TXT files</small><span className="shortcut-arrow">→</span></button></div></section>
           </>
