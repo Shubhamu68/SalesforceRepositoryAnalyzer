@@ -12,10 +12,23 @@ import { SoqlSecurityAnalyzer } from "../analyzer/soqlSecurityAnalyzer.js";
 import { createMetadataRouter } from "./metadataRoutes.js";
 import { ObjectAccessMatrixService } from "../services/ObjectAccessMatrixService.js";
 import { StackTraceImpactService } from "../services/StackTraceImpactService.js";
+import { SalesforceOrgConnection } from "../salesforce/SalesforceOrgConnection.js";
+import { createSalesforceRouter } from "./salesforceRoutes.js";
+import { existsSync } from "node:fs";
+
+// Optional local .env file; existing shell environment variables take precedence.
+// Node.js 22+ is required for this dependency-free configuration loader.
+if (existsSync(".env")) {
+  process.loadEnvFile(".env");
+}
 
 const app = express();
 
-app.use(express.json());
+app.use(express.json({ limit: "100kb" }));
+
+// OAuth client credentials stay on the backend; only the access token is held in memory.
+const salesforceOrgConnection = new SalesforceOrgConnection();
+app.use("/api/salesforce", createSalesforceRouter(salesforceOrgConnection));
 
 const PORT = 3000;
 
@@ -295,8 +308,14 @@ function handleApiError(
   });
 }
 
-app.listen(PORT, () => {
+app.listen(PORT, "127.0.0.1", () => {
   console.log(
     `Salesforce Repository Analyzer API running on http://localhost:${PORT}`
   );
+  // Start authenticating without opening a browser or blocking repository analysis.
+  void salesforceOrgConnection.connect().then(() => {
+    console.log("Salesforce org authenticated (Client Credentials). ");
+  }).catch((error: unknown) => {
+    console.warn("Salesforce org auto-connect unavailable:", error instanceof Error ? error.message : "Unknown error");
+  });
 });
