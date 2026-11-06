@@ -4,3 +4,5 @@ dist/
 .env
 .env.*
 *.log
+# Safe template may be committed; real credentials never should be.
+!.env.example
