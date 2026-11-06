@@ -8,3 +8,59 @@
 @media(max-width:1150px){.stack-stats{grid-template-columns:repeat(3,minmax(0,1fr))}}@media(max-width:780px){.stack-query-personas{grid-template-columns:1fr}.stack-controls{flex-direction:column;align-items:stretch}.stack-query-filter{margin-top:10px}.stack-queries .panel-heading{flex-wrap:wrap}}@media(max-width:490px){.stack-stats{grid-template-columns:repeat(2,minmax(0,1fr))}.stack-filter{flex-direction:column;align-items:stretch}.stack-persona-detail li{flex-direction:column;align-items:start}}
 
 .stack-source-frames{border:1px solid #e3eaf5;padding:12px 15px;border-radius:8px;margin-bottom:14px;font-size:12px;color:#536b8b}.stack-source-frames summary{cursor:pointer;font-weight:700}.stack-source-frames ol{margin:10px 0 0 17px;padding:0;line-height:1.8;overflow-wrap:anywhere}
+
+
+/* App shell: collapsible workspace sidebar + always-visible connection indicators. */
+.workspace.sidebar-collapsed {
+  grid-template-columns: 0 minmax(0, 1fr);
+}
+.sidebar[hidden] { display: none; }
+.main-area { grid-column: 2; grid-row: 2; }
+.workspace.sidebar-collapsed .main-area {
+  max-width: none;
+  width: 100%;
+}
+.sidebar-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+  padding: 0;
+  color: #d5e5ff;
+  background: transparent;
+  border: 1px solid #354961;
+  border-radius: 7px;
+  transition: background-color .15s, border-color .15s;
+}
+.sidebar-toggle:hover { background: #213b5f; border-color: #6484b1; }
+.sidebar-toggle:focus-visible { outline: 2px solid #93bbff; outline-offset: 3px; }
+.topbar-right { gap: 16px; }
+.topbar-right .connection { white-space: nowrap; }
+.connection.offline .connection-dot { background: #ffb454; }
+@media (max-width: 790px) {
+  .workspace.sidebar-collapsed {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: 60px minmax(0, 1fr);
+  }
+  .workspace.sidebar-collapsed .main-area { grid-column: 1; grid-row: 2; }
+  .topbar-right { gap: 10px; }
+  .topbar-right .connection { display: inline-flex; font-size: 10px; }
+  .topbar { padding: 0 12px; gap: 9px; }
+  .brand-name { font-size: 12px; }
+}
+@media (max-width: 560px) {
+  .topbar-right .connection { font-size: 0; gap: 0; }
+  .topbar-right .connection-dot { width: 9px; height: 9px; }
+  .topbar-right { gap: 12px; }
+  .brand-mark { width: 30px; height: 34px; font-size: 21px; }
+  .avatar { width: 30px; height: 30px; }
+}
+@media (max-width: 790px) {
+  .workspace:not(.sidebar-collapsed) .main-area { grid-column: 1; grid-row: 3; }
+}
+.workspace.sidebar-collapsed .analysis-panel,
+.workspace.sidebar-collapsed .results-section,
+.workspace.sidebar-collapsed .reports-panel,
+.workspace.sidebar-collapsed .matrix-query-panel { max-width: none; }

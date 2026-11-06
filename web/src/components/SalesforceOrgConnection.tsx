@@ -3,7 +3,9 @@ import "./SalesforceOrgConnection.css";
 
 type ConnectionStatus = {
   configured: boolean;
+  connecting: boolean;
   connected: boolean;
+  authMode: "client_credentials";
   environment: "sandbox" | "production" | "custom";
   loginHost: string;
   organizationId?: string;
@@ -14,7 +16,6 @@ type ConnectionStatus = {
 };
 
 type QueryApi = "data" | "tooling";
-
 type QueryResult = {
   api: QueryApi;
   totalSize: number;
@@ -57,44 +58,33 @@ export default function SalesforceOrgConnection() {
   }
 
   useEffect(() => {
-    const parameters = new URLSearchParams(window.location.search);
-    const callbackResult = parameters.get("sfConnection");
-    if (callbackResult === "connected") setMessage("Salesforce sign-in completed successfully.");
-    if (callbackResult === "error") setError(parameters.get("reason") || "Salesforce sign-in failed.");
-    if (callbackResult) {
-      window.history.replaceState({}, "", window.location.pathname);
-    }
-    refreshStatus().catch((err: unknown) => {
-      setError(err instanceof Error ? err.message : "Could not load Salesforce connection status.");
-    });
+    let active = true;
+    const load = async () => {
+      try {
+        const response = await fetch("/api/salesforce/status", { cache: "no-store" });
+        const data = await readJson(response);
+        if (active) setStatus(data as unknown as ConnectionStatus);
+      } catch (err) {
+        if (active) setError(err instanceof Error ? err.message : "Could not load Salesforce connection status.");
+      }
+    };
+    void load();
+    const interval = window.setInterval(() => { void load(); }, 5000);
+    return () => { active = false; window.clearInterval(interval); };
   }, []);
 
-  async function connect() {
+  async function reconnect() {
     setError("");
     setMessage("");
     setBusy(true);
     try {
-      const response = await fetch("/api/salesforce/connect", { method: "POST" });
+      const response = await fetch("/api/salesforce/reconnect", { method: "POST" });
       const data = await readJson(response);
-      if (typeof data.authorizationUrl !== "string") throw new Error("Authorization URL not received.");
-      window.location.assign(data.authorizationUrl);
+      setStatus(data as unknown as ConnectionStatus);
+      setMessage("Salesforce authentication completed automatically.");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to start Salesforce sign-in.");
-      setBusy(false);
-    }
-  }
-
-  async function disconnect() {
-    setBusy(true);
-    setError("");
-    setMessage("");
-    try {
-      await readJson(await fetch("/api/salesforce/disconnect", { method: "POST" }));
-      await refreshStatus();
-      setResult(null);
-      setMessage("Salesforce connection cleared from the backend.");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Disconnect failed.");
+      setError(err instanceof Error ? err.message : "Salesforce authentication failed.");
+      await refreshStatus().catch(() => undefined);
     } finally {
       setBusy(false);
     }
@@ -121,39 +111,36 @@ export default function SalesforceOrgConnection() {
     }
   }
 
+  const connectionLabel = !status ? "Checking…" : status.connected ? "Connected automatically" :
+    status.connecting ? "Connecting…" : status.configured ? "Connection unavailable" : "Not configured";
+
   return (
     <div className="sf-page">
       <section className="panel sf-connection-panel">
         <div className="panel-heading">
           <div>
             <h2>Salesforce org connection</h2>
-            <p>Connect to a sandbox and confirm that the analyzer can retrieve live Salesforce records.</p>
+            <p>Backend authenticates automatically through Client Credentials. No Salesforce login screen is needed.</p>
           </div>
-          <span className={`sf-connection-pill ${status?.connected ? "sf-connection-on" : "sf-connection-off"}`}>
-            {status?.connected ? "Connected" : "Not connected"}
+          <span className={`sf-connection-pill ${status?.connected ? "sf-connection-on" : status?.connecting ? "sf-connection-pending" : "sf-connection-off"}`}>
+            {connectionLabel}
           </span>
         </div>
         <div className="sf-connection-content">
           <div className="sf-connection-details">
             <div><span>Environment</span><strong>{status?.environment || "—"}</strong></div>
+            <div><span>Authentication</span><strong>Client Credentials (server-to-server)</strong></div>
             <div><span>Login domain</span><strong>{status?.loginHost || "—"}</strong></div>
             <div><span>Salesforce org ID</span><strong>{status?.organizationId || "—"}</strong></div>
-            <div><span>Authenticated user ID</span><strong>{status?.userId || "—"}</strong></div>
+            <div><span>Run As user ID</span><strong>{status?.userId || "—"}</strong></div>
             <div><span>Instance</span><strong>{status?.instanceUrl || "—"}</strong></div>
           </div>
-          <p className="sf-description">This first milestone checks connectivity only. All existing repository-based permission results remain unchanged. OAuth tokens are kept in backend memory and are cleared when the API restarts.</p>
-          {status?.message && <p className="sf-warning">{status.message}</p>}
+          <p className="sf-description">Connection starts with the backend and is retried automatically when needed. Credentials remain in the backend .env file; access tokens remain in process memory. Repository-based permission analysis is unchanged.</p>
+          {status?.message && <p className="sf-warning" role="status">{status.message}</p>}
           <div className="sf-actions">
-            {!status?.connected ? (
-              <button className="primary-button" type="button" disabled={busy || !status?.configured} onClick={connect}>
-                {busy ? "Starting sign-in…" : "Connect to Salesforce"}
-              </button>
-            ) : (
-              <button className="secondary-button" type="button" disabled={busy} onClick={disconnect}>
-                {busy ? "Disconnecting…" : "Disconnect org"}
-              </button>
-            )}
-            <button className="secondary-button" type="button" disabled={busy} onClick={() => refreshStatus().catch((err: unknown) => setError(String(err)))}>Refresh status</button>
+            <button className="secondary-button" type="button" disabled={busy || !status?.configured} onClick={() => void reconnect()}>
+              {busy ? "Authenticating…" : "Retry connection"}
+            </button>
           </div>
         </div>
       </section>
@@ -162,7 +149,7 @@ export default function SalesforceOrgConnection() {
         <div className="panel-heading">
           <div>
             <h2>SOQL connection test</h2>
-            <p>Execute a read-only query using Salesforce REST API or Tooling API.</p>
+            <p>Run a read-only query using Salesforce REST API or Tooling API.</p>
           </div>
           <span className="mini-tag">Proof of concept</span>
         </div>
@@ -182,7 +169,7 @@ export default function SalesforceOrgConnection() {
           <label htmlFor="sf-soql" className="sf-field-label">SOQL query</label>
           <textarea id="sf-soql" rows={5} spellCheck={false} value={soql} disabled={running} onChange={(event) => setSoql(event.target.value)} placeholder="SELECT Id, Name FROM Account LIMIT 5" />
           <div className="sf-actions">
-            <span className="sf-description">SELECT queries only. The UI displays at most 50 records from the first Salesforce response.</span>
+            <span className="sf-description">SELECT queries only. At most 50 records are shown from the first response.</span>
             <button type="button" className="primary-button" disabled={!status?.connected || running || !soql.trim()} onClick={() => void runQuery(soql, api)}>{running ? "Running query…" : "Run SOQL"}</button>
           </div>
           {result && (
