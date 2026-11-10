@@ -1,4 +1,7 @@
 import path from "node:path";
+import { existsSync } from "node:fs";
+import { SalesforceOrgConnection } from "./salesforce/SalesforceOrgConnection.js";
+import { SalesforcePersonaAccessVerifier } from "./salesforce/SalesforcePersonaAccessVerifier.js";
 
 import { scanRepository } from "./scanner/repositoryScanner.js";
 import { PersonaConfigLoader } from "./config/PersonaConfigLoader.js";
@@ -13,6 +16,8 @@ import { loadOrgVerificationStatusPolicy } from "./config/orgVerificationStatusP
 import { OrgObjectReadVerificationService } from "./services/OrgObjectReadVerificationService.js";
 import { writeSoqlReport } from "./reporter/soqlReportWriter.js";
 
+// Match the API's optional .env initialization; shell variables still take precedence.
+if (existsSync(".env")) process.loadEnvFile(".env");
 const repositoryPath = process.argv[2];
 
 if (!repositoryPath) {
@@ -60,14 +65,21 @@ const personaPermissionResolver =
 // 4. Create access services
 // --------------------------------------------------
 
+const sharedReadVerification = new OrgObjectReadVerificationService(
+  await loadOrgVerificationStatusPolicy("./config/org-verification-status-policy.json"),
+  new SalesforcePersonaAccessVerifier(new SalesforceOrgConnection()),
+);
+
 const personaAccessService =
   new PersonaAccessService(
-    personaPermissionResolver
+    personaPermissionResolver,
+    sharedReadVerification,
   );
 
 const personaFieldAccessService =
   new PersonaFieldAccessService(
-    personaPermissionResolver
+    personaPermissionResolver,
+    sharedReadVerification,
   );
 
 const accessQueryService =
@@ -87,7 +99,7 @@ const soqlSecurityAnalyzer =
       paths.defaultPath,
       "objects"
     ),
-    new OrgObjectReadVerificationService(await loadOrgVerificationStatusPolicy("./config/org-verification-status-policy.json"))
+    sharedReadVerification
   );
 
 // --------------------------------------------------

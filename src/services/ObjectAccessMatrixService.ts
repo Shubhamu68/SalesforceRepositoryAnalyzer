@@ -72,7 +72,7 @@ export class ObjectAccessMatrixService {
           }
         }
         const entry = calculateMatrixPersona(object, resolved, resolved.mutesByGroup, warnings);
-        if (!entry.access.read && this.orgReadVerification?.isConfigured(object)) {
+        if (!entry.access.read && this.orgReadVerification) {
           const evidence = await this.orgReadVerification.resolve(persona, object, false);
           entry.readEvidence = evidence;
           if (evidence.readable) entry.access.read = true;

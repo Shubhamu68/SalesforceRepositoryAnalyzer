@@ -1,4 +1,6 @@
-export type ImpactStatus = "AT_RISK" | "REVIEW" | "NO_GAPS" | "ORG_VERIFIED";
+import type { EffectiveSoqlMode, QueryEnforcement } from "../analyzer/soqlExecutionMode.js";
+
+export type ImpactStatus = "AT_RISK" | "REVIEW" | "NO_GAPS" | "ORG_VERIFIED" | "ADVISORY";
 
 export interface ApexStackFrame {
   kind: "Class" | "Trigger";
@@ -30,6 +32,7 @@ export interface OrgCheckedUser {
   id: string;
   name: string;
   username: string;
+  lastLoginDate?: string;
 }
 
 export interface MissingReadPermission {
@@ -39,8 +42,8 @@ export interface MissingReadPermission {
   /** Live verification status for either object or field Read. */
   orgOutcome?: "DENIED" | "UNVERIFIED";
   orgMessage?: string;
-  /** The org had no matching active users; distinct from authentication/API failures. */
-  orgReason?: "NO_MATCHING_USERS";
+  /** Missing persona match or matching users with no login history; distinct from API failures. */
+  orgReason?: "NO_MATCHING_USERS" | "NO_LOGGED_IN_USERS";
 }
 
 export interface VerifiedOrgObject {
@@ -73,6 +76,9 @@ export interface StackQueryImpact {
   query: string;
   withUserMode: boolean;
   securityMode: "USER_MODE" | "SECURITY_ENFORCED" | "SYSTEM_MODE" | "UNSPECIFIED";
+  effectiveMode?: EffectiveSoqlMode;
+  permissionEnforcement?: QueryEnforcement;
+  apiVersion?: number;
   checkedFields: ResolvedQueryField[];
   unresolvedFields: string[];
   limitations: string[];
@@ -84,6 +90,7 @@ export interface StackPersonaImpact {
   status: ImpactStatus;
   atRiskQueries: number;
   reviewQueries: number;
+  advisoryQueries?: number;
   missing: MissingReadPermission[];
   verifiedFromOrg?: VerifiedOrgObject[];
   /** Deduplicated users checked across the persona's SOQL queries. */
@@ -102,6 +109,7 @@ export interface StackTraceImpactResult {
     personasChecked: number;
     atRisk: number;
     review: number;
+    advisory?: number;
     noGaps: number;
     orgVerified?: number;
   };

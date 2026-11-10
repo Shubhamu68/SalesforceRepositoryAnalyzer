@@ -53,3 +53,14 @@ test("the status-neutral object policy never exempts field Read", () => {
   assert.equal(isStatusNeutralOrgObjectRead(policy, "OrderItemSummary", "Order_Quantity_Change__c"), false);
   assert.equal(isStatusNeutralOrgObjectRead(policy, missingObject.object, undefined), true);
 });
+
+test('system-mode permission advisories remain visible in issue-filtered query results', () => {
+  const q: Query = {
+    id: 'q-advice', methodId: 'm', className: 'Demo', methodName: 'method', filePath: 'Demo.cls',
+    lineNumber: 12, object: 'Account', query: 'SELECT Id FROM Account WITH SYSTEM_MODE',
+    withUserMode: false, securityMode: 'SYSTEM_MODE', effectiveMode: 'SYSTEM_MODE',
+    permissionEnforcement: 'NONE', checkedFields: [], unresolvedFields: [], limitations: [],
+    personas: [{ personaName: 'OMS View Only', status: 'ADVISORY', missing: [denied], notes: [] }],
+  };
+  assert.equal(focusedQueries([q], 'OMS View Only', true).length, 1);
+});

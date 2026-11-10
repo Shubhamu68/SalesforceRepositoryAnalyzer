@@ -50,10 +50,11 @@ export async function writeSoqlReport(
         finding.severity !== "ERROR"
     );
 
-  const conciseFindings =
-    buildConciseFindings(
-      errorFindings
-    );
+  // Include High, Low and Unable to verify. A successful Salesforce
+  // verification is evidence worth keeping, not an error to suppress.
+  const conciseFindings = buildConciseFindings(
+    findings.filter((finding) => !isMetadataObject(finding.object))
+  );
 
   const baseName =
     `soql-fls-${safePersonaName}-${timestamp}`;
@@ -147,9 +148,12 @@ function buildDetailedReport(
       `Finding ${index + 1}`
     );
     lines.push("-".repeat(70));
-    lines.push(
-      `Severity: ${finding.severity}`
-    );
+    lines.push(`Severity: ${finding.criticality ?? (finding.severity === "ERROR" ? "High" : "Unable to verify")}`);
+    lines.push(`Verification: ${finding.verificationSource ?? "UNVERIFIED"}`);
+    lines.push(`Finding Type: ${finding.findingType ?? "FIELD_READ"}`);
+    lines.push(`Runtime Impact: ${finding.runtimeImpact ?? "Undetermined"}`);
+    lines.push(`Effective Query Mode: ${finding.effectiveMode ?? "UNKNOWN"}`);
+    lines.push(`Apex API Version: ${finding.apiVersion ?? "Unknown"}`);
     lines.push(
       `File: ${finding.filePath}`
     );
@@ -162,13 +166,7 @@ function buildDetailedReport(
     lines.push(
       `Field: ${finding.field}`
     );
-    lines.push(
-      `Security Mode: ${
-        finding.withUserMode
-          ? "USER_MODE"
-          : "NO_USER_MODE"
-      }`
-    );
+    lines.push(`Explicit Query Mode: ${finding.declaredMode ?? (finding.withUserMode ? "USER_MODE" : "UNSPECIFIED")}`);
     lines.push("");
     lines.push("Reason:");
     lines.push(finding.reason);
@@ -189,11 +187,21 @@ function buildDetailedReport(
 interface ConciseFinding {
   object: string;
   field: string;
+  criticality: string;
+  explanation: string;
+  verificationSource: string;
+  findingType: string;
 
   references: Array<{
     filePath: string;
     lineNumber: number;
     securityMode: string;
+    effectiveMode: string;
+    runtimeImpact: string;
+    apiVersion?: number;
+    /** Severity and explanation are specific to this Apex query, not its group. */
+    criticality: string;
+    explanation: string;
   }>;
 }
 
@@ -226,6 +234,10 @@ function buildConciseFindings(
         {
           object,
           field,
+          criticality: finding.criticality ?? (finding.severity === "ERROR" ? "High" : "Unable to verify"),
+          explanation: finding.reason,
+          verificationSource: finding.verificationSource ?? "UNVERIFIED",
+          findingType: finding.findingType ?? "FIELD_READ",
           references: [],
         }
       );
@@ -234,10 +246,7 @@ function buildConciseFindings(
     const entry =
       grouped.get(key)!;
 
-    const securityMode =
-      finding.withUserMode
-        ? "USER_MODE"
-        : "NO_USER_MODE";
+    const securityMode = finding.declaredMode ?? (finding.withUserMode ? "USER_MODE" : "UNSPECIFIED");
 
     const alreadyPresent =
       entry.references.some(
@@ -255,21 +264,41 @@ function buildConciseFindings(
         lineNumber:
           finding.lineNumber,
         securityMode,
+        effectiveMode: finding.effectiveMode ?? "UNKNOWN",
+        runtimeImpact: finding.runtimeImpact ?? "Undetermined",
+        criticality: finding.criticality ?? (finding.severity === "ERROR" ? "High" : "Unable to verify"),
+        explanation: finding.reason,
+        ...(finding.apiVersion !== undefined ? { apiVersion: finding.apiVersion } : {}),
       });
     }
   }
 
+  // A field may be accessed by system-mode and user-mode queries. The Summary
+  // displays the highest priority finding; References keeps each query's own
+  // grade and explanation so no system-mode reference is falsely marked High.
+  for (const entry of grouped.values()) {
+    const priority = (criticality: string) => criticality === "High" ? 0 : criticality === "Unable to verify" ? 1 : 2;
+    const highest = [...entry.references].sort((a, b) => priority(a.criticality) - priority(b.criticality))[0];
+    if (!highest) continue;
+    entry.criticality = highest.criticality;
+    const isMixed = entry.references.some(ref => ref.criticality !== highest.criticality);
+    entry.explanation = highest.explanation + (isMixed
+      ? " Severity differs across SOQL references. The Summary shows the highest; see References for individual query severity."
+      : "");
+  }
+
   return Array.from(
     grouped.values()
-  ).sort(
-    (a, b) =>
-      a.object.localeCompare(
-        b.object
-      ) ||
-      a.field.localeCompare(
-        b.field
-      )
-  );
+  ).sort((a, b) => {
+    const priority = (criticality: string) => criticality === "High" ? 0 : criticality === "Unable to verify" ? 1 : 2;
+    return priority(a.criticality) - priority(b.criticality) ||
+      a.object.localeCompare(b.object) || a.field.localeCompare(b.field);
+  });
+}
+
+function summariseReferenceProperty(values: string[]): string {
+  const unique = [...new Set(values)];
+  return unique.length === 1 ? unique[0] : "Mixed (see References)";
 }
 
 // --------------------------------------------------
@@ -301,11 +330,11 @@ async function writeSummaryWorkbook(
     );
 
   summarySheet.mergeCells(
-    "A1:D1"
+    "A1:I1"
   );
 
   summarySheet.getCell("A1").value =
-    "SOQL FLS Vulnerability Summary";
+    "SOQL Read Permission Verification Summary";
 
   summarySheet.getCell(
     "A1"
@@ -337,7 +366,7 @@ async function writeSummaryWorkbook(
   summarySheet.getCell(
     "A4"
   ).value =
-    "Unique Object/Field Issues";
+    "Unique Permission Findings";
 
   summarySheet.getCell(
     "B4"
@@ -345,6 +374,9 @@ async function writeSummaryWorkbook(
     findings.length;
 
   summarySheet.addRow([]);
+  summarySheet.mergeCells("A5:I5");
+  summarySheet.getCell("A5").value = "High = confirmed missing Read with enforced SOQL access; Low = advisory or org-verified Read. Mixed findings show the highest severity here; see References.";
+  summarySheet.getCell("A5").font = { italic: true, color: { argb: "FF60748D" }, size: 10 };
 
   const summaryHeader =
     summarySheet.addRow([
@@ -352,6 +384,11 @@ async function writeSummaryWorkbook(
       "Field",
       "Occurrences",
       "Apex Classes",
+      "Criticality / Severity",
+      "Explanation",
+      "Runtime Impact",
+      "Effective Query Mode",
+      "Apex API Version",
     ]);
 
   styleHeader(summaryHeader);
@@ -378,6 +415,11 @@ async function writeSummaryWorkbook(
         finding.field,
         finding.references.length,
         "",
+        finding.criticality,
+        finding.explanation,
+        summariseReferenceProperty(finding.references.map(ref => ref.runtimeImpact)),
+        summariseReferenceProperty(finding.references.map(ref => ref.effectiveMode)),
+        summariseReferenceProperty(finding.references.map(ref => ref.apiVersion?.toString() ?? "Unknown")),
       ]);
 
     const apexCell =
@@ -392,6 +434,15 @@ async function writeSummaryWorkbook(
       wrapText: true,
       vertical: "top",
     };
+    row.getCell(5).font = { bold: true, color: {
+      argb: finding.criticality === "High" ? "FFB42332" :
+        finding.criticality === "Low" ? "FF167349" : "FF916514",
+    } };
+    row.getCell(6).alignment = { wrapText: true, vertical: "top" };
+    row.getCell(7).alignment = { wrapText: true, vertical: "top" };
+    row.getCell(8).alignment = { wrapText: true, vertical: "top" };
+    row.height = Math.min(112, Math.max(30,
+      15 * Math.max(groupedReferences.length, Math.ceil(finding.explanation.length / 65))));
   }
 
   summarySheet.views = [
@@ -405,6 +456,11 @@ async function writeSummaryWorkbook(
   summarySheet.getColumn(2).width = 42;
   summarySheet.getColumn(3).width = 14;
   summarySheet.getColumn(4).width = 70;
+  summarySheet.getColumn(5).width = 23;
+  summarySheet.getColumn(6).width = 64;
+  summarySheet.getColumn(7).width = 30;
+  summarySheet.getColumn(8).width = 24;
+  summarySheet.getColumn(9).width = 20;
 
   summarySheet.getColumn(4).alignment = {
     wrapText: true,
@@ -427,6 +483,11 @@ async function writeSummaryWorkbook(
       "Apex File",
       "Line",
       "Security Mode",
+      "Criticality / Severity",
+      "Explanation",
+      "Effective Query Mode",
+      "Runtime Impact",
+      "Apex API Version",
     ]);
 
   styleHeader(referenceHeader);
@@ -438,13 +499,23 @@ async function writeSummaryWorkbook(
       const reference
         of finding.references
     ) {
-      referenceSheet.addRow([
+      const row = referenceSheet.addRow([
         finding.object,
         finding.field,
         reference.filePath,
         reference.lineNumber,
         reference.securityMode,
+        reference.criticality,
+        reference.explanation,
+        reference.effectiveMode,
+        reference.runtimeImpact,
+        reference.apiVersion ?? "Unknown",
       ]);
+      row.getCell(6).font = { bold: true, color: {
+        argb: reference.criticality === "High" ? "FFB42332" :
+          reference.criticality === "Low" ? "FF167349" : "FF916514",
+      } };
+      row.height = Math.min(84, Math.max(30, 15 * Math.ceil(reference.explanation.length / 65)));
     }
   }
 
@@ -460,6 +531,12 @@ async function writeSummaryWorkbook(
   referenceSheet.getColumn(3).width = 80;
   referenceSheet.getColumn(4).width = 10;
   referenceSheet.getColumn(5).width = 18;
+  referenceSheet.getColumn(6).width = 23;
+  referenceSheet.getColumn(7).width = 64;
+  referenceSheet.getColumn(7).alignment = { wrapText: true, vertical: "top" };
+  referenceSheet.getColumn(8).width = 25;
+  referenceSheet.getColumn(9).width = 28;
+  referenceSheet.getColumn(10).width = 19;
 
   // ------------------------------------------------
   // Auto filter
@@ -467,12 +544,12 @@ async function writeSummaryWorkbook(
 
   summarySheet.autoFilter = {
     from: "A6",
-    to: `D${summarySheet.rowCount}`,
+    to: `I${Math.max(6, summarySheet.rowCount)}`,
   };
 
   referenceSheet.autoFilter = {
     from: "A1",
-    to: `E${referenceSheet.rowCount}`,
+    to: `J${Math.max(1, referenceSheet.rowCount)}`,
   };
 
   await workbook.xlsx.writeFile(
@@ -499,7 +576,7 @@ function styleHeader(
     horizontal: "center",
   };
 
-  row.eachCell((cell) => {
+  row.eachCell((cell: ExcelJS.Cell) => {
     cell.fill = {
       type: "pattern",
       pattern: "solid",

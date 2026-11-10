@@ -3,6 +3,7 @@ import {
   readFile,
 } from "node:fs/promises";
 import path from "node:path";
+import { classifySoqlMode } from "../analyzer/soqlExecutionMode.js";
 
 import {
   SoqlQuery,
@@ -458,10 +459,8 @@ function parseSoqlQuery(
     return null;
   }
 
-  const withUserMode =
-    /\bWITH\s+USER_MODE\b/i.test(
-      queryText
-    );
+  const declaredMode = classifySoqlMode(queryText);
+  const withUserMode = declaredMode === "USER_MODE";
 
   return {
     filePath,
@@ -483,10 +482,7 @@ function parseSoqlQuery(
 
     withUserMode,
 
-    securityMode:
-      withUserMode
-        ? "USER_MODE"
-        : "NO_USER_MODE",
+    securityMode: declaredMode,
   };
 }
 

@@ -3,6 +3,7 @@ import "./App.css";
 import ObjectAccessMatrix from "./components/ObjectAccessMatrix";
 import StackTraceImpact from "./components/StackTraceImpact";
 import SalesforceOrgConnection from "./components/SalesforceOrgConnection";
+import AnalysisLoadingOverlay from "./components/AnalysisLoadingOverlay";
 
 type Persona = {
   name: string;
@@ -664,48 +665,54 @@ function App() {
         analysis.summary.userModeQueries,
       ],
       [
-        "No USER_MODE",
+        "No explicit USER_MODE",
         analysis.summary.noUserModeQueries,
       ],
     ];
 
     return (
-      <div className="result-card">
-        <div className="result-header">
-          <span className="result-type">
-            SOQL ANALYSIS
-          </span>
-
-          <h2>{analysis.personaName}</h2>
+      <div className="soql-result-layout">
+        <div className="soql-success-banner" role="status" aria-live="polite">
+          <div className="soql-success-icon" aria-hidden="true">✓</div>
+          <div className="soql-success-copy">
+            <span className="soql-success-eyebrow">ANALYSIS COMPLETED</span>
+            <h3>Your SOQL reports are ready</h3>
+            <p>The TXT and Excel reports were generated successfully for <strong>{analysis.personaName}</strong>.</p>
+          </div>
+          <div className="soql-success-actions">
+            <span className="soql-output-label">Output folder</span>
+            <strong className="path-text">{analysis.outputFolder}</strong>
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={() => navigator.clipboard.writeText(analysis.outputFolder)}
+            >
+              Copy folder path
+            </button>
+          </div>
         </div>
 
-        <div className="permission-grid">
-          {summaryItems.map(
-            ([label, value]) => (
-              <div
-                className="permission-row"
-                key={String(label)}
-              >
-                <span>{label}</span>
-                <strong>{value}</strong>
-              </div>
-            )
-          )}
-        </div>
-
-        <div className="source-section">
-          <h3>Analysis completed</h3>
-
-          <p className="muted">
-            The TXT reports and Excel summary were
-            generated successfully.
-          </p>
-
-          <div className="source-item">
-            <strong>Output folder</strong>
-            <span>
-              {analysis.outputFolder}
+        <div className="result-card">
+          <div className="result-header">
+            <span className="result-type">
+              SOQL ANALYSIS SUMMARY
             </span>
+
+            <h2>{analysis.personaName}</h2>
+          </div>
+
+          <div className="permission-grid">
+            {summaryItems.map(
+              ([label, value]) => (
+                <div
+                  className="permission-row"
+                  key={String(label)}
+                >
+                  <span>{label}</span>
+                  <strong>{value}</strong>
+                </div>
+              )
+            )}
           </div>
         </div>
       </div>
@@ -720,8 +727,10 @@ function App() {
     { label: "Review findings", value: soqlSummary?.reviews, icon: "◉", tone: "amber" },
     { label: "Affected classes", value: soqlSummary?.affectedApexClasses, icon: "{ }", tone: "purple" },
     { label: "WITH USER_MODE", value: soqlSummary?.userModeQueries, icon: "✓", tone: "green" },
-    { label: "Without USER_MODE", value: soqlSummary?.noUserModeQueries, icon: "!", tone: "amber" },
+    { label: "No explicit USER_MODE", value: soqlSummary?.noUserModeQueries, icon: "!", tone: "amber" },
   ];
+
+  const showSoqlOverlay = checking && page === "soql";
 
   const analysisForm = (
     <section className="panel analysis-panel">
@@ -917,8 +926,14 @@ function App() {
             {analysisForm}
             {result && (
               <section className="results-section">
-                <div className="results-heading"><div><span>ANALYSIS RESULT</span><h2>{selectedPersona}</h2></div><span className="result-complete">✓ Completed</span></div>
-                {page === "soql" ? renderSoqlResult(result as SoqlAnalysisResult) : checkType === "object" ? renderObjectResult(result as ObjectAccessResult) : renderFieldResult(result as FieldAccessResult)}
+                {page === "soql" ? (
+                  renderSoqlResult(result as SoqlAnalysisResult)
+                ) : (
+                  <>
+                    <div className="results-heading"><div><span>ANALYSIS RESULT</span><h2>{selectedPersona}</h2></div><span className="result-complete">✓ Completed</span></div>
+                    {checkType === "object" ? renderObjectResult(result as ObjectAccessResult) : renderFieldResult(result as FieldAccessResult)}
+                  </>
+                )}
               </section>
             )}
           </>
@@ -927,6 +942,8 @@ function App() {
         {page === "matrix" && <ObjectAccessMatrix objects={objects} loadingObjects={loadingObjects} />}
         {page === "stack" && <StackTraceImpact />}
         {page === "salesforce" && <SalesforceOrgConnection />}
+
+        {showSoqlOverlay && <AnalysisLoadingOverlay title="Analysis in Progress" description="Scanning Apex SOQL queries and preparing your security reports..." hint="This may take 20–30 seconds." />}
 
         {page === "reports" && <section className="panel reports-panel"><div className="panel-heading"><div><h2>Latest SOQL analysis reports</h2><p>Files are written by the backend, not downloaded by the browser.</p></div></div>{lastSoql ? <><div className="detail-line"><span>Persona</span><strong>{lastSoql.personaName}</strong></div><div className="detail-line"><span>Report folder</span><strong className="path-text">{lastSoql.outputFolder}</strong></div><div className="detail-line"><span>Findings</span><strong>{lastSoql.summary.totalFindings}</strong></div><button className="secondary-button" onClick={() => navigator.clipboard.writeText(lastSoql.outputFolder)}>Copy folder path</button></> : <div className="empty-reports"><span>▧</span><h3>No reports from this session</h3><p>Run SOQL Security Analysis to generate TXT and Excel reports.</p><button className="primary-button" onClick={() => navigate("soql")}>Run SOQL Analysis</button></div>}</section>}
       </main>

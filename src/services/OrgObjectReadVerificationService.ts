@@ -4,75 +4,155 @@ import { isStatusNeutralOrgObjectRead } from "../config/orgVerificationStatusPol
 import type { SalesforcePersonaAccessVerifier, OrgObjectAccessEvidence } from "../salesforce/SalesforcePersonaAccessVerifier.js";
 
 /**
- * Reusable, repository-first read decision for Salesforce-managed objects.
- * A policy entry never grants access. The org must confirm it for the persona.
- * Use the same service in SOQL analysis, Access Checker, Matrix and future flows.
+ * Single org-verification gateway for every analyzer.
+ *
+ * A repository grant is sufficient evidence of a grant. A missing repository
+ * grant is NOT a denial: verify against matching active users in Salesforce.
+ * Salesforce DENIED is the only source of a confirmed missing permission.
  */
-export type ObjectReadDecisionSource = "REPOSITORY" | "ORG_VERIFIED" | "ORG_DENIED" | "UNVERIFIED";
+export type ReadDecisionSource = "REPOSITORY" | "ORG_VERIFIED" | "ORG_DENIED" | "UNVERIFIED";
+export type ObjectReadDecisionSource = ReadDecisionSource;
+
 export interface ObjectReadDecision {
-  source: ObjectReadDecisionSource;
+  source: ReadDecisionSource;
   readable: boolean;
-  /** Verified org access does not escalate green -> orange for configured object Read. */
+  /** A configured object Read may count as green in Stack Trace, never its fields. */
   statusNeutral: boolean;
   message: string;
   checkedUsers?: number;
+  /** Original Salesforce evidence, including matched usernames, if available. */
+  orgEvidence?: OrgObjectAccessEvidence;
 }
 
+export interface FieldReadDecision extends Omit<ObjectReadDecision, "statusNeutral"> {
+  field: string;
+}
+
+// Retained for compatibility with older rules/tests. No longer an exception
+// list: EVERY repository-missing object or permissionable field is eligible
+// for org verification, regardless of API name.
+const ACCOUNT_ADDRESS_FIELDS = new Set([
+  "billingaddress", "billingstreet", "billingcity", "billingstate", "billingstatecode",
+  "billingpostalcode", "billingcountry", "billingcountrycode", "billinglatitude",
+  "billinglongitude", "billinggeocodeaccuracy", "shippingaddress", "shippingstreet",
+  "shippingcity", "shippingstate", "shippingstatecode", "shippingpostalcode",
+  "shippingcountry", "shippingcountrycode", "shippinglatitude", "shippinglongitude",
+  "shippinggeocodeaccuracy",
+]);
+export function isAccountStandardAddressField(object: string, field: string): boolean {
+  return object.trim().toLowerCase() === "account" && ACCOUNT_ADDRESS_FIELDS.has(field.trim().toLowerCase());
+}
+
+const CACHE_MS = 60_000;
+const MAX_CACHE_ENTRIES = 4000;
+const MAX_INFLIGHT_ORG_CHECKS = 3;
+type CacheEntry<T> = { until: number; value: Promise<T> };
+
 export class OrgObjectReadVerificationService {
-  private readonly objectChecks = new Map<string, { until: number; value: Promise<ObjectReadDecision> }>();
-  private readonly fieldChecks = new Map<string, { until: number; value: Promise<OrgObjectAccessEvidence | undefined> }>();
-  // Do not retain historical org decisions for the entire life of the server.
-  private readonly cacheMs = 60_000;
+  private readonly objectChecks = new Map<string, CacheEntry<OrgObjectAccessEvidence | undefined>>();
+  private readonly fieldChecks = new Map<string, CacheEntry<OrgObjectAccessEvidence | undefined>>();
+  private inflight = 0;
+  private readonly waiting: Array<() => void> = [];
 
   constructor(
     private readonly policy: OrgVerificationStatusPolicy,
     private readonly verifier?: SalesforcePersonaAccessVerifier,
   ) {}
 
-  /** Only configured managed objects get the special missing-XML treatment. */
+  /** Status-neutral reporting is separate from access verification eligibility. */
   isConfigured(object: string): boolean {
     return isStatusNeutralOrgObjectRead(this.policy, object);
   }
 
+  /** All missing repository FLS grants must be checked, not only Account fields. */
+  shouldVerifyMissingRepositoryField(_object: string, _field: string): boolean {
+    return true;
+  }
+
+  private cacheKey(persona: Persona, object: string, field?: string): string {
+    const scope = this.verifier?.getVerificationScope?.() ?? "unknown-org";
+    return JSON.stringify([
+      scope,
+      persona.name.trim().toLowerCase(),
+      (persona.profile ?? "").trim().toLowerCase(),
+      [...persona.permissionSets].map((name) => name.toLowerCase()).sort(),
+      [...persona.permissionSetGroups].map((name) => name.toLowerCase()).sort(),
+      object.trim().toLowerCase(), (field ?? "").trim().toLowerCase(),
+    ]);
+  }
+
+  private cached<T>(cache: Map<string, CacheEntry<T>>, key: string, lookup: () => Promise<T>): Promise<T> {
+    const hit = cache.get(key);
+    if (hit && hit.until > Date.now()) return hit.value;
+    if (cache.size >= MAX_CACHE_ENTRIES) cache.clear();
+    const promise = lookup();
+    cache.set(key, { until: Date.now() + CACHE_MS, value: promise });
+    return promise;
+  }
+
+  /** Bound Salesforce verification calls across ALL analyzers, not per feature. */
+  private async limited<T>(work: () => Promise<T>): Promise<T> {
+    if (this.inflight >= MAX_INFLIGHT_ORG_CHECKS) {
+      await new Promise<void>((resume) => this.waiting.push(resume));
+    }
+    this.inflight++;
+    try { return await work(); }
+    finally {
+      this.inflight--;
+      this.waiting.shift()?.();
+    }
+  }
+
+  /** The same cached Salesforce UserEntityAccess check is used everywhere. */
+  async verifyObject(persona: Persona, object: string): Promise<OrgObjectAccessEvidence | undefined> {
+    if (!this.verifier) return undefined;
+    return this.cached(this.objectChecks, this.cacheKey(persona, object),
+      () => this.limited(() => this.verifier!.verifyObjectRead(persona, object)));
+  }
+
+  /** Repository-first object permission resolution; no object-name restrictions. */
   async resolve(persona: Persona, object: string, repositoryRead: boolean): Promise<ObjectReadDecision> {
     if (repositoryRead) return {
       source: "REPOSITORY", readable: true, statusNeutral: false,
-      message: "Read access established from repository metadata.",
+      message: "Object Read permission established from repository metadata.",
     };
-    const key = `${persona.name.toLowerCase()}|${object.toLowerCase()}`;
-    const entry = this.objectChecks.get(key);
-    if (entry && entry.until > Date.now()) return entry.value;
-    const pending = this.lookupObject(persona, object);
-    this.objectChecks.set(key, { until: Date.now() + this.cacheMs, value: pending });
-    return pending;
-  }
-
-  private async lookupObject(persona: Persona, object: string): Promise<ObjectReadDecision> {
-    if (!this.verifier) return {
-      source: "UNVERIFIED", readable: false, statusNeutral: false,
-      message: `Repository Read is not established for ${object}; live Salesforce verification is unavailable.`,
-    };
-    const evidence = await this.verifier.verifyObjectRead(persona, object);
-    if (evidence.outcome === "VERIFIED") return {
-      source: "ORG_VERIFIED", readable: true,
-      statusNeutral: this.isConfigured(object), message: evidence.message,
-      checkedUsers: evidence.checkedUsers,
-    };
+    const evidence = await this.verifyObject(persona, object);
+    const source: ReadDecisionSource = !evidence ? "UNVERIFIED"
+      : evidence.outcome === "VERIFIED" ? "ORG_VERIFIED"
+      : evidence.outcome === "DENIED" ? "ORG_DENIED" : "UNVERIFIED";
     return {
-      source: evidence.outcome === "DENIED" ? "ORG_DENIED" : "UNVERIFIED",
-      readable: false, statusNeutral: false, message: evidence.message,
-      checkedUsers: evidence.checkedUsers,
+      source, readable: source === "ORG_VERIFIED",
+      statusNeutral: source === "ORG_VERIFIED" && this.isConfigured(object),
+      message: evidence?.message ?? "Repository object Read is not established and Salesforce verification is unavailable.",
+      ...(evidence ? { checkedUsers: evidence.checkedUsers, orgEvidence: evidence } : {}),
     };
   }
 
-  /** Independent FLS verification: object Read must never imply field Read. */
+  /** Cached raw field evidence, shared by SOQL, Stack Trace, Access Checker and future features. */
   async resolveField(persona: Persona, object: string, field: string): Promise<OrgObjectAccessEvidence | undefined> {
     if (!this.verifier) return undefined;
-    const key = `${persona.name.toLowerCase()}|${object.toLowerCase()}|${field.toLowerCase()}`;
-    const entry = this.fieldChecks.get(key);
-    if (entry && entry.until > Date.now()) return entry.value;
-    const pending = this.verifier.verifyFieldRead(persona, object, field);
-    this.fieldChecks.set(key, { until: Date.now() + this.cacheMs, value: pending });
-    return pending;
+    return this.cached(this.fieldChecks, this.cacheKey(persona, object, field),
+      () => this.limited(() => this.verifier!.verifyFieldRead(persona, object, field)));
+  }
+
+  /**
+   * Always check FLS independently of object Read. Call after object Read was
+   * established; callers supply true for repository FLS, schema-required or
+   * proven non-permissionable fields. Do not infer a grant from a missing org row.
+   */
+  async resolveFieldRead(persona: Persona, object: string, field: string, repositoryRead: boolean): Promise<FieldReadDecision> {
+    if (repositoryRead) return {
+      source: "REPOSITORY", readable: true, field,
+      message: "Field Read permission established from repository metadata.",
+    };
+    const evidence = await this.resolveField(persona, object, field);
+    const source: ReadDecisionSource = !evidence ? "UNVERIFIED"
+      : evidence.outcome === "VERIFIED" ? "ORG_VERIFIED"
+      : evidence.outcome === "DENIED" ? "ORG_DENIED" : "UNVERIFIED";
+    return {
+      field, source, readable: source === "ORG_VERIFIED",
+      message: evidence?.message ?? "Repository field Read is not established and Salesforce verification is unavailable.",
+      ...(evidence ? { checkedUsers: evidence.checkedUsers, orgEvidence: evidence } : {}),
+    };
   }
 }

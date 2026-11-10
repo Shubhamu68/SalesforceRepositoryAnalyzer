@@ -29,8 +29,9 @@ export function focusedQueries(queries: Query[], name: string, onlyIssues: boole
   const focused: Array<{ query: Query; impact: Impact }> = [];
   for (const query of queries) {
     const impact = query.personas.find((persona) => persona.personaName === name);
-    if (!impact || (onlyIssues && impact.status !== "AT_RISK" && impact.status !== "REVIEW")) continue;
+    if (!impact || (onlyIssues && impact.status !== "AT_RISK" && impact.status !== "REVIEW" && impact.status !== "ADVISORY")) continue;
     focused.push({ query, impact });
   }
   return focused;
 }
+

@@ -14,7 +14,7 @@ export class PersonaAccessService {
     const resolved = await this.resolver.resolve(persona);
     const evaluator = createPersonaAccessEvaluator(resolved);
     const { access, sources } = evaluator.evaluateObject(objectName);
-    const readEvidence = !access.read && this.orgReadVerification?.isConfigured(objectName)
+    const readEvidence = !access.read && this.orgReadVerification
       ? await this.orgReadVerification.resolve(persona, objectName, false)
       : undefined;
     // Preserve the former 404 for names not represented in metadata, unless
