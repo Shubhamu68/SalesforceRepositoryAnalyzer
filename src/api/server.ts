@@ -3,6 +3,8 @@ import path from "node:path";
 
 import { scanRepository } from "../scanner/repositoryScanner.js";
 import { PersonaConfigLoader } from "../config/PersonaConfigLoader.js";
+import { loadOrgVerificationStatusPolicy } from "../config/orgVerificationStatusPolicy.js";
+import { OrgObjectReadVerificationService } from "../services/OrgObjectReadVerificationService.js";
 import { PersonaPermissionResolver } from "../analyzer/PersonaPermissionResolver.js";
 import { PersonaAccessService } from "../services/PersonaAccessService.js";
 import { PersonaFieldAccessService } from "../services/PersonaFieldAccessService.js";
@@ -13,6 +15,8 @@ import { createMetadataRouter } from "./metadataRoutes.js";
 import { ObjectAccessMatrixService } from "../services/ObjectAccessMatrixService.js";
 import { StackTraceImpactService } from "../services/StackTraceImpactService.js";
 import { SalesforceOrgConnection } from "../salesforce/SalesforceOrgConnection.js";
+import { SalesforcePersonaAccessVerifier } from "../salesforce/SalesforcePersonaAccessVerifier.js";
+import { SalesforceRelationshipMetadataService } from "../salesforce/SalesforceRelationshipMetadataService.js";
 import { createSalesforceRouter } from "./salesforceRoutes.js";
 import { existsSync } from "node:fs";
 
@@ -28,6 +32,8 @@ app.use(express.json({ limit: "100kb" }));
 
 // OAuth client credentials stay on the backend; only the access token is held in memory.
 const salesforceOrgConnection = new SalesforceOrgConnection();
+const salesforcePersonaAccessVerifier = new SalesforcePersonaAccessVerifier(salesforceOrgConnection);
+const salesforceRelationshipMetadata = new SalesforceRelationshipMetadataService(salesforceOrgConnection);
 app.use("/api/salesforce", createSalesforceRouter(salesforceOrgConnection));
 
 const PORT = 3000;
@@ -65,14 +71,21 @@ const personaPermissionResolver =
     paths.profilesPath
   );
 
+const orgVerificationStatusPolicy = await loadOrgVerificationStatusPolicy(
+  "./config/org-verification-status-policy.json"
+);
+const orgObjectReadVerification = new OrgObjectReadVerificationService(
+  orgVerificationStatusPolicy, salesforcePersonaAccessVerifier
+);
+
 const personaAccessService =
   new PersonaAccessService(
-    personaPermissionResolver
+    personaPermissionResolver, orgObjectReadVerification
   );
 
 const personaFieldAccessService =
   new PersonaFieldAccessService(
-    personaPermissionResolver
+    personaPermissionResolver, orgObjectReadVerification
   );
 
 const accessQueryService =
@@ -87,7 +100,8 @@ const soqlSecurityAnalyzer =
     path.join(
       paths.defaultPath,
       "objects"
-    )
+    ),
+    orgObjectReadVerification
   );
 
 const soqlAnalysisService =
@@ -99,7 +113,7 @@ const soqlAnalysisService =
 
 const objectAccessMatrixService = new ObjectAccessMatrixService(
   personaConfigLoader,
-  personaPermissionResolver
+  personaPermissionResolver, orgObjectReadVerification
 );
 
 const stackTraceImpactService = new StackTraceImpactService(
@@ -107,7 +121,10 @@ const stackTraceImpactService = new StackTraceImpactService(
   path.join(paths.defaultPath, "objects"),
   personaConfigLoader,
   personaPermissionResolver,
-  paths.mutingPermissionSetsPath
+  paths.mutingPermissionSetsPath,
+  salesforcePersonaAccessVerifier,
+  salesforceRelationshipMetadata,
+  orgVerificationStatusPolicy
 );
 
 // --------------------------------------------------

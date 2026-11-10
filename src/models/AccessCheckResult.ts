@@ -1,6 +1,9 @@
 import { PermissionSource } from "../analyzer/permissionAggregator.js";
 
+import type { ObjectReadDecision } from "../services/OrgObjectReadVerificationService.js";
+
 export interface AccessCheckResult {
+  readEvidence?: ObjectReadDecision;
   object: string;
 
   read: boolean;

@@ -1,13 +1,17 @@
 import { useMemo, useState, type FormEvent } from "react";
 
-type Status = "AT_RISK" | "REVIEW" | "NO_GAPS";
-type Missing = { object: string; field?: string; reason: "OBJECT_READ" | "FIELD_READ" };
+type Status = "AT_RISK" | "REVIEW" | "NO_GAPS" | "ORG_VERIFIED";
+type Missing = { object: string; field?: string; reason: "OBJECT_READ" | "FIELD_READ";
+  orgOutcome?: "DENIED" | "UNVERIFIED"; orgMessage?: string };
+type OrgVerified = { object: string; field?: string; matchedUsers: number; checkedUsers: number; sampled: boolean; message: string };
+type OrgCheckedUser = { id: string; name: string; username: string };
+const displayUser = (user: OrgCheckedUser) => `${user.name} (${user.username})`;
 type Frame = { kind: string; className: string; methodName?: string; line: number };
 type Method = {
   id: string; className: string; methodName: string; filePath: string;
   startLine: number; endLine: number; depth: number; callPaths: string[][];
 };
-type Impact = { personaName: string; status: Status; missing: Missing[]; notes: string[] };
+type Impact = { personaName: string; status: Status; missing: Missing[]; verifiedFromOrg?: OrgVerified[]; orgCheckedUsers?: OrgCheckedUser[]; notes: string[] };
 type Query = {
   id: string; methodId: string; className: string; methodName: string;
   filePath: string; lineNumber: number; object: string; query: string;
@@ -18,13 +22,14 @@ type Query = {
 };
 type Persona = {
   personaName: string; status: Status; atRiskQueries: number;
-  reviewQueries: number; missing: Missing[];
+  reviewQueries: number; missing: Missing[]; verifiedFromOrg?: OrgVerified[];
+  orgCheckedUsers?: OrgCheckedUser[];
 };
 type Result = {
   entryMethod: Method; frames: Frame[]; methods: Method[]; queries: Query[];
   personas: Persona[];
   summary: { methodsVisited: number; queriesFound: number; personasChecked: number;
-    atRisk: number; review: number; noGaps: number };
+    atRisk: number; review: number; noGaps: number; orgVerified?: number };
   warnings: string[];
 };
 
@@ -34,8 +39,9 @@ Trigger.ProcessExceptionTrigger: line 23, column 1`;
 
 const STATUS: Record<Status, { title: string; className: string }> = {
   AT_RISK: { title: "At risk", className: "stack-risk" },
-  REVIEW: { title: "Review", className: "stack-review" },
-  NO_GAPS: { title: "No gaps found", className: "stack-good" },
+  REVIEW: { title: "Unable to verify", className: "stack-review" },
+  NO_GAPS: { title: "No risk", className: "stack-good" },
+  ORG_VERIFIED: { title: "Verified from Org", className: "stack-org-verified" },
 };
 
 function StatusPill({ value }: { value: Status }) {
@@ -55,7 +61,8 @@ export default function StackTraceImpact() {
     item.personaName.toLowerCase().includes(filter.trim().toLowerCase())
   ) ?? [], [result, filter]);
   const queries = useMemo(() => result?.queries.filter((item) =>
-    queryFilter === "all" || item.personas.find((p) => p.personaName === queryFilter)?.status !== "NO_GAPS"
+    queryFilter === "all" || ["AT_RISK", "REVIEW"].includes(
+      item.personas.find((p) => p.personaName === queryFilter)?.status ?? "NO_GAPS")
   ) ?? [], [result, queryFilter]);
 
   async function analyze(event: FormEvent<HTMLFormElement>) {
@@ -83,7 +90,7 @@ export default function StackTraceImpact() {
         <div className="panel-heading"><div>
           <h2>Trace an Apex execution path</h2>
           <p>Paste the stack trace. We'll extract its method, recursively follow resolvable calls and check SOQL access across all configured personas.</p>
-        </div><span className="mini-tag">Repository-based analysis</span></div>
+        </div><span className="mini-tag">Repository first · Salesforce fallback</span></div>
         <div className="form-field stack-input">
           <label htmlFor="stack-text">Apex stack trace</label>
           <textarea id="stack-text" spellCheck={false} rows={5} value={trace}
@@ -106,7 +113,8 @@ export default function StackTraceImpact() {
             ["SOQL queries", result.summary.queriesFound],
             ["Personas checked", result.summary.personasChecked],
             ["At risk", result.summary.atRisk],
-            ["Review", result.summary.review],
+            ["Unable to verify", result.summary.review],
+            ["Verified from Org", result.summary.orgVerified ?? 0],
           ].map(([label, value]) => <div className="stack-stat" key={label}><span>{label}</span><strong>{value}</strong></div>)}
         </section>
 
@@ -130,16 +138,21 @@ export default function StackTraceImpact() {
 
         <section className="panel stack-persona-panel">
           <div className="panel-heading"><div><h2>Persona impact overview</h2>
-            <p>Click a persona to inspect missing object and field Read access.</p>
+            <p>Repository permissions are checked first. Salesforce verifies any remaining object or field Read permissions.</p>
           </div><span className="mini-tag">{result.personas.length} configured</span></div>
           <div className="stack-filter"><label htmlFor="stack-persona-filter">Search personas</label>
             <input id="stack-persona-filter" value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Search persona name..." type="search" />
           </div>
           <div className="stack-table-wrap"><table className="stack-table"><thead><tr>
-            <th>Persona</th><th>Assessment</th><th>At-risk queries</th><th>Review</th><th>Missing grants</th>
+            <th>Persona</th><th>Assessment</th><th>At-risk queries</th><th>Unable to verify</th><th>Open findings</th>
           </tr></thead><tbody>
             {personas.map((persona) => <tr key={persona.personaName} className={selectedPersona === persona.personaName ? "stack-selected" : ""}>
-              <td><button className="stack-persona-button" onClick={() => setSelectedPersona(persona.personaName)} type="button">{persona.personaName}</button></td>
+              <td><button className="stack-persona-button" onClick={() => setSelectedPersona(persona.personaName)} type="button">{persona.personaName}</button>
+                {!!persona.orgCheckedUsers?.length && <small style={{ display: "block", color: "#687a93", marginTop: 5, overflowWrap: "anywhere" }}>
+                  Salesforce users: {persona.orgCheckedUsers.slice(0, 2).map(displayUser).join("; ")}
+                  {persona.orgCheckedUsers.length > 2 ? `; +${persona.orgCheckedUsers.length - 2} more` : ""}
+                </small>}
+              </td>
               <td><StatusPill value={persona.status} /></td>
               <td>{persona.atRiskQueries}</td><td>{persona.reviewQueries}</td><td>{persona.missing.length}</td>
             </tr>)}
@@ -147,10 +160,21 @@ export default function StackTraceImpact() {
           </tbody></table></div>
           {focused && <div className="stack-persona-detail"><div className="stack-detail-heading">
             <h3>{focused.personaName}</h3><StatusPill value={focused.status} />
-          </div>{focused.missing.length ? <ul>{focused.missing.map((item, index) =>
+          </div>{!!focused.orgCheckedUsers?.length && <p className="muted" style={{ margin: "10px 0 4px", fontSize: 12, overflowWrap: "anywhere" }}>
+            <strong>Salesforce users checked:</strong> {focused.orgCheckedUsers.map(displayUser).join("; ")}
+          </p>}{(focused.verifiedFromOrg?.length ?? 0) > 0 && <div className="stack-org-evidence">
+            <strong>Verified from Org</strong>
+            {focused.verifiedFromOrg?.map((evidence) => <div key={`${evidence.object}.${evidence.field ?? ""}`}>
+              <span>{evidence.object}{evidence.field ? `.${evidence.field}` : ""} · Read</span>
+              <small>{evidence.message}</small>
+            </div>)}
+          </div>}{focused.missing.length ? <ul>{focused.missing.map((item, index) =>
             <li key={`${item.object}-${item.field ?? ""}-${index}`}><strong>{item.object}{item.field ? `.${item.field}` : ""}</strong>
-              <span>{item.reason === "OBJECT_READ" ? "Missing object Read" : "Missing field Read"}</span></li>
-          )}</ul> : <p className="muted">No explicit missing grants found. Check review notes and analysis limitations before concluding that execution will succeed.</p>}
+              <span style={{ color: item.orgOutcome === "DENIED" ? "#b91c1c" : "#64748b" }}>{item.orgOutcome === "DENIED"
+                ? `${item.reason === "FIELD_READ" ? "Field" : "Object"} Read not established in repository; Salesforce confirmed missing access`
+                : `${item.reason === "FIELD_READ" ? "Field" : "Object"} Read not established in repository; Salesforce verification inconclusive`}</span>
+              {item.orgMessage && <small>{item.orgMessage}</small>}</li>
+          )}</ul> : <p className="muted">No outstanding object or field Read findings for the analyzed queries.</p>}
           </div>}
         </section>
 
@@ -178,6 +202,8 @@ export default function StackTraceImpact() {
               <div className="stack-query-personas">{query.personas.map((persona) => <div key={persona.personaName}>
                 <strong>{persona.personaName}</strong><StatusPill value={persona.status} />
                 {persona.missing.length > 0 && <small>Missing: {persona.missing.map((missing) => `${missing.object}${missing.field ? `.${missing.field}` : ""}`).join(", ")}</small>}
+                {persona.verifiedFromOrg?.map((evidence) => <small key={`${evidence.object}.${evidence.field ?? ""}`} className="stack-org-note">
+                  Verified from Org: {evidence.object}{evidence.field ? `.${evidence.field}` : ""} Read — {evidence.message}</small>)}
                 {persona.notes.length > 0 && <small>{persona.notes.join(" ")}</small>}
               </div>)}</div>
             </div>
@@ -188,7 +214,7 @@ export default function StackTraceImpact() {
           <summary>Analysis limitations and warnings ({result.warnings.length})</summary>
           <ul>{result.warnings.map((warning, index) => <li key={`${index}-${warning}`}>{warning}</li>)}</ul>
         </details>}
-        <p className="stack-disclaimer">This is static analysis, not a live Salesforce execution trace. A reachable query is not necessarily executed; missing metadata, dynamic SOQL, execution mode, and runtime conditions can change the outcome.</p>
+        <p className="stack-disclaimer">Apex reachability is static. Salesforce verification checks object and field Read for matching active users, not live SOQL execution. Additional assigned permissions can contribute to those users' access. Dynamic SOQL, runtime conditions and sharing can still affect query execution.</p>
       </>}
     </div>
   );

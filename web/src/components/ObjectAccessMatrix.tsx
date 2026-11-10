@@ -31,8 +31,16 @@ type PermissionSourceDetail = {
   mutedBy: MutedPermissionSource[];
 };
 
+type ReadEvidence = {
+  source: "REPOSITORY" | "ORG_VERIFIED" | "ORG_DENIED" | "UNVERIFIED";
+  readable: boolean;
+  statusNeutral: boolean;
+  message: string;
+};
+
 type MatrixPersona = {
   personaName: string;
+  readEvidence?: ReadEvidence;
   access: PermissionAccess;
   sources: Record<PermissionKey, PermissionSourceDetail>;
   warnings: string[];
@@ -51,15 +59,18 @@ type Props = {
   loadingObjects: boolean;
 };
 
-function AccessIndicator({ granted }: { granted: boolean }) {
+function AccessIndicator({ granted, evidence }: { granted: boolean; evidence?: ReadEvidence }) {
+  const fromOrg = evidence?.source === "ORG_VERIFIED";
+  const unresolved = evidence?.source === "UNVERIFIED";
+  const title = evidence?.message ?? (granted ? "Granted from repository" : "No repository grant");
   return (
     <span
-      className={`matrix-access-chip ${granted ? "matrix-allowed" : "matrix-denied"}`}
-      title={granted ? "Granted" : "Not granted"}
-      aria-label={granted ? "Granted" : "Not granted"}
+      className={`matrix-access-chip ${fromOrg ? "matrix-org-verified" : unresolved ? "matrix-org-unverified" : granted ? "matrix-allowed" : "matrix-denied"}`}
+      title={title}
+      aria-label={title}
     >
-      <span aria-hidden="true">{granted ? "✓" : "—"}</span>
-      <span className="matrix-chip-text">{granted ? "Yes" : "No"}</span>
+      <span aria-hidden="true">{fromOrg || granted ? "✓" : "—"}</span>
+      <span className="matrix-chip-text">{fromOrg ? "Org" : unresolved ? "Review" : granted ? "Yes" : "No"}</span>
     </span>
   );
 }
@@ -68,18 +79,21 @@ function PermissionDetail({
   label,
   granted,
   detail,
+  evidence,
 }: {
   label: string;
   granted: boolean;
   detail: PermissionSourceDetail;
+  evidence?: ReadEvidence;
 }) {
   return (
     <div className="matrix-permission-detail">
       <div className="matrix-detail-topline">
         <strong>{label}</strong>
-        <AccessIndicator granted={granted} />
+        <AccessIndicator granted={granted} evidence={evidence} />
       </div>
 
+      {evidence && <p className="matrix-source-caption" role="status">{evidence.message}</p>}
       {detail.grantedBy.length > 0 ? (
         <div className="matrix-source-stack">
           <span className="matrix-source-caption">Effective grants from</span>
@@ -252,7 +266,7 @@ export default function ObjectAccessMatrix({ objects, loadingObjects }: Props) {
                     <th scope="row">{persona.personaName}{persona.warnings.length > 0 && <span className="matrix-persona-warning" title={persona.warnings.join("\n")}> ⚠</span>}</th>
                     {PERMISSIONS.map((permission) => (
                       <td key={permission.key}>
-                        <AccessIndicator granted={persona.access[permission.key]} />
+                        <AccessIndicator granted={persona.access[permission.key]} evidence={permission.key === "read" ? persona.readEvidence : undefined} />
                       </td>
                     ))}
                   </tr>
@@ -283,6 +297,7 @@ export default function ObjectAccessMatrix({ objects, loadingObjects }: Props) {
                         label={permission.label}
                         granted={persona.access[permission.key]}
                         detail={persona.sources[permission.key]}
+                        evidence={permission.key === "read" ? persona.readEvidence : undefined}
                       />
                     ))}
                   </div>
@@ -290,7 +305,7 @@ export default function ObjectAccessMatrix({ objects, loadingObjects }: Props) {
               ))}
             </div>
           )}
-          <p className="matrix-disclaimer">This is a repository/persona-config analysis; it does not include Profile permissions, org-wide system permissions, or record-level sharing.</p>
+          <p className="matrix-disclaimer">Repository Profile, Permission Set and PSG permissions are evaluated first; configured managed object Read exceptions are checked in the connected org. Record-level sharing is not evaluated.</p>
         </section>
       )}
     </div>

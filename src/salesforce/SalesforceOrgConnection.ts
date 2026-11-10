@@ -34,10 +34,28 @@ type SalesforceOAuthConnection = {
   connectedAt: string;
 };
 
+/** Minimal Salesforce REST sObject Describe shape used for relationship resolution. */
+export type SalesforceSObjectDescribe = {
+  name: string;
+  fields: Array<{
+    name: string;
+    relationshipName?: string | null;
+    referenceTo?: string[];
+    namePointing?: boolean;
+    polymorphicForeignKey?: boolean;
+  }>;
+  childRelationships: Array<{
+    relationshipName?: string | null;
+    childSObject: string;
+    field?: string;
+  }>;
+};
+
 type QueryResult = {
   totalSize: number;
   done: boolean;
   records: unknown[];
+  nextRecordsUrl?: string;
 };
 
 const REQUEST_TIMEOUT_MS = 20000;
@@ -112,6 +130,8 @@ export class SalesforceOrgConnection {
   private connecting: Promise<void> | null = null;
   private lastAttemptAt = 0;
   private lastError: string | null = null;
+  private readonly describeCache = new Map<string, { expires: number; value: SalesforceSObjectDescribe }>();
+  private readonly pendingDescribes = new Map<string, Promise<SalesforceSObjectDescribe>>();
 
   private get loginUrl(): URL {
     return validateSalesforceUrl(
@@ -266,6 +286,122 @@ export class SalesforceOrgConnection {
       truncated: !result.done || result.records.length > records.length,
       records
     };
+  }
+
+  /**
+   * Internal-only paginated SOQL. Unlike the small UI test-query response,
+   * this never silently truncates permission inventory. An excessive result
+   * fails closed so incomplete user data cannot produce an access verdict.
+   */
+  async queryAll<T>(soql: string, api: SalesforceQueryApi, limit = 20000): Promise<T[]> {
+    if (api !== "data" && api !== "tooling") throw new SalesforceConnectionError("Invalid API type.", 400);
+    if (!/^SELECT\s/i.test(soql.trim()) || soql.length > MAX_QUERY_LENGTH || soql.includes(";")) {
+      throw new SalesforceConnectionError("Only a single read-only SELECT SOQL query is supported.", 400);
+    }
+    await this.connect();
+    const all: T[] = [];
+    let nextPath: string | null = null;
+    let retried = false;
+    const apiBase = `/services/data/${getApiVersion()}/${api === "tooling" ? "tooling/" : ""}query/`;
+    for (;;) {
+      const conn = this.connection;
+      if (!conn) throw new SalesforceConnectionError("Salesforce connection unavailable.", 503);
+      const url: URL = new URL(nextPath ?? apiBase, conn.instanceUrl);
+      if (!nextPath) url.searchParams.set("q", soql);
+      if (url.origin !== conn.instanceUrl || !url.pathname.startsWith(apiBase) ||
+          (nextPath && (url.search || url.hash))) {
+        throw new SalesforceConnectionError("Salesforce returned an invalid query locator.", 502);
+      }
+      let response: Response;
+      try {
+        response = await fetch(url, {
+          headers: { Authorization: `Bearer ${conn.accessToken}`, Accept: "application/json" },
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+        });
+      } catch {
+        throw new SalesforceConnectionError("Unable to retrieve Salesforce permission data.", 502);
+      }
+      const payload: unknown = await response.json().catch(() => null);
+      if (response.status === 401 && !retried) {
+        retried = true;
+        all.length = 0;
+        nextPath = null;
+        await this.connect(true);
+        continue;
+      }
+      if (!response.ok) {
+        const errors = Array.isArray(payload) ? payload : [payload];
+        throw new SalesforceConnectionError(errors.map(apiErrorMessage).join(" | ").slice(0, 500), response.status);
+      }
+      const page = payload as QueryResult | null;
+      if (!page || !Array.isArray(page.records) || typeof page.done !== "boolean") {
+        throw new SalesforceConnectionError("Invalid Salesforce paginated query response.", 502);
+      }
+      if (all.length + page.records.length > limit) {
+        throw new SalesforceConnectionError(`Salesforce query exceeded ${limit} records; verification is incomplete.`, 503);
+      }
+      all.push(...page.records as T[]);
+      if (page.done) return all;
+      if (!page.nextRecordsUrl || !page.nextRecordsUrl.startsWith(apiBase) ||
+          page.nextRecordsUrl.includes("?") || page.nextRecordsUrl.includes("#")) {
+        throw new SalesforceConnectionError("Salesforce returned an invalid pagination locator.", 502);
+      }
+      nextPath = page.nextRecordsUrl;
+    }
+  }
+
+  /**
+   * Read relationship metadata in the current org, using the existing
+   * Client Credentials session. No token or Describe response is sent to the UI.
+   * Describe results are cached briefly; failures are not cached.
+   */
+  async describeSObject(objectName: string): Promise<SalesforceSObjectDescribe> {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(objectName)) {
+      throw new SalesforceConnectionError("Invalid Salesforce object API name.", 400);
+    }
+    const key = objectName.toLowerCase();
+    const cached = this.describeCache.get(key);
+    if (cached && cached.expires > Date.now()) return cached.value;
+    const inflight = this.pendingDescribes.get(key);
+    if (inflight) return inflight;
+
+    const promise = (async () => {
+      await this.connect();
+      const request = async (): Promise<Response> => {
+        const session = this.connection;
+        if (!session) throw new SalesforceConnectionError("Salesforce connection unavailable.", 503);
+        const url = new URL(`/services/data/${getApiVersion()}/sobjects/${encodeURIComponent(objectName)}/describe`, session.instanceUrl);
+        return fetch(url, {
+          headers: { Authorization: `Bearer ${session.accessToken}`, Accept: "application/json" },
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+        });
+      };
+      let response: Response;
+      try {
+        response = await request();
+        if (response.status === 401) {
+          await this.connect(true);
+          response = await request();
+        }
+      } catch (error) {
+        if (error instanceof SalesforceConnectionError) throw error;
+        throw new SalesforceConnectionError("Unable to retrieve Salesforce relationship metadata.", 502);
+      }
+      const payload: unknown = await response.json().catch(() => null);
+      if (!response.ok) {
+        const errors = Array.isArray(payload) ? payload : [payload];
+        throw new SalesforceConnectionError(errors.map(apiErrorMessage).join(" | ").slice(0, 500), response.status);
+      }
+      const data = payload as SalesforceSObjectDescribe | null;
+      if (!data || !Array.isArray(data.fields) || !Array.isArray(data.childRelationships)) {
+        throw new SalesforceConnectionError("Invalid Salesforce sObject Describe response.", 502);
+      }
+      this.describeCache.set(key, { expires: Date.now() + 10 * 60 * 1000, value: data });
+      return data;
+    })();
+    this.pendingDescribes.set(key, promise);
+    try { return await promise; }
+    finally { this.pendingDescribes.delete(key); }
   }
 
   private async sendQuery(soql: string, api: SalesforceQueryApi): Promise<Response> {

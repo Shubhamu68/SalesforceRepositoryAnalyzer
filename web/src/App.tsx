@@ -8,8 +8,16 @@ type Persona = {
   name: string;
 };
 
+type ObjectReadEvidence = {
+  source: "REPOSITORY" | "ORG_VERIFIED" | "ORG_DENIED" | "UNVERIFIED";
+  readable: boolean;
+  statusNeutral: boolean;
+  message: string;
+};
+
 type ObjectAccessResult = {
   object: string;
+  readEvidence?: ObjectReadEvidence;
   read: boolean;
   create: boolean;
   edit: boolean;
@@ -28,6 +36,8 @@ type PermissionSource = {
 
 type FieldAccessResult = {
   field: string;
+  objectReadEvidence?: ObjectReadEvidence;
+  fieldReadEvidence?: { outcome: "VERIFIED" | "DENIED" | "UNVERIFIED"; message: string };
   read: boolean;
   edit: boolean;
   permissionable?: boolean;
@@ -103,26 +113,11 @@ function App() {
 
   const [checking, setChecking] = useState(false);
   const [page, setPage] = useState<Page>("dashboard");
-  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
-    try {
-      return window.localStorage.getItem("sra.sidebarCollapsed") === "true";
-    } catch {
-      return false;
-    }
-  });
   const [repositoryName, setRepositoryName] = useState<string>("");
   const [apiConnected, setApiConnected] = useState(false);
   const [salesforceConnection, setSalesforceConnection] = useState<"connected" | "connecting" | "unavailable" | "not-configured">("connecting");
   const [lastSoql, setLastSoql] = useState<SoqlAnalysisResult | null>(null);
   const [lastRunAt, setLastRunAt] = useState<Date | null>(null);
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem("sra.sidebarCollapsed", String(sidebarCollapsed));
-    } catch {
-      // The sidebar still works when browser storage is unavailable.
-    }
-  }, [sidebarCollapsed]);
 
   useEffect(() => {
     fetch("/api/health")
@@ -460,19 +455,26 @@ function App() {
 
                 <strong
                   className={
-                    value
-                      ? "status yes"
-                      : "status no"
+                    String(label) === "Read" && access.readEvidence?.source === "UNVERIFIED"
+                      ? "status"
+                      : value
+                        ? "status yes"
+                        : "status no"
                   }
                 >
-                  {formatBoolean(
-                    Boolean(value)
-                  )}
+                  {String(label) === "Read" && access.readEvidence?.source === "UNVERIFIED"
+                    ? "Review"
+                    : formatBoolean(Boolean(value))}
                 </strong>
               </div>
             )
           )}
         </div>
+        {access.readEvidence && (
+          <p className="muted" role="status">
+            <strong>{access.readEvidence.source === "ORG_VERIFIED" ? "Verified from Org" : access.readEvidence.source === "UNVERIFIED" ? "Unable to verify" : "Org access denied"}:</strong> {access.readEvidence.message}
+          </p>
+        )}
       </div>
     );
   }
@@ -496,12 +498,16 @@ function App() {
 
             <strong
               className={
-                access.read
-                  ? "status yes"
-                  : "status no"
+                access.fieldReadEvidence?.outcome === "UNVERIFIED" || access.objectReadEvidence?.source === "UNVERIFIED"
+                  ? "status"
+                  : access.read
+                    ? "status yes"
+                    : "status no"
               }
             >
-              {formatBoolean(access.read)}
+              {access.fieldReadEvidence?.outcome === "UNVERIFIED" || access.objectReadEvidence?.source === "UNVERIFIED"
+                ? "Review"
+                : formatBoolean(access.read)}
             </strong>
           </div>
 
@@ -520,6 +526,13 @@ function App() {
           </div>
         </div>
 
+        {(access.objectReadEvidence || access.fieldReadEvidence) && (
+          <div className="source-section" role="status">
+            <h3>Live Salesforce verification</h3>
+            {access.objectReadEvidence && <p className="muted">Object Read: {access.objectReadEvidence.message}</p>}
+            {access.fieldReadEvidence && <p className="muted">Field Read: {access.fieldReadEvidence.message}</p>}
+          </div>
+        )}
         <div className="source-section">
           <h3>Read granted by</h3>
 
@@ -853,37 +866,13 @@ function App() {
   );
 
   return (
-    <div className={`workspace${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
+    <div className="workspace">
       <header className="topbar">
-        <button
-          className="sidebar-toggle"
-          type="button"
-          onClick={() => setSidebarCollapsed((previous) => !previous)}
-          aria-label={sidebarCollapsed ? "Expand workspace sidebar" : "Collapse workspace sidebar"}
-          title={sidebarCollapsed ? "Expand workspace sidebar" : "Collapse workspace sidebar"}
-          aria-expanded={!sidebarCollapsed}
-          aria-controls="workspace-sidebar"
-        >
-          <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <rect x="3" y="4" width="18" height="16" rx="2" />
-            <path d="M9 4v16" />
-            {sidebarCollapsed ? <path d="m13 9 3 3-3 3" /> : <path d="m16 9-3 3 3 3" />}
-          </svg>
-        </button>
         <div className="brand-mark" aria-hidden="true">⬡</div>
         <div className="brand-name"><strong>Salesforce</strong><span>Repository Analyzer</span></div>
-        <div className="topbar-right">
-          <span className={apiConnected ? "connection online" : "connection offline"} title="Repository Analyzer API connection status">
-            <span className="connection-dot" />{apiConnected ? "API connected" : "API unavailable"}
-          </span>
-          <span className={`connection ${salesforceConnection === "connected" ? "online" : "offline"}`} title="Salesforce org authentication status">
-            <span className="connection-dot" />
-            {salesforceConnection === "connected" ? "Salesforce Org connected" : salesforceConnection === "connecting" ? "Salesforce Org connecting…" : salesforceConnection === "not-configured" ? "Salesforce Org not configured" : "Salesforce Org unavailable"}
-          </span>
-          <span className="avatar">RA</span>
-        </div>
+        <div className="topbar-right"><span className={apiConnected ? "connection online" : "connection offline"}><span className="connection-dot" />{apiConnected ? "API connected" : "API unavailable"}</span><span className={`connection ${salesforceConnection === "connected" ? "online" : "offline"}`} title="Salesforce authentication status"><span className="connection-dot" />{salesforceConnection === "connected" ? "Salesforce connected" : salesforceConnection === "connecting" ? "Salesforce connecting…" : salesforceConnection === "not-configured" ? "Salesforce not configured" : "Salesforce unavailable"}</span><span className="avatar">RA</span></div>
       </header>
-      <aside id="workspace-sidebar" className="sidebar" hidden={sidebarCollapsed}>
+      <aside className="sidebar">
         <div className="sidebar-label">WORKSPACE</div>
         <nav className="side-links" aria-label="Main navigation">
           <button className={page === "dashboard" ? "active" : ""} onClick={() => navigate("dashboard")}><span className="nav-symbol">▦</span>Dashboard</button>
@@ -891,8 +880,8 @@ function App() {
           <button className={page === "soql" ? "active" : ""} onClick={() => navigate("soql")}><span className="nav-symbol">◎</span>SOQL Security Analysis</button>
           <button className={page === "matrix" ? "active" : ""} onClick={() => navigate("matrix")}><span className="nav-symbol">▤</span>Object Access Matrix</button>
           <button className={page === "stack" ? "active" : ""} onClick={() => navigate("stack")}><span className="nav-symbol">⌁</span>Stack Trace Impact</button>
-          <button className={page === "salesforce" ? "active" : ""} onClick={() => navigate("salesforce")}><span className="nav-symbol">☁</span>Salesforce Org</button>
           <button className={page === "reports" ? "active" : ""} onClick={() => navigate("reports")}><span className="nav-symbol">▧</span>Reports</button>
+          <button className={page === "salesforce" ? "active" : ""} onClick={() => navigate("salesforce")}><span className="nav-symbol">☁</span>Salesforce Org</button>
         </nav>
         <div className="sidebar-bottom">
           <div className="side-info-card"><div className="side-info-title">Repository</div><div className="side-repo">{apiConnected ? "● Connected" : "○ Not connected"}</div><div className="side-info-text" title={repositoryName}>{repositoryName || "Loading…"}</div></div>

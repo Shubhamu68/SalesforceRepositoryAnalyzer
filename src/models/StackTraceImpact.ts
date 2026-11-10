@@ -1,4 +1,4 @@
-export type ImpactStatus = "AT_RISK" | "REVIEW" | "NO_GAPS";
+export type ImpactStatus = "AT_RISK" | "REVIEW" | "NO_GAPS" | "ORG_VERIFIED";
 
 export interface ApexStackFrame {
   kind: "Class" | "Trigger";
@@ -25,16 +25,38 @@ export interface ResolvedQueryField {
   source: string;
 }
 
+/** Actual active users whose Salesforce permissions were queried for this persona. */
+export interface OrgCheckedUser {
+  id: string;
+  name: string;
+  username: string;
+}
+
 export interface MissingReadPermission {
   object: string;
   field?: string;
   reason: "OBJECT_READ" | "FIELD_READ";
+  /** Live verification status for either object or field Read. */
+  orgOutcome?: "DENIED" | "UNVERIFIED";
+  orgMessage?: string;
+}
+
+export interface VerifiedOrgObject {
+  object: string;
+  field?: string;
+  checkedUsers: number;
+  matchedUsers: number;
+  sampled: boolean;
+  message: string;
 }
 
 export interface QueryPersonaImpact {
   personaName: string;
   status: ImpactStatus;
   missing: MissingReadPermission[];
+  verifiedFromOrg?: VerifiedOrgObject[];
+  /** Only users who were actually queried; absent for repository-only results. */
+  orgCheckedUsers?: OrgCheckedUser[];
   notes: string[];
 }
 
@@ -61,6 +83,9 @@ export interface StackPersonaImpact {
   atRiskQueries: number;
   reviewQueries: number;
   missing: MissingReadPermission[];
+  verifiedFromOrg?: VerifiedOrgObject[];
+  /** Deduplicated users checked across the persona's SOQL queries. */
+  orgCheckedUsers?: OrgCheckedUser[];
 }
 
 export interface StackTraceImpactResult {
@@ -76,6 +101,7 @@ export interface StackTraceImpactResult {
     atRisk: number;
     review: number;
     noGaps: number;
+    orgVerified?: number;
   };
   warnings: string[];
 }

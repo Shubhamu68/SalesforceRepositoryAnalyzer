@@ -1,6 +1,7 @@
 import { PersonaConfigLoader } from "../config/PersonaConfigLoader.js";
 import { PersonaPermissionResolver, type ResolvedPersonaPermissions } from "../analyzer/PersonaPermissionResolver.js";
 import { createPersonaAccessEvaluator } from "../analyzer/personaAccessEvaluator.js";
+import { OrgObjectReadVerificationService } from "./OrgObjectReadVerificationService.js";
 import type { PermissionSet } from "../models/PermissionSet.js";
 import type { ObjectAccessMatrixPersona, ObjectAccessMatrixResult } from "../models/ObjectAccessMatrixResult.js";
 
@@ -20,7 +21,8 @@ export function calculateMatrixPersona(
 export class ObjectAccessMatrixService {
   constructor(
     private readonly personaConfigLoader: PersonaConfigLoader,
-    private readonly personaPermissionResolver: PersonaPermissionResolver
+    private readonly personaPermissionResolver: PersonaPermissionResolver,
+    private readonly orgReadVerification?: OrgObjectReadVerificationService
   ) {}
 
   async analyze(objectName: string): Promise<ObjectAccessMatrixResult> {
@@ -69,7 +71,13 @@ export class ObjectAccessMatrixService {
             }
           }
         }
-        return calculateMatrixPersona(object, resolved, resolved.mutesByGroup, warnings);
+        const entry = calculateMatrixPersona(object, resolved, resolved.mutesByGroup, warnings);
+        if (!entry.access.read && this.orgReadVerification?.isConfigured(object)) {
+          const evidence = await this.orgReadVerification.resolve(persona, object, false);
+          entry.readEvidence = evidence;
+          if (evidence.readable) entry.access.read = true;
+        }
+        return entry;
       }));
       results.push(...chunkResults);
     }
