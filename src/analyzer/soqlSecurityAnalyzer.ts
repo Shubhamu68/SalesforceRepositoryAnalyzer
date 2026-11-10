@@ -1,316 +1,216 @@
-import { SoqlQuery } from "../models/SoqlQuery.js";
-import { SoqlSecurityFinding } from "../models/SoqlSecurityFinding.js";
-import { Persona } from "../models/Persona.js";
+import type { SoqlQuery } from "../models/SoqlQuery.js";
+import type { SoqlSecurityFinding, SoqlFindingCriticality, SoqlVerificationSource } from "../models/SoqlSecurityFinding.js";
+import type { Persona } from "../models/Persona.js";
 import { PersonaPermissionResolver } from "./PersonaPermissionResolver.js";
 import { createPersonaAccessEvaluator } from "./personaAccessEvaluator.js";
-import { OrgObjectReadVerificationService } from "../services/OrgObjectReadVerificationService.js";
-import {
-  buildRelationshipMap,
-} from "./salesforceRelationshipResolver.js";
-import {
-  buildSoqlFieldInventory, type UnresolvedSoqlField,
-} from "./soqlFieldInventoryBuilder.js";
+import type { OrgObjectReadVerificationService, ReadDecisionSource } from "../services/OrgObjectReadVerificationService.js";
+import { buildRelationshipMap } from "./salesforceRelationshipResolver.js";
+import { buildSoqlFieldInventory, type UnresolvedSoqlField } from "./soqlFieldInventoryBuilder.js";
+import type { SoqlFieldReference } from "../models/SoqlFieldInventory.js";
+import { ApexExecutionSecurityModeResolver } from "../services/ApexExecutionSecurityModeResolver.js";
+import { runtimeImpactForFinding, type SoqlExecutionMode } from "./soqlExecutionMode.js";
+
+/** Prevent hundreds of simultaneous Salesforce requests on large repositories. */
+const CONCURRENCY = 4;
+const OBJECT_READ_FIELD = "(Object Read Missing)";
+
+type Decision = { source: ReadDecisionSource; message: string; readable: boolean };
+
+/**
+ * Severity describes SOQL enforcement, while verificationSource retains the
+ * actual Salesforce permission decision. A system-mode query may still expose
+ * data: Low is an advisory, not proof of safe application behavior.
+ */
+export function findingOutcome(source: ReadDecisionSource, execution?: SoqlExecutionMode): {
+  severity: SoqlSecurityFinding["severity"];
+  criticality: SoqlFindingCriticality;
+  verificationSource: SoqlVerificationSource;
+} {
+  if (source === "ORG_VERIFIED") return {
+    severity: "INFO", criticality: "Low", verificationSource: "ORG_VERIFIED",
+  };
+  if (source === "ORG_DENIED") {
+    const enforcesUserRead = execution?.enforcement === "FULL" || execution?.enforcement === "SELECT_ONLY";
+    return {
+      severity: enforcesUserRead ? "ERROR" : "INFO",
+      criticality: enforcesUserRead ? "High" : "Low",
+      verificationSource: "ORG_DENIED",
+    };
+  }
+  return { severity: "REVIEW", criticality: "Unable to verify", verificationSource: "UNVERIFIED" };
+}
+
+/** Maximum four independent checks at a time, with deterministic report order. */
+async function boundedMap<T>(items: readonly T[], task: (item: T) => Promise<void>): Promise<void> {
+  let index = 0;
+  const workers = Array.from({ length: Math.min(CONCURRENCY, items.length) }, async () => {
+    while (index < items.length) {
+      const current = items[index++];
+      await task(current);
+    }
+  });
+  await Promise.all(workers);
+}
 
 export class SoqlSecurityAnalyzer {
   constructor(
-    private readonly personaPermissionResolver:
-      PersonaPermissionResolver,
+    private readonly personaPermissionResolver: PersonaPermissionResolver,
     private readonly objectsDirectory: string,
-    private readonly orgReadVerification?: OrgObjectReadVerificationService
+    private readonly readVerification?: OrgObjectReadVerificationService,
+    private readonly executionModeResolver = new ApexExecutionSecurityModeResolver(),
   ) {}
 
-  async analyze(
-    persona: Persona,
-    queries: SoqlQuery[]
-  ): Promise<SoqlSecurityFinding[]> {
-    // --------------------------------------------------
-    // 1. Resolve persona once
-    // --------------------------------------------------
-
-    const resolved =
-      await this.personaPermissionResolver.resolve(
-        persona
-      );
-
-    // --------------------------------------------------
-    // 2. Use the same centralized access evaluator as the matrix and stack trace.
-    // --------------------------------------------------
+  async analyze(persona: Persona, queries: SoqlQuery[]): Promise<SoqlSecurityFinding[]> {
+    const resolved = await this.personaPermissionResolver.resolve(persona);
     const evaluator = createPersonaAccessEvaluator(resolved);
-    const knownObjects = new Set(evaluator.knownObjects().map((name) => name.toLowerCase()));
-
-    // --------------------------------------------------
-    // 3. Build relationship metadata once
-    // --------------------------------------------------
-
-    const relationshipMap =
-      await buildRelationshipMap(
-        this.objectsDirectory
-      );
-
-    // --------------------------------------------------
-    // 4. Build normalized SOQL inventory
-    // --------------------------------------------------
-
+    const relationshipMap = await buildRelationshipMap(this.objectsDirectory);
     const unresolvedFields: UnresolvedSoqlField[] = [];
-    const inventory =
-      buildSoqlFieldInventory(
-        queries,
-        relationshipMap,
-        (entry) => unresolvedFields.push(entry)
-      );
-
-    // --------------------------------------------------
-    // 6. Check unique object/field combinations
-    // --------------------------------------------------
-
+    const inventory = buildSoqlFieldInventory(queries, relationshipMap, (entry) => unresolvedFields.push(entry));
+    this.executionModeResolver.clearCache();
+    // Version lookup is cached per class, so hundreds of queries do not trigger
+    // hundreds of metadata reads. The same resolver serves Stack Trace analysis.
+    const modeResults = await Promise.all(queries.map((query) =>
+      this.executionModeResolver.resolve(query.query, query.filePath)
+    ));
+    const queryByLocation = new Map<string, { query: SoqlQuery; execution: SoqlExecutionMode }>(queries.map((query, index) => [
+      `${query.filePath}|${query.lineNumber}`, { query, execution: modeResults[index] },
+    ]));
     const findings: SoqlSecurityFinding[] = [];
 
-    for (
-      const [
-        objectName,
-        fields,
-      ] of inventory
-    ) {
-      const objectKey =
-        objectName
-          .trim()
-          .toLowerCase();
-
-      const objectAccess = evaluator.evaluateObject(objectName).access;
-      // Reuse a single org check across every field/query referencing an object.
-      // A configured exception does not grant Read; Salesforce must confirm it.
-      const managedRead = !objectAccess.read && this.orgReadVerification?.isConfigured(objectName);
-      const readDecision = managedRead
-        ? await this.orgReadVerification!.resolve(persona, objectName, false)
-        : undefined;
-      const readable = objectAccess.read || readDecision?.readable === true;
-
-      for (
-        const [
-          fieldName,
-          references,
-        ] of fields
-      ) {
-        const fieldKey =
-          `${objectName}.${fieldName}`
-            .trim()
-            .toLowerCase();
-
-        // --------------------------------------------
-        // No object permission information
-        // --------------------------------------------
-
-        if (!readable && !knownObjects.has(objectKey) && !managedRead) {
-          for (const reference of references) {
-            findings.push({
-              severity: "REVIEW",
-
-              filePath:
-                reference.filePath,
-
-              lineNumber:
-                reference.lineNumber,
-
-              object:
-                reference.object,
-
-              field:
-                reference.field,
-
-              query:
-                findOriginalQuery(
-                  queries,
-                  reference.filePath,
-                  reference.lineNumber
-                ),
-
-              withUserMode:
-                findSecurityMode(
-                  queries,
-                  reference.filePath,
-                  reference.lineNumber
-                ),
-
-              reason:
-                `Could not establish effective object ` +
-                `access for ${objectName}. ` +
-                `Manual review required.`,
-            });
-          }
-
-          continue;
-        }
-
-        // --------------------------------------------
-        // Object itself is not readable
-        // --------------------------------------------
-
-        if (!readable) {
-          for (
-            const reference of references
-          ) {
-            findings.push({
-              severity: managedRead && readDecision?.source !== "ORG_DENIED" ? "REVIEW" : "ERROR",
-
-              filePath:
-                reference.filePath,
-
-              lineNumber:
-                reference.lineNumber,
-
-              object:
-                reference.object,
-
-              field:
-                reference.field,
-
-              query:
-                findOriginalQuery(
-                  queries,
-                  reference.filePath,
-                  reference.lineNumber
-                ),
-
-              withUserMode:
-                findSecurityMode(
-                  queries,
-                  reference.filePath,
-                  reference.lineNumber
-                ),
-
-              reason:
-                managedRead
-                  ? `Object ${objectName} has no repository Read grant. ` +
-                    (readDecision?.message ?? "Live org verification was unavailable.")
-                  : `Persona "${persona.name}" does not have READ access to object ${objectName}.`,
-            });
-          }
-
-          continue;
-        }
-
-        // --------------------------------------------
-        // View All Fields means field-level read
-        // is effectively available.
-        // --------------------------------------------
-
-        if (
-          objectAccess.viewAllFields
-        ) {
-          continue;
-        }
-
-        // --------------------------------------------
-        // Look for explicit field FLS.
-        //
-        // Missing entry means no READ grant.
-        // It is NOT an unresolved field.
-        // --------------------------------------------
-
-        const fieldGrant = evaluator.evaluateField(fieldKey);
-        // When object Read came from Salesforce, repository field metadata must
-        // be assessed independently (evaluateField().readable is object-gated).
-        let fieldRead = objectAccess.read
-          ? fieldGrant.readable
-          : fieldGrant.schemaRequired === true || fieldGrant.permissionable === false || fieldGrant.readGrantedBy.length > 0;
-        let fieldOrgOutcome: "VERIFIED" | "DENIED" | "UNVERIFIED" | undefined;
-        let fieldOrgMessage: string | undefined;
-        if (!fieldRead && managedRead && readable) {
-          const evidence = await this.orgReadVerification!.resolveField(persona, objectName, fieldName);
-          fieldOrgOutcome = evidence?.outcome ?? "UNVERIFIED";
-          fieldOrgMessage = evidence?.message ?? "Live field verification is unavailable.";
-          fieldRead = fieldOrgOutcome === "VERIFIED";
-        }
-
-        if (!fieldRead) {
-          for (
-            const reference of references
-          ) {
-            findings.push({
-              severity: fieldOrgOutcome === "UNVERIFIED" ? "REVIEW" : "ERROR",
-
-              filePath:
-                reference.filePath,
-
-              lineNumber:
-                reference.lineNumber,
-
-              object:
-                reference.object,
-
-              field:
-                reference.field,
-
-              query:
-                findOriginalQuery(
-                  queries,
-                  reference.filePath,
-                  reference.lineNumber
-                ),
-
-              withUserMode:
-                findSecurityMode(
-                  queries,
-                  reference.filePath,
-                  reference.lineNumber
-                ),
-
-              reason:
-                fieldOrgMessage ?? (`Persona "${persona.name}" does not ` +
-                `have READ access to ${reference.object}.${reference.field}.`),
-            });
-          }
-        }
-      }
+    function queryInfo(filePath: string, lineNumber: number) {
+      const data = queryByLocation.get(`${filePath}|${lineNumber}`);
+      return {
+        query: data?.query.query ?? "",
+        withUserMode: data?.query.withUserMode ?? false,
+        ...(data?.execution.apiVersion !== undefined ? { apiVersion: data.execution.apiVersion } : {}),
+        declaredMode: data?.execution.declaredMode ?? "UNSPECIFIED",
+        effectiveMode: data?.execution.effectiveMode ?? "UNKNOWN",
+      };
     }
 
-    // Never silently drop relationship paths missing from the repository or
-    // Describe snapshot. They need REVIEW rather than a false clean result.
+    function findingFor(
+      refs: readonly SoqlFieldReference[],
+      object: string,
+      field: string,
+      type: "OBJECT_READ" | "FIELD_READ",
+      decision: Decision,
+    ): SoqlSecurityFinding[] {
+      const subject = type === "OBJECT_READ" ? `Object ${object}` : `Field ${object}.${field}`;
+      const detail = decision.source === "ORG_VERIFIED"
+        ? `${subject}: Read permission wasn't established in repository metadata, but Salesforce confirmed access.`
+        : decision.source === "ORG_DENIED"
+          ? `${subject}: Repository metadata did not establish Read access; Salesforce confirmed it is missing for the selected user.`
+          : `${subject}: Read permission wasn't established in repository metadata, and Salesforce couldn't verify access.`;
+      return refs.map((ref) => {
+        const queryDetails = queryInfo(ref.filePath, ref.lineNumber);
+        const execution = queryByLocation.get(`${ref.filePath}|${ref.lineNumber}`)?.execution;
+        const outcome = findingOutcome(decision.source, execution);
+        const advisory = decision.source === "ORG_DENIED" && outcome.criticality === "Low"
+          ? execution?.enforcement === "NONE"
+            ? " This SOQL query runs in system mode, so it does not enforce the user's Read permission. Review potential data exposure in application logic."
+            : " User-level Read access is missing, but query enforcement could not be confirmed; review the Apex execution mode."
+          : "";
+        return {
+          ...outcome, findingType: type, filePath: ref.filePath, lineNumber: ref.lineNumber,
+          object, field, ...queryDetails,
+          runtimeImpact: execution
+            ? runtimeImpactForFinding(execution, decision.source === "ORG_VERIFIED" ? "VERIFIED" :
+                decision.source === "ORG_DENIED" ? "DENIED" : "UNVERIFIED")
+            : "Undetermined" as const,
+          // Preserve diagnostic details for inconclusive checks without repeating confirmed denials.
+          reason: `${detail}${decision.source === "UNVERIFIED" ? ` ${decision.message}` : ""}${advisory}`.trim(),
+        };
+      });
+    }
+
+    // Resolve each distinct object only once. One object failure is represented
+    // once per referencing SOQL query, NOT duplicated across all fields.
+    const objects = [...inventory.entries()];
+    const results = new Map<string, SoqlSecurityFinding[]>();
+    await boundedMap(objects, async ([object, fields]) => {
+      const repositoryObject = evaluator.evaluateObject(object).access;
+      const objectDecision = this.readVerification
+        ? await this.readVerification.resolve(persona, object, repositoryObject.read)
+        : repositoryObject.read
+          ? { source: "REPOSITORY" as const, readable: true, message: "Read permission established in repository." }
+          : { source: "UNVERIFIED" as const, readable: false, message: "Salesforce verification unavailable." };
+
+      const objectFindings: SoqlSecurityFinding[] = [];
+      if (objectDecision.source !== "REPOSITORY") {
+        // Produce one object Read row per SOQL reference (dedupe source location).
+        const references = new Map<string, SoqlFieldReference>();
+        for (const fieldRefs of fields.values()) {
+          for (const ref of fieldRefs) references.set(`${ref.filePath}|${ref.lineNumber}`, ref);
+        }
+        objectFindings.push(...findingFor([...references.values()], object, OBJECT_READ_FIELD,
+          "OBJECT_READ", objectDecision));
+      }
+
+      // If object Read is denied or uncertain, all fields depend on that result;
+      // do NOT fabricate individual FLS errors. Keep the object finding only.
+      if (!objectDecision.readable) {
+        results.set(object, objectFindings);
+        return;
+      }
+      if (repositoryObject.read && repositoryObject.viewAllFields) {
+        results.set(object, objectFindings);
+        return;
+      }
+
+      const uniqueFields = [...fields.entries()];
+      const fieldFindings = new Map<string, SoqlSecurityFinding[]>();
+      await boundedMap(uniqueFields, async ([fieldKey, references]) => {
+        const fieldName = references[0]?.field ?? fieldKey;
+        const grant = evaluator.evaluateField(`${object}.${fieldName}`);
+        // FLS is independent of object Read. Non-permissionable or schema-
+        // required fields do not require explicit FLS; neither does ViewAllFields.
+        const repositoryFieldRead = grant.schemaRequired === true ||
+          grant.permissionable === false || grant.readGrantedBy.length > 0 ||
+          repositoryObject.viewAllFields;
+        if (repositoryFieldRead) return;
+
+        const fieldDecision = this.readVerification
+          ? await this.readVerification.resolveFieldRead(persona, object, fieldName, false)
+          : { source: "UNVERIFIED" as const, readable: false, message: "Salesforce verification unavailable." };
+        fieldFindings.set(fieldKey,
+          findingFor(references, object, fieldName, "FIELD_READ", fieldDecision));
+      });
+      for (const [key] of uniqueFields) objectFindings.push(...(fieldFindings.get(key) ?? []));
+      results.set(object, objectFindings);
+    });
+
+    for (const [object] of objects) findings.push(...(results.get(object) ?? []));
+
+    // Relationship resolution gaps are also inconclusive, not access denials.
     const reported = new Set<string>();
     for (const unresolved of unresolvedFields) {
       const id = `${unresolved.query.filePath}:${unresolved.query.lineNumber}:${unresolved.baseObject}:${unresolved.fieldPath}`.toLowerCase();
       if (reported.has(id)) continue;
       reported.add(id);
       findings.push({
-        severity: "REVIEW",
-        filePath: unresolved.query.filePath,
-        lineNumber: unresolved.query.lineNumber,
-        object: unresolved.baseObject,
+        severity: "REVIEW", criticality: "Unable to verify", verificationSource: "UNVERIFIED",
+        findingType: "RELATIONSHIP", filePath: unresolved.query.filePath,
+        lineNumber: unresolved.query.lineNumber, object: unresolved.baseObject,
         field: unresolved.fieldPath,
-        query: unresolved.query.query,
-        withUserMode: unresolved.query.withUserMode,
-        reason: `Could not resolve relationship path ${unresolved.baseObject}.${unresolved.fieldPath}. ` +
-          `Verify relationship metadata; field access was not assessed.`,
+        ...queryInfo(unresolved.query.filePath, unresolved.query.lineNumber),
+        runtimeImpact: "Not assessed",
+        reason: `Could not resolve ${unresolved.baseObject}.${unresolved.fieldPath} from relationship metadata. Field access wasn't assessed.`,
       });
     }
+    // API 67.0+ rejects WITH SECURITY_ENFORCED at compile time, regardless
+    // of the user's access. Surface this separately from any CRUD/FLS gap.
+    queries.forEach((query, index) => {
+      const mode = modeResults[index];
+      if (mode.enforcement !== "INVALID") return;
+      findings.push({
+        severity: "REVIEW", criticality: "Unable to verify", verificationSource: "UNVERIFIED",
+        findingType: "QUERY_MODE", filePath: query.filePath, lineNumber: query.lineNumber,
+        object: query.object, field: "(Unsupported Query Clause)", query: query.query,
+        withUserMode: query.withUserMode, apiVersion: mode.apiVersion,
+        declaredMode: mode.declaredMode, effectiveMode: mode.effectiveMode, runtimeImpact: "Unsupported query clause",
+        reason: mode.description,
+      });
+    });
     return findings;
   }
-}
-
-function findOriginalQuery(
-  queries: SoqlQuery[],
-  filePath: string,
-  lineNumber: number
-): string {
-  return (
-    queries.find(
-      (query) =>
-        query.filePath === filePath &&
-        query.lineNumber === lineNumber
-    )?.query ?? ""
-  );
-}
-
-function findSecurityMode(
-  queries: SoqlQuery[],
-  filePath: string,
-  lineNumber: number
-): boolean {
-  return (
-    queries.find(
-      (query) =>
-        query.filePath === filePath &&
-        query.lineNumber === lineNumber
-    )?.withUserMode ?? false
-  );
 }

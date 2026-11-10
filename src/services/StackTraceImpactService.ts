@@ -1,5 +1,7 @@
 import path from "node:path";
 import { access } from "node:fs/promises";
+import { ApexExecutionSecurityModeResolver } from "./ApexExecutionSecurityModeResolver.js";
+import { classifySoqlMode, type DeclaredSoqlMode } from "../analyzer/soqlExecutionMode.js";
 import { isKnownSalesforcePermissionSet } from "../config/knownSalesforcePermissionSets.js";
 import { isStatusNeutralOrgObjectRead, type OrgVerificationStatusPolicy } from "../config/orgVerificationStatusPolicy.js";
 import type { Persona } from "../models/Persona.js";
@@ -12,11 +14,11 @@ import { PersonaPermissionResolver, type ResolvedPersonaPermissions } from "../a
 import { createPersonaAccessEvaluator } from "../analyzer/personaAccessEvaluator.js";
 import { buildRelationshipMap } from "../analyzer/salesforceRelationshipResolver.js";
 import { collectQueryFields } from "../analyzer/soqlQueryFieldResolver.js";
-import { SalesforcePersonaAccessVerifier } from "../salesforce/SalesforcePersonaAccessVerifier.js";
+import { OrgObjectReadVerificationService } from "./OrgObjectReadVerificationService.js";
 import type { OrgObjectAccessEvidence } from "../salesforce/SalesforcePersonaAccessVerifier.js";
 import { SalesforceRelationshipMetadataService } from "../salesforce/SalesforceRelationshipMetadataService.js";
 import {
-  createApexMethodIndex, parseApexStackTrace, resolveMethodCalls, maskApex, type ApexMethod,
+  createApexMethodIndex, parseApexStackTrace, resolveMethodCalls, type ApexMethod,
 } from "../scanner/apexMethodScanner.js";
 
 const MAX_METHODS = 150;
@@ -24,15 +26,10 @@ const MAX_DEPTH = 12;
 const equal = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 const unique = <T>(items: T[]) => [...new Set(items)];
 
-// Same risk category for SELECT permissions; the clauses do not have identical
-// enforcement semantics (SECURITY_ENFORCED does not enforce WHERE-only FLS).
-export type StackSoqlSecurityMode = "USER_MODE" | "SECURITY_ENFORCED" | "SYSTEM_MODE" | "UNSPECIFIED";
+// Retained for existing callers; both analyzers now use the shared classifier.
+export type StackSoqlSecurityMode = DeclaredSoqlMode;
 export function classifyStackSoqlMode(source: string): StackSoqlSecurityMode {
-  const cleaned = maskApex(source);
-  if (/\bWITH\s+USER_MODE\b/i.test(cleaned)) return "USER_MODE";
-  if (/\bWITH\s+SECURITY_ENFORCED\b/i.test(cleaned)) return "SECURITY_ENFORCED";
-  if (/\bWITH\s+SYSTEM_MODE\b/i.test(cleaned)) return "SYSTEM_MODE";
-  return "UNSPECIFIED";
+  return classifySoqlMode(source);
 }
 
 async function isKnownMissingPermissionSet(name: string, directory: string): Promise<boolean> {
@@ -46,18 +43,21 @@ async function isKnownMissingPermissionSet(name: string, directory: string): Pro
 }
 
 export class StackTraceImpactService {
+  private readonly executionModeResolver = new ApexExecutionSecurityModeResolver();
+
   constructor(
     private readonly repositoryPath: string,
     private readonly objectsDirectory: string,
     private readonly personaConfigLoader: PersonaConfigLoader,
     private readonly resolver: PersonaPermissionResolver,
     private readonly mutingDirectory: string,
-    private readonly orgVerifier?: SalesforcePersonaAccessVerifier,
+    private readonly orgVerifier?: OrgObjectReadVerificationService,
     private readonly orgRelationshipMetadata?: SalesforceRelationshipMetadataService,
     private readonly orgVerificationStatusPolicy?: OrgVerificationStatusPolicy
   ) {}
 
   async analyze(stackTrace: string): Promise<StackTraceImpactResult> {
+    this.executionModeResolver.clearCache();
     if (!stackTrace.trim() || stackTrace.length > 15000) {
       throw new Error("Enter an Apex stack trace (maximum 15,000 characters).");
     }
@@ -119,7 +119,6 @@ export class StackTraceImpactService {
     const prepared: {
       persona: Persona;
       resolved: ResolvedPersonaPermissions;
-      evaluator: ReturnType<typeof createPersonaAccessEvaluator>;
       incomplete: boolean;
       externalSkipped: boolean;
     }[] = [];
@@ -154,14 +153,15 @@ export class StackTraceImpactService {
       }
       if (resolved.permissionSetGroups.length > 1 && persona.mutingPermissionSets.some((mute) =>
         !resolved.permissionSetGroups.some((group) => group.mutingPermissionSetNames.some((name) => equal(name, mute))))) incomplete = true;
-      prepared.push({ persona, resolved, evaluator: createPersonaAccessEvaluator(resolved), incomplete, externalSkipped });
+      prepared.push({ persona, resolved, incomplete, externalSkipped });
     }
 
     const allQueries: StackQueryImpact[] = [];
     for (const methodInfo of reached.values()) {
       const method = sourceMethods.get(methodInfo.id)!;
       for (const query of method.queries) {
-        const securityMode = classifyStackSoqlMode(query.query);
+        const mode = await this.executionModeResolver.resolve(query.query, method.filePath);
+        const securityMode = mode.declaredMode;
         let inventory = collectQueryFields(query, relationshipMap);
         if (inventory.unresolved.length && orgRelationshipHydrator) {
           // Describe metadata is consulted only when local relationship metadata
@@ -173,8 +173,7 @@ export class StackTraceImpactService {
         const impacts: QueryPersonaImpact[] = prepared.map((person) => {
           const missing: MissingReadPermission[] = [];
           const notes: string[] = [];
-          // Reuse this persona's object/field cache across all reached queries.
-          const evaluator = person.evaluator;
+          const evaluator = createPersonaAccessEvaluator(person.resolved);
           // Object Read findings are scoped to explicit FROM objects, not every
           // parent traversed by a dotted field path (e.g. OriginalOrderItem.Order).
           // This restores the pre-deep-resolution reporting scope without losing
@@ -203,9 +202,9 @@ export class StackTraceImpactService {
               missing.push({ object: field.object, field: field.field, reason: "FIELD_READ" });
             }
           }
-          if (securityMode === "UNSPECIFIED") notes.push("No explicit query mode; access enforcement depends on the Apex API version and context.");
-          if (securityMode === "SYSTEM_MODE") notes.push("WITH SYSTEM_MODE does not enforce FLS at query execution.");
-          if (securityMode === "SECURITY_ENFORCED") notes.push("WITH SECURITY_ENFORCED checks selected fields (including relationships), but not WHERE-only fields; it is unsupported in Apex API 67.0+.");
+          notes.push(mode.description);
+          if (mode.enforcement === "NONE") notes.push("Missing Read access is an advisory for this system-mode query, not a confirmed runtime permission failure.");
+          if (mode.enforcement === "INVALID") notes.push("This query clause is unsupported at this Apex API version.");
           if (person.incomplete) notes.push("Some assigned Permission Set metadata is missing; absence of grants is not conclusive.");
           if (person.externalSkipped) notes.push("Salesforce-owned Order Management Permission Set was excluded because its metadata is absent. A missing grant is a potential gap, not a confirmed runtime failure.");
           if (inventory.unresolved.length) notes.push("Some relationship fields could not be resolved.");
@@ -227,6 +226,9 @@ export class StackTraceImpactService {
           query: query.query,
           withUserMode: securityMode === "USER_MODE",
           securityMode,
+          effectiveMode: mode.effectiveMode,
+          permissionEnforcement: mode.enforcement,
+          ...(mode.apiVersion !== undefined ? { apiVersion: mode.apiVersion } : {}),
           checkedFields: inventory.fields,
           unresolvedFields: inventory.unresolved,
           limitations: inventory.limitations,
@@ -237,14 +239,13 @@ export class StackTraceImpactService {
     // XML first, Salesforce second, for BOTH object and field Read.
     // Cache identical requests across methods and queries. The verifier itself
     // caches per-user/per-object UserFieldAccess queries to prevent excessive API calls.
-    const personaByName = new Map(prepared.map((person) => [person.persona.name, person.persona]));
     const verifyRequests = new Map<string, {
       persona: Persona; object: string; field?: string
     }>();
     const requestKey = (persona: string, object: string, field?: string) =>
       `${persona.toLowerCase()}|${object.toLowerCase()}|${(field ?? "").toLowerCase()}`;
     for (const query of allQueries) for (const impact of query.personas) {
-      const persona = personaByName.get(impact.personaName);
+      const persona = prepared.find((person) => person.persona.name === impact.personaName)?.persona;
       if (!persona) continue;
       for (const missing of impact.missing) {
         verifyRequests.set(requestKey(persona.name, missing.object, missing.field), {
@@ -261,11 +262,11 @@ export class StackTraceImpactService {
         const batch = requests.slice(i, i + 3);
         const results = await Promise.all(batch.map(async ([key, request]) => {
           const evidence = request.field
-            ? await this.orgVerifier!.verifyFieldRead(request.persona, request.object, request.field)
-            : await this.orgVerifier!.verifyObjectRead(request.persona, request.object);
+            ? await this.orgVerifier!.resolveField(request.persona, request.object, request.field)
+            : await this.orgVerifier!.verifyObject(request.persona, request.object);
           return [key, evidence] as const;
         }));
-        for (const [key, result] of results) orgResults.set(key, result);
+        for (const [key, result] of results) if (result) orgResults.set(key, result);
       }
     }
 
@@ -306,8 +307,12 @@ export class StackTraceImpactService {
           this.orgVerificationStatusPolicy, grant.object, grant.field
         )
       );
-      impact.status = denied ? "AT_RISK"
-        : unableToVerifyAccess ? "REVIEW"
+      const permissionEnforced = query.permissionEnforcement === "FULL" || query.permissionEnforcement === "SELECT_ONLY";
+      // A denied grant is still recorded in missing[], but SYSTEM_MODE does not
+      // enforce it as a runtime query failure. Unknown/invalid modes remain REVIEW.
+      impact.status = denied && permissionEnforced ? "AT_RISK"
+        : denied && query.permissionEnforcement === "NONE" ? "ADVISORY"
+        : unableToVerifyAccess || query.permissionEnforcement === "INVALID" ? "REVIEW"
         : hasNonNeutralOrgVerification ? "ORG_VERIFIED" : "NO_GAPS";
     }
     allQueries.sort((a, b) => a.filePath.localeCompare(b.filePath) || a.lineNumber - b.lineNumber);
@@ -318,6 +323,7 @@ export class StackTraceImpactService {
       const impacts = allQueries.map((query) => query.personas.find((item) => item.personaName === p.persona.name)!);
       const status: ImpactStatus = impacts.some((r) => r.status === "AT_RISK") ? "AT_RISK"
         : (!impacts.length || traversalIncomplete || impacts.some((r) => r.status === "REVIEW")) ? "REVIEW"
+        : impacts.some((r) => r.status === "ADVISORY") ? "ADVISORY"
         : impacts.some((r) => r.status === "ORG_VERIFIED") ? "ORG_VERIFIED" : "NO_GAPS";
       const found = new Map<string, MissingReadPermission>();
       const checkedUsers = new Map<string, OrgCheckedUser>();
@@ -331,6 +337,7 @@ export class StackTraceImpactService {
         personaName: p.persona.name, status,
         atRiskQueries: impacts.filter((r) => r.status === "AT_RISK").length,
         reviewQueries: impacts.filter((r) => r.status === "REVIEW").length,
+        advisoryQueries: impacts.filter((r) => r.status === "ADVISORY").length,
         missing: [...found.values()],
         ...(checkedUsers.size ? { orgCheckedUsers: [...checkedUsers.values()] } : {}),
         verifiedFromOrg: impacts.flatMap((impact) => impact.verifiedFromOrg ?? [])
@@ -348,6 +355,7 @@ export class StackTraceImpactService {
         personasChecked: prepared.length,
         atRisk: personas.filter((p) => p.status === "AT_RISK").length,
         review: personas.filter((p) => p.status === "REVIEW").length,
+        advisory: personas.filter((p) => p.status === "ADVISORY").length,
         noGaps: personas.filter((p) => p.status === "NO_GAPS").length,
         orgVerified: personas.filter((p) => p.status === "ORG_VERIFIED").length,
       },

@@ -9,6 +9,8 @@ export interface OrgProfile {
 export interface OrgUser {
   id: string;
   profileId: string;
+  /** Salesforce User.LastLoginDate, null if the user has never logged in. */
+  lastLoginDate?: string | null;
 }
 
 export interface OrgAssignment {
@@ -94,4 +96,31 @@ export function matchPersonaUsers(
       reason: "No active user has this persona's Profile and all required Permission Sets/PSGs."
     } : {})
   };
+}
+
+/**
+ * Select one representative from the ACTIVE users already matched by Profile,
+ * Permission Sets and PSGs. A never-logged-in user is NOT eligible for this
+ * selection. Deterministic Salesforce ID tie-break handles equal timestamps.
+ *
+ * This is representative-user evidence, NOT proof about every persona member.
+ */
+export function selectMostRecentlyLoggedInMatchedUser(
+  matchingIds: readonly string[],
+  users: readonly OrgUser[],
+): string | undefined {
+  const byId = new Map(users.map((user) => [user.id, user]));
+  let selected: string | undefined;
+  let latest = Number.NEGATIVE_INFINITY;
+  for (const id of matchingIds) {
+    const date = byId.get(id)?.lastLoginDate;
+    if (!date) continue;
+    const timestamp = Date.parse(date);
+    if (!Number.isFinite(timestamp)) continue;
+    if (timestamp > latest || (timestamp === latest && selected !== undefined && id < selected)) {
+      selected = id;
+      latest = timestamp;
+    }
+  }
+  return selected;
 }

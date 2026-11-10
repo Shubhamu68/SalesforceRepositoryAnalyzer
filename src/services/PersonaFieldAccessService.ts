@@ -15,19 +15,21 @@ export class PersonaFieldAccessService {
     const evaluator = createPersonaAccessEvaluator(resolved);
     const field = evaluator.evaluateField(`${objectName}.${fieldName}`);
     const objectRead = evaluator.evaluateObject(objectName).access.read;
-    const special = !objectRead && this.orgReadVerification?.isConfigured(objectName);
-    const objectReadEvidence = special
-      ? await this.orgReadVerification!.resolve(persona, objectName, false)
+    const objectReadEvidence = !objectRead && this.orgReadVerification
+      ? await this.orgReadVerification.resolve(persona, objectName, false)
       : undefined;
-    const independentFls = field.schemaRequired === true || field.permissionable === false || field.readGrantedBy.length > 0;
-    let readable = field.readable;
+    const effectiveObjectRead = objectRead || objectReadEvidence?.readable === true;
+    const independentFls = field.schemaRequired === true || field.permissionable === false ||
+      field.readGrantedBy.length > 0;
+    let readable = effectiveObjectRead && independentFls;
     let fieldReadEvidence;
-    if (objectReadEvidence?.readable) {
-      readable = independentFls;
-      if (!readable) {
-        fieldReadEvidence = await this.orgReadVerification!.resolveField(persona, objectName, fieldName);
-        readable = fieldReadEvidence?.outcome === "VERIFIED";
-      }
+    if (effectiveObjectRead && !independentFls) {
+      const decision = await this.orgReadVerification?.resolveFieldRead(persona, objectName, fieldName, false);
+      readable = decision?.readable === true;
+      fieldReadEvidence = decision?.orgEvidence ?? (decision ? {
+        object: objectName, field: fieldName, outcome: "UNVERIFIED" as const,
+        matchedUsers: 0, checkedUsers: 0, sampled: false, message: decision.message,
+      } : undefined);
     }
     return {
       field: field.field,

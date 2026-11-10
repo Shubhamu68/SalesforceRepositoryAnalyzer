@@ -12,6 +12,7 @@ const PAGE_SIZE = 25;
 const STATUS: Record<Status, { title: string; className: string }> = {
   AT_RISK: { title: "At risk", className: "stack-risk" },
   REVIEW: { title: "Unable to verify", className: "stack-review" },
+  ADVISORY: { title: "Permission advisory", className: "stack-review" },
   NO_GAPS: { title: "No gaps found", className: "stack-good" },
   ORG_VERIFIED: { title: "Verified from Org", className: "stack-org-verified" },
 };
@@ -100,7 +101,11 @@ const QueryCard = memo(function QueryCard({ query, impact }: { query: Query; imp
       <span className="stack-ux-chevron" aria-hidden="true">{open ? "▾" : "▸"}</span>
       <span className="stack-query-object">{query.object}</span>
       <span className="stack-ux-query-method">{query.className}.{query.methodName} · line {query.lineNumber}</span>
-      <span className="stack-mode">{query.securityMode === "UNSPECIFIED" ? "Mode not explicit" : `WITH ${query.securityMode}`}</span>
+      <span className="stack-mode">{query.securityMode === "UNSPECIFIED"
+        ? query.effectiveMode === "UNKNOWN" || !query.effectiveMode
+          ? "Execution mode unknown"
+          : `${query.effectiveMode} (API ${query.apiVersion ?? "?"} default)`
+        : `WITH ${query.securityMode}${query.effectiveMode === "INVALID_CLAUSE" ? " — unsupported" : ""}`}</span>
       <StatusPill value={impact.status} />
     </button>
     {open && <div className="stack-query-detail">
@@ -170,6 +175,7 @@ const StackResults = memo(function StackResults({ result }: { result: Result }) 
         ["SOQL queries", result.summary.queriesFound],
         ["At risk", result.summary.atRisk],
         ["Unable to verify", result.summary.review],
+        ["Permission advisories", result.summary.advisory ?? 0],
         ["Verified from Org", result.summary.orgVerified ?? 0],
       ].map(([label, value]) => <div className="stack-stat" key={label}><span>{label}</span><strong>{value}</strong></div>)}
     </section>

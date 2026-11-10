@@ -1,6 +1,6 @@
-export type SoqlSecurityMode =
-  | "USER_MODE"
-  | "NO_USER_MODE";
+import type { DeclaredSoqlMode } from "../analyzer/soqlExecutionMode.js";
+
+export type SoqlSecurityMode = DeclaredSoqlMode;
 
 export interface SoqlSubquery {
   /*

@@ -1,12 +1,12 @@
 /** API response types shared by the Stack Trace view and its pure view-model helpers. */
-export type Status = "AT_RISK" | "REVIEW" | "NO_GAPS" | "ORG_VERIFIED";
+export type Status = "AT_RISK" | "REVIEW" | "NO_GAPS" | "ORG_VERIFIED" | "ADVISORY";
 export type Missing = {
   object: string;
   field?: string;
   reason: "OBJECT_READ" | "FIELD_READ";
   orgOutcome?: "DENIED" | "UNVERIFIED";
   orgMessage?: string;
-  orgReason?: "NO_MATCHING_USERS";
+  orgReason?: "NO_MATCHING_USERS" | "NO_LOGGED_IN_USERS";
 };
 export type OrgVerified = {
   object: string;
@@ -47,6 +47,9 @@ export type Query = {
   query: string;
   withUserMode: boolean;
   securityMode: "USER_MODE" | "SECURITY_ENFORCED" | "SYSTEM_MODE" | "UNSPECIFIED";
+  effectiveMode?: "USER_MODE" | "SYSTEM_MODE" | "SECURITY_ENFORCED" | "UNKNOWN" | "INVALID_CLAUSE";
+  permissionEnforcement?: "FULL" | "SELECT_ONLY" | "NONE" | "UNKNOWN" | "INVALID";
+  apiVersion?: number;
   checkedFields: { object: string; field: string; source: string }[];
   unresolvedFields: string[];
   limitations: string[];
@@ -57,6 +60,7 @@ export type Persona = {
   status: Status;
   atRiskQueries: number;
   reviewQueries: number;
+  advisoryQueries?: number;
   missing: Missing[];
   verifiedFromOrg?: OrgVerified[];
   orgCheckedUsers?: OrgCheckedUser[];
@@ -73,6 +77,7 @@ export type Result = {
     personasChecked: number;
     atRisk: number;
     review: number;
+    advisory?: number;
     noGaps: number;
     orgVerified?: number;
   };

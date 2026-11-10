@@ -122,7 +122,7 @@ const stackTraceImpactService = new StackTraceImpactService(
   personaConfigLoader,
   personaPermissionResolver,
   paths.mutingPermissionSetsPath,
-  salesforcePersonaAccessVerifier,
+  orgObjectReadVerification,
   salesforceRelationshipMetadata,
   orgVerificationStatusPolicy
 );

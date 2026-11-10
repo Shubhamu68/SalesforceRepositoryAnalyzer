@@ -22,8 +22,8 @@ function fakeConnection(options: { users: boolean; disconnected?: boolean; acces
       queries.push(soql);
       if (soql.startsWith("SELECT Id, Name FROM Profile")) return [{ Id: profileId, Name: "OMS Standard User" }] as T[];
       if (soql.startsWith("SELECT Id, DeveloperName FROM PermissionSetGroup")) return [];
-      if (soql.startsWith("SELECT Id, Name, Username, ProfileId FROM User")) return options.users
-        ? [{ Id: userId, Name: "Demo User", Username: "demo@example.org", ProfileId: profileId }] as T[] : [];
+      if (soql.startsWith("SELECT Id, Name, Username, ProfileId, LastLoginDate FROM User")) return options.users
+        ? [{ Id: userId, Name: "Demo User", Username: "demo@example.org", ProfileId: profileId, LastLoginDate: "2026-11-10T18:00:00Z" }] as T[] : [];
       if (soql.startsWith("SELECT Id, Name, IsOwnedByProfile FROM PermissionSet")) return [];
       if (soql.startsWith("SELECT AssigneeId, PermissionSetId")) return [];
       if (soql.includes("FROM UserEntityAccess")) return [{ UserId: userId, IsReadable: options.access ?? true }] as T[];
