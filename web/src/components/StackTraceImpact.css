@@ -1,0 +1,60 @@
+/* Stack Trace UX enhancements. Scoped to this page to avoid affecting other analyzers. */
+.stack-page .stack-ux-stats { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.stack-page .stack-ux-stats .stack-stat { min-width: 0; }
+.stack-page .stack-ux-table tbody > tr.stack-ux-detail-row:hover { background: #fff; }
+.stack-page .stack-ux-table .stack-ux-detail-row > td { padding: 0 10px 14px; background: #fff; }
+.stack-page .stack-ux-persona-button { display: inline-flex; align-items: center; gap: 9px; cursor: pointer; line-height: 1.5; }
+.stack-page .stack-ux-persona-button:focus-visible,
+.stack-page .stack-ux-disclosure-toggle:focus-visible,
+.stack-page .stack-ux-query-toggle:focus-visible,
+.stack-page .stack-ux-more-button:focus-visible { outline: 2px solid #2060ce; outline-offset: 3px; }
+.stack-page .stack-ux-chevron { font-size: 14px; color: #61738d; width: 14px; flex-shrink: 0; text-align: center; }
+.stack-page .stack-ux-persona-detail { padding: 18px 20px; background: #f9fbfe; border: 1px solid #dce7f4; border-radius: 8px; display: grid; gap: 15px; font-size: 12px; min-width: 0; }
+.stack-page .stack-ux-persona-heading { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.stack-page .stack-ux-persona-heading h3 { margin: 0; color: #17304f; font-size: 14px; overflow-wrap: anywhere; }
+.stack-page .stack-ux-findings { display: grid; gap: 7px; min-width: 0; }
+.stack-page .stack-ux-findings h4, .stack-page .stack-ux-findings p { margin: 0; }
+.stack-page .stack-ux-findings h4 { font-size: 12px; }
+.stack-page .stack-ux-findings p { color: #63758d; line-height: 1.6; }
+.stack-page .stack-ux-danger-title { color: #b4233a; font-size: 12px; }
+.stack-page .stack-ux-pending-title { color: #6a7890; font-size: 12px; }
+.stack-page .stack-ux-finding-list { list-style: none; padding: 0; margin: 3px 0 0; display: grid; gap: 7px; min-width: 0; }
+.stack-page .stack-ux-finding-list li { display: grid; gap: 3px; padding: 10px 13px; border-radius: 6px; overflow-wrap: anywhere; line-height: 1.5; }
+.stack-page .stack-ux-finding-list li strong { font-size: 12px; font-weight: 750; }
+.stack-page .stack-ux-finding-list li span { color: #53657f; font-size: 11px; }
+.stack-page .stack-ux-denied { background: #fff1f2; border-left: 3px solid #ce2941; }
+.stack-page .stack-ux-denied strong { color: #ad1f37; }
+.stack-page .stack-ux-unverified { background: #f0f3f8; border-left: 3px solid #8a99ad; }
+.stack-page .stack-ux-unverified strong { color: #405372; }
+.stack-page .stack-ux-no-match { padding: 11px 13px; border: 1px solid #d8e0eb; border-left: 3px solid #7286a2; border-radius: 6px; background: #f1f5fa; color: #334b69; font-weight: 650; line-height: 1.6; }
+.stack-page .stack-ux-pending-names { margin: 1px 0 0; padding-left: 20px; display: grid; gap: 7px; color: #4d617b; overflow-wrap: anywhere; }
+.stack-page .stack-ux-pending-names li { list-style: disc; line-height: 1.5; }
+.stack-page .stack-ux-clear { margin: 1px 0; color: #467b5e; line-height: 1.6; }
+.stack-page .stack-ux-disclosure { border: 1px solid #dbe5f0; border-radius: 7px; background: #fff; min-width: 0; overflow: hidden; }
+.stack-page .stack-ux-disclosure-toggle { width: 100%; display: flex; align-items: center; gap: 9px; border: 0; background: #fff; color: #274465; text-align: left; padding: 12px 13px; cursor: pointer; font-weight: 700; font-size: 12px; }
+.stack-page .stack-ux-disclosure-toggle:hover { background: #f5f8fd; }
+.stack-page .stack-ux-count { margin-left: auto; background: #edf2f8; color: #526680; border-radius: 10px; padding: 2px 8px; font-size: 11px; }
+.stack-page .stack-ux-disclosure-body { padding: 2px 15px 13px 32px; border-top: 1px solid #e8edf5; }
+.stack-page .stack-ux-evidence-list,
+.stack-page .stack-ux-user-list { display: grid; gap: 7px; margin: 10px 0 0; padding-left: 16px; list-style: disc; line-height: 1.5; }
+.stack-page .stack-ux-evidence-list li { color: #485e79; overflow-wrap: anywhere; }
+.stack-page .stack-ux-user-list li { color: #314967; overflow-wrap: anywhere; }
+.stack-page .stack-ux-user-list li strong { font-size: 12px; margin-right: 7px; }
+.stack-page .stack-ux-user-list li span { color: #65758a; }
+.stack-page .stack-ux-query-card { min-width: 0; }
+.stack-page .stack-ux-query-toggle { width: 100%; border: 0; padding: 14px; display: flex; align-items: center; gap: 11px; flex-wrap: wrap; background: #fafcff; font-size: 12px; text-align: left; cursor: pointer; }
+.stack-page .stack-ux-query-toggle:hover { background: #f3f8ff; }
+.stack-page .stack-ux-query-toggle .stack-status { margin-left: auto; }
+.stack-page .stack-ux-query-method { color: #3d526e; overflow-wrap: anywhere; }
+.stack-page .stack-ux-query-persona { margin-top: 18px; border-top: 1px solid #e2e9f3; padding-top: 15px; display: grid; gap: 12px; }
+.stack-page .stack-ux-query-persona-heading { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.stack-page .stack-ux-query-persona-heading h4 { margin: 0; }
+.stack-page .stack-ux-query-persona section { display: grid; gap: 8px; }
+.stack-page .stack-ux-extra-notes { color: #647892; border: 1px solid #e5ecf5; background: #f9fbff; padding: 10px 12px; border-radius: 6px; font-size: 11px; }
+.stack-page .stack-ux-extra-notes summary { cursor: pointer; font-weight: 650; }
+.stack-page .stack-ux-extra-notes ul { margin: 8px 0 0; padding-left: 17px; line-height: 1.6; }
+.stack-page .stack-ux-show-more { display: flex; justify-content: center; margin: 16px 0 2px; }
+.stack-page .stack-ux-more-button { border: 1px solid #c9d8ed; border-radius: 6px; background: #fff; padding: 10px 17px; color: #1e56aa; font-size: 12px; font-weight: 700; cursor: pointer; }
+.stack-page .stack-ux-more-button:hover { background: #f1f6ff; }
+@media (max-width: 1150px) { .stack-page .stack-ux-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 650px) { .stack-page .stack-ux-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } .stack-page .stack-ux-persona-detail { padding: 12px; } .stack-page .stack-ux-query-toggle .stack-status { margin-left: 0; } }

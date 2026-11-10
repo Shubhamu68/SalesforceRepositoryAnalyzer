@@ -1,46 +1,17 @@
-import { useMemo, useState, type FormEvent } from "react";
-
-type Status = "AT_RISK" | "REVIEW" | "NO_GAPS" | "ORG_VERIFIED";
-type Missing = { object: string; field?: string; reason: "OBJECT_READ" | "FIELD_READ";
-  orgOutcome?: "DENIED" | "UNVERIFIED"; orgMessage?: string };
-type OrgVerified = { object: string; field?: string; matchedUsers: number; checkedUsers: number; sampled: boolean; message: string };
-type OrgCheckedUser = { id: string; name: string; username: string };
-const displayUser = (user: OrgCheckedUser) => `${user.name} (${user.username})`;
-type Frame = { kind: string; className: string; methodName?: string; line: number };
-type Method = {
-  id: string; className: string; methodName: string; filePath: string;
-  startLine: number; endLine: number; depth: number; callPaths: string[][];
-};
-type Impact = { personaName: string; status: Status; missing: Missing[]; verifiedFromOrg?: OrgVerified[]; orgCheckedUsers?: OrgCheckedUser[]; notes: string[] };
-type Query = {
-  id: string; methodId: string; className: string; methodName: string;
-  filePath: string; lineNumber: number; object: string; query: string;
-  withUserMode: boolean;
-  securityMode: "USER_MODE" | "SECURITY_ENFORCED" | "SYSTEM_MODE" | "UNSPECIFIED";
-  checkedFields: { object: string; field: string; source: string }[];
-  unresolvedFields: string[]; limitations: string[]; personas: Impact[];
-};
-type Persona = {
-  personaName: string; status: Status; atRiskQueries: number;
-  reviewQueries: number; missing: Missing[]; verifiedFromOrg?: OrgVerified[];
-  orgCheckedUsers?: OrgCheckedUser[];
-};
-type Result = {
-  entryMethod: Method; frames: Frame[]; methods: Method[]; queries: Query[];
-  personas: Persona[];
-  summary: { methodsVisited: number; queriesFound: number; personasChecked: number;
-    atRisk: number; review: number; noGaps: number; orgVerified?: number };
-  warnings: string[];
-};
+import { Fragment, memo, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import "./StackTraceImpact.css";
+import type { Impact, Missing, OrgCheckedUser, Persona, Query, Result, Status } from "./stackTraceTypes";
+import { focusedQueries, hasNoMatchingUsers, orgVerifiedSummary, partitionFindings, permissionLabel } from "./stackTraceViewModel";
 
 const SAMPLE = `Class.OMSQueryService.getTrxValidationMap: line 1774, column 1
 Class.ProcessExceptionHandler.onAfterUpdate: line 150, column 1
 Trigger.ProcessExceptionTrigger: line 23, column 1`;
+const PAGE_SIZE = 25;
 
 const STATUS: Record<Status, { title: string; className: string }> = {
   AT_RISK: { title: "At risk", className: "stack-risk" },
   REVIEW: { title: "Unable to verify", className: "stack-review" },
-  NO_GAPS: { title: "No risk", className: "stack-good" },
+  NO_GAPS: { title: "No gaps found", className: "stack-good" },
   ORG_VERIFIED: { title: "Verified from Org", className: "stack-org-verified" },
 };
 
@@ -48,27 +19,249 @@ function StatusPill({ value }: { value: Status }) {
   return <span className={`stack-status ${STATUS[value].className}`}>{STATUS[value].title}</span>;
 }
 
+/** Expensive evidence lists are not mounted until the user expands the section. */
+function Disclosure({ title, count, children }: { title: string; count: number; children: () => ReactNode }) {
+  const [open, setOpen] = useState(false);
+  return <section className="stack-ux-disclosure">
+    <button type="button" className="stack-ux-disclosure-toggle" aria-expanded={open} onClick={() => setOpen(!open)}>
+      <span className="stack-ux-chevron" aria-hidden="true">{open ? "▾" : "▸"}</span>
+      <span>{title}</span><span className="stack-ux-count">{count}</span>
+    </button>
+    {open && <div className="stack-ux-disclosure-body">{children()}</div>}
+  </section>;
+}
+
+function FindingList({ items, confirmed }: { items: Missing[]; confirmed: boolean }) {
+  return <ul className="stack-ux-finding-list">
+    {items.map((item) => <li className={confirmed ? "stack-ux-denied" : "stack-ux-unverified"} key={`${item.object}|${item.field ?? ""}|${item.reason}`}>
+      <strong>{permissionLabel(item)}</strong>
+      <span>{confirmed
+        ? `${item.reason === "FIELD_READ" ? "Field" : "Object"} Read access is missing from both org and repository.`
+        : "Repository permissions didn't confirm access, and Salesforce could not verify it."}</span>
+    </li>)}
+  </ul>;
+}
+
+function PersonaDetail({ persona }: { persona: Persona }) {
+  const { denied, unverified } = useMemo(() => partitionFindings(persona.missing), [persona.missing]);
+  const noMatches = hasNoMatchingUsers(persona);
+  const verified = persona.verifiedFromOrg ?? [];
+  const users = persona.orgCheckedUsers ?? [];
+  return <div className="stack-ux-persona-detail">
+    <div className="stack-ux-persona-heading"><h3>{persona.personaName}</h3><StatusPill value={persona.status} /></div>
+
+    {noMatches && <div className="stack-ux-no-match" role="status">
+      No active Salesforce user matched this persona, so the access check could not be completed.
+    </div>}
+
+    {denied.length > 0 && <section className="stack-ux-findings" aria-label="Confirmed missing permissions">
+      <h4 className="stack-ux-danger-title">Missing Read permissions ({denied.length})</h4>
+      <p>Salesforce confirmed missing access for one or more matching users.</p>
+      <FindingList items={denied} confirmed />
+    </section>}
+
+    {unverified.length > 0 && <section className="stack-ux-findings" aria-label="Permissions awaiting verification">
+      <h4 className="stack-ux-pending-title">Could not verify Read permissions ({unverified.length})</h4>
+      <p>{noMatches
+        ? "The following permissions were not confirmed in the repository. Salesforce could not check them because no matching user was found."
+        : "The repository did not confirm these permissions, and Salesforce could not complete the check."}</p>
+      {noMatches
+        ? <ul className="stack-ux-pending-names">{unverified.map((item) => <li key={`${item.object}|${item.field ?? ""}`}>{permissionLabel(item)}</li>)}</ul>
+        : <FindingList items={unverified} confirmed={false} />}
+    </section>}
+
+    {denied.length === 0 && unverified.length === 0 && <p className="stack-ux-clear">
+      {persona.status === "REVIEW"
+        ? "Some queries need further review. See the selected persona's query details below."
+        : "No outstanding object or field Read permission findings."}
+    </p>}
+
+    {verified.length > 0 && <Disclosure title="Permissions verified from Salesforce" count={verified.length}>
+      {() => <ul className="stack-ux-evidence-list">{verified.map((item) => <li key={`${item.object}|${item.field ?? ""}`}>
+        {orgVerifiedSummary(item)}
+      </li>)}</ul>}
+    </Disclosure>}
+
+    {users.length > 0 && <Disclosure title="Salesforce users checked" count={users.length}>
+      {() => <ul className="stack-ux-user-list">{users.map((user: OrgCheckedUser) => <li key={user.id}>
+        <strong>{user.name}</strong><span>{user.username}</span>
+      </li>)}</ul>}
+    </Disclosure>}
+  </div>;
+}
+
+/** A query's field inventory mounts only when its disclosure is opened. */
+const QueryCard = memo(function QueryCard({ query, impact }: { query: Query; impact: Impact }) {
+  const [open, setOpen] = useState(false);
+  const { denied, unverified } = useMemo(() => partitionFindings(impact.missing), [impact.missing]);
+  return <article className="stack-query-card stack-ux-query-card">
+    <button className="stack-ux-query-toggle" type="button" onClick={() => setOpen(!open)} aria-expanded={open}>
+      <span className="stack-ux-chevron" aria-hidden="true">{open ? "▾" : "▸"}</span>
+      <span className="stack-query-object">{query.object}</span>
+      <span className="stack-ux-query-method">{query.className}.{query.methodName} · line {query.lineNumber}</span>
+      <span className="stack-mode">{query.securityMode === "UNSPECIFIED" ? "Mode not explicit" : `WITH ${query.securityMode}`}</span>
+      <StatusPill value={impact.status} />
+    </button>
+    {open && <div className="stack-query-detail">
+      <pre>{query.query}</pre>
+      <h4>Resolved fields ({query.checkedFields.length})</h4>
+      {query.checkedFields.length ? <div className="stack-fields">
+        {query.checkedFields.map((field, i) => <code key={`${field.object}.${field.field}.${i}`}>{field.object}.{field.field}</code>)}
+      </div> : <p className="muted">No individual field references were resolved. Object Read is still checked.</p>}
+      {query.unresolvedFields.length > 0 && <div className="stack-caution">
+        <strong>Fields we couldn't resolve</strong>
+        <ul>{query.unresolvedFields.map((field, i) => <li key={`${field}-${i}`}>{field}</li>)}</ul>
+      </div>}
+      {query.limitations.length > 0 && <details className="stack-ux-extra-notes">
+        <summary>Other technical limitations ({query.limitations.length})</summary>
+        <ul>{query.limitations.map((note, i) => <li key={`${i}-${note}`}>{note}</li>)}</ul>
+      </details>}
+      <div className="stack-ux-query-persona">
+        <div className="stack-ux-query-persona-heading"><h4>Persona result: {impact.personaName}</h4><StatusPill value={impact.status} /></div>
+        {denied.length > 0 && <section aria-label="Missing permissions for this query">
+          <strong className="stack-ux-danger-title">Missing access</strong>
+          <FindingList items={denied} confirmed />
+        </section>}
+        {unverified.length > 0 && <section aria-label="Unverified permissions for this query">
+          <strong className="stack-ux-pending-title">Unable to verify</strong>
+          <FindingList items={unverified} confirmed={false} />
+        </section>}
+        {denied.length === 0 && unverified.length === 0 && <p className="stack-ux-clear">
+          {impact.status === "REVIEW" ? "Some field references need further review." : "No outstanding Read permission findings for this query."}
+        </p>}
+        {(impact.verifiedFromOrg?.length ?? 0) > 0 && <Disclosure title="Verified from Salesforce" count={impact.verifiedFromOrg!.length}>
+          {() => <ul className="stack-ux-evidence-list">{impact.verifiedFromOrg!.map((item) =>
+            <li key={`${item.object}|${item.field ?? ""}`}>{orgVerifiedSummary(item)}</li>)}</ul>}
+        </Disclosure>}
+        {impact.notes.length > 0 && <details className="stack-ux-extra-notes">
+          <summary>Analysis notes ({impact.notes.length})</summary>
+          <ul>{impact.notes.map((note, i) => <li key={`${i}-${note}`}>{note}</li>)}</ul>
+        </details>}
+      </div>
+    </div>}
+  </article>;
+});
+
+/** Kept separate and memoized, so typing into the trace does not rerender large results. */
+const StackResults = memo(function StackResults({ result }: { result: Result }) {
+  const [filter, setFilter] = useState("");
+  const [selectedPersona, setSelectedPersona] = useState("");
+  const [queryFilter, setQueryFilter] = useState("all");
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+
+  const personas = useMemo(() => result.personas.filter((item) =>
+    item.personaName.toLowerCase().includes(filter.trim().toLowerCase())
+  ), [result.personas, filter]);
+  const queries = useMemo(() => focusedQueries(result.queries, selectedPersona, queryFilter === "issues"),
+    [result.queries, selectedPersona, queryFilter]);
+  const visibleQueries = useMemo(() => queries.slice(0, visibleCount), [queries, visibleCount]);
+
+  function choosePersona(name: string) {
+    setSelectedPersona((previous) => previous === name ? "" : name);
+    setVisibleCount(PAGE_SIZE);
+    setQueryFilter("all");
+  }
+
+  return <>
+    <section className="stack-stats stack-ux-stats" aria-label="Analysis summary">
+      {[
+        ["Methods traversed", result.summary.methodsVisited],
+        ["SOQL queries", result.summary.queriesFound],
+        ["At risk", result.summary.atRisk],
+        ["Unable to verify", result.summary.review],
+        ["Verified from Org", result.summary.orgVerified ?? 0],
+      ].map(([label, value]) => <div className="stack-stat" key={label}><span>{label}</span><strong>{value}</strong></div>)}
+    </section>
+
+    <section className="panel stack-entry">
+      <div className="panel-heading"><div><h2>Entry method &amp; traversal</h2>
+        <p>{result.entryMethod.className}.{result.entryMethod.methodName} · lines {result.entryMethod.startLine}–{result.entryMethod.endLine}</p>
+      </div><span className="mini-tag">{result.methods.length} method(s)</span></div>
+      <details className="stack-source-frames">
+        <summary>Original stack frames ({result.frames.length})</summary>
+        <ol>{result.frames.map((frame, index) => <li key={`${frame.className}-${frame.line}-${index}`}>
+          {frame.kind}.{frame.className}{frame.methodName ? `.${frame.methodName}` : ""} — line {frame.line}
+        </li>)}</ol>
+      </details>
+      <div className="stack-tree">
+        {result.methods.map((method) => <div key={method.id} className="stack-method-row" style={{ paddingLeft: `${Math.min(method.depth, 8) * 20 + 12}px` }}>
+          <span className="stack-node-icon">↳</span><div><strong>{method.className}.{method.methodName}()</strong>
+            <small>{method.filePath} · lines {method.startLine}–{method.endLine}</small></div>
+        </div>)}
+      </div>
+    </section>
+
+    <section className="panel stack-persona-panel">
+      <div className="panel-heading"><div><h2>Persona impact overview</h2>
+        <p>Select a persona to see access problems first, followed by supporting Salesforce evidence.</p>
+      </div></div>
+      <div className="stack-filter"><label htmlFor="stack-persona-filter">Search personas</label>
+        <input id="stack-persona-filter" value={filter} onChange={(event) => {
+          const next = event.target.value;
+          setFilter(next);
+          if (selectedPersona && !selectedPersona.toLowerCase().includes(next.trim().toLowerCase())) setSelectedPersona("");
+        }} placeholder="Search persona name..." type="search" />
+      </div>
+      <div className="stack-table-wrap"><table className="stack-table stack-ux-table"><thead><tr>
+        <th>Persona</th><th>Assessment</th><th>At-risk queries</th><th>Unable to verify</th><th>Open findings</th>
+      </tr></thead><tbody>
+        {personas.map((persona) => <Fragment key={persona.personaName}>
+          <tr className={selectedPersona === persona.personaName ? "stack-selected" : ""}>
+            <td><button className="stack-persona-button stack-ux-persona-button" type="button"
+              aria-expanded={selectedPersona === persona.personaName}
+              onClick={() => choosePersona(persona.personaName)}>
+              <span className="stack-ux-chevron" aria-hidden="true">{selectedPersona === persona.personaName ? "▾" : "▸"}</span>
+              {persona.personaName}
+            </button></td>
+            <td><StatusPill value={persona.status} /></td>
+            <td>{persona.atRiskQueries}</td><td>{persona.reviewQueries}</td><td>{persona.missing.length}</td>
+          </tr>
+          {selectedPersona === persona.personaName && <tr className="stack-ux-detail-row"><td colSpan={5}>
+            <PersonaDetail key={persona.personaName} persona={persona} />
+          </td></tr>}
+        </Fragment>)}
+        {!personas.length && <tr><td colSpan={5}>No personas match the filter.</td></tr>}
+      </tbody></table></div>
+    </section>
+
+    <section className="panel stack-queries">
+      <div className="panel-heading"><div><h2>Discovered SOQL queries</h2>
+        <p>{selectedPersona ? `Showing query results for ${selectedPersona} only.` : "Select a persona above to see its query results."}</p>
+      </div>{selectedPersona && <div className="stack-query-filter"><label htmlFor="stack-query-filter">Show</label>
+        <select id="stack-query-filter" value={queryFilter} onChange={(event) => {
+          setQueryFilter(event.target.value); setVisibleCount(PAGE_SIZE);
+        }}><option value="all">All queries</option><option value="issues">Queries needing attention</option></select>
+      </div>}</div>
+      {!selectedPersona ? <div className="stack-empty">Choose a persona to explore the discovered queries.</div>
+        : queries.length ? <>
+          <div className="stack-query-list">{visibleQueries.map(({ query, impact }) =>
+            <QueryCard key={`${selectedPersona}|${query.id}`} query={query} impact={impact} />)}</div>
+          {visibleCount < queries.length && <div className="stack-ux-show-more">
+            <button className="stack-ux-more-button" type="button" onClick={() => setVisibleCount((count) => count + PAGE_SIZE)}>
+              Show next {Math.min(PAGE_SIZE, queries.length - visibleCount)} queries ({visibleCount} of {queries.length} shown)
+            </button>
+          </div>}
+        </> : <div className="stack-empty">No queries match this filter for {selectedPersona}.</div>}
+    </section>
+
+    {result.warnings.length > 0 && <details className="stack-warnings">
+      <summary>Analysis limitations and warnings ({result.warnings.length})</summary>
+      <ul>{result.warnings.map((warning, index) => <li key={`${index}-${warning}`}>{warning}</li>)}</ul>
+    </details>}
+    <p className="stack-disclaimer">Apex reachability is static. Salesforce verification checks object and field Read for matching active users, not live SOQL execution. Other assigned permissions can contribute to those users' access. Dynamic SOQL, runtime conditions, and sharing may affect execution.</p>
+  </>;
+});
+
 export default function StackTraceImpact() {
   const [trace, setTrace] = useState("");
   const [result, setResult] = useState<Result | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [filter, setFilter] = useState("");
-  const [selectedPersona, setSelectedPersona] = useState("");
-  const [queryFilter, setQueryFilter] = useState("all");
-
-  const personas = useMemo(() => result?.personas.filter((item) =>
-    item.personaName.toLowerCase().includes(filter.trim().toLowerCase())
-  ) ?? [], [result, filter]);
-  const queries = useMemo(() => result?.queries.filter((item) =>
-    queryFilter === "all" || ["AT_RISK", "REVIEW"].includes(
-      item.personas.find((p) => p.personaName === queryFilter)?.status ?? "NO_GAPS")
-  ) ?? [], [result, queryFilter]);
 
   async function analyze(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!trace.trim()) { setError("Paste a Salesforce Apex stack trace first."); return; }
-    setLoading(true); setError(""); setResult(null); setSelectedPersona(""); setQueryFilter("all");
+    setLoading(true); setError(""); setResult(null);
     try {
       const response = await fetch("/api/stack-trace-impact", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -82,140 +275,26 @@ export default function StackTraceImpact() {
     } finally { setLoading(false); }
   }
 
-  const focused = result?.personas.find((persona) => persona.personaName === selectedPersona);
-
-  return (
-    <div className="stack-page">
-      <form className="panel stack-form" onSubmit={analyze}>
-        <div className="panel-heading"><div>
-          <h2>Trace an Apex execution path</h2>
-          <p>Paste the stack trace. We'll extract its method, recursively follow resolvable calls and check SOQL access across all configured personas.</p>
-        </div><span className="mini-tag">Repository first · Salesforce fallback</span></div>
-        <div className="form-field stack-input">
-          <label htmlFor="stack-text">Apex stack trace</label>
-          <textarea id="stack-text" spellCheck={false} rows={5} value={trace}
-            onChange={(event) => { setTrace(event.target.value); setError(""); }}
-            placeholder={SAMPLE} disabled={loading} />
-        </div>
-        <div className="stack-controls">
-          <span>Starts at the first matching Class frame. Static SOQL only; all branches are considered potentially reachable.</span>
-          <button className="primary-button" type="submit" disabled={loading}>
-            {loading ? "Analysing stack trace…" : "Run Stack Trace Analysis"}
-          </button>
-        </div>
-        {error && <div className="error-card" role="alert">{error}</div>}
-      </form>
-
-      {result && <>
-        <section className="stack-stats" aria-label="Analysis summary">
-          {[
-            ["Methods traversed", result.summary.methodsVisited],
-            ["SOQL queries", result.summary.queriesFound],
-            ["Personas checked", result.summary.personasChecked],
-            ["At risk", result.summary.atRisk],
-            ["Unable to verify", result.summary.review],
-            ["Verified from Org", result.summary.orgVerified ?? 0],
-          ].map(([label, value]) => <div className="stack-stat" key={label}><span>{label}</span><strong>{value}</strong></div>)}
-        </section>
-
-        <section className="panel stack-entry">
-          <div className="panel-heading"><div><h2>Entry method &amp; traversal</h2>
-            <p>{result.entryMethod.className}.{result.entryMethod.methodName} · lines {result.entryMethod.startLine}–{result.entryMethod.endLine}</p>
-          </div><span className="mini-tag">{result.methods.length} method(s)</span></div>
-          <details className="stack-source-frames">
-            <summary>Original stack frames ({result.frames.length})</summary>
-            <ol>{result.frames.map((frame, index) => <li key={`${frame.className}-${frame.line}-${index}`}>
-              {frame.kind}.{frame.className}{frame.methodName ? `.${frame.methodName}` : ""} — line {frame.line}
-            </li>)}</ol>
-          </details>
-          <div className="stack-tree">
-            {result.methods.map((method) => <div key={method.id} className="stack-method-row" style={{ paddingLeft: `${Math.min(method.depth, 8) * 20 + 12}px` }}>
-              <span className="stack-node-icon">↳</span><div><strong>{method.className}.{method.methodName}()</strong>
-                <small>{method.filePath} · lines {method.startLine}–{method.endLine}</small></div>
-            </div>)}
-          </div>
-        </section>
-
-        <section className="panel stack-persona-panel">
-          <div className="panel-heading"><div><h2>Persona impact overview</h2>
-            <p>Repository permissions are checked first. Salesforce verifies any remaining object or field Read permissions.</p>
-          </div><span className="mini-tag">{result.personas.length} configured</span></div>
-          <div className="stack-filter"><label htmlFor="stack-persona-filter">Search personas</label>
-            <input id="stack-persona-filter" value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Search persona name..." type="search" />
-          </div>
-          <div className="stack-table-wrap"><table className="stack-table"><thead><tr>
-            <th>Persona</th><th>Assessment</th><th>At-risk queries</th><th>Unable to verify</th><th>Open findings</th>
-          </tr></thead><tbody>
-            {personas.map((persona) => <tr key={persona.personaName} className={selectedPersona === persona.personaName ? "stack-selected" : ""}>
-              <td><button className="stack-persona-button" onClick={() => setSelectedPersona(persona.personaName)} type="button">{persona.personaName}</button>
-                {!!persona.orgCheckedUsers?.length && <small style={{ display: "block", color: "#687a93", marginTop: 5, overflowWrap: "anywhere" }}>
-                  Salesforce users: {persona.orgCheckedUsers.slice(0, 2).map(displayUser).join("; ")}
-                  {persona.orgCheckedUsers.length > 2 ? `; +${persona.orgCheckedUsers.length - 2} more` : ""}
-                </small>}
-              </td>
-              <td><StatusPill value={persona.status} /></td>
-              <td>{persona.atRiskQueries}</td><td>{persona.reviewQueries}</td><td>{persona.missing.length}</td>
-            </tr>)}
-            {!personas.length && <tr><td colSpan={5}>No personas match the filter.</td></tr>}
-          </tbody></table></div>
-          {focused && <div className="stack-persona-detail"><div className="stack-detail-heading">
-            <h3>{focused.personaName}</h3><StatusPill value={focused.status} />
-          </div>{!!focused.orgCheckedUsers?.length && <p className="muted" style={{ margin: "10px 0 4px", fontSize: 12, overflowWrap: "anywhere" }}>
-            <strong>Salesforce users checked:</strong> {focused.orgCheckedUsers.map(displayUser).join("; ")}
-          </p>}{(focused.verifiedFromOrg?.length ?? 0) > 0 && <div className="stack-org-evidence">
-            <strong>Verified from Org</strong>
-            {focused.verifiedFromOrg?.map((evidence) => <div key={`${evidence.object}.${evidence.field ?? ""}`}>
-              <span>{evidence.object}{evidence.field ? `.${evidence.field}` : ""} · Read</span>
-              <small>{evidence.message}</small>
-            </div>)}
-          </div>}{focused.missing.length ? <ul>{focused.missing.map((item, index) =>
-            <li key={`${item.object}-${item.field ?? ""}-${index}`}><strong>{item.object}{item.field ? `.${item.field}` : ""}</strong>
-              <span style={{ color: item.orgOutcome === "DENIED" ? "#b91c1c" : "#64748b" }}>{item.orgOutcome === "DENIED"
-                ? `${item.reason === "FIELD_READ" ? "Field" : "Object"} Read not established in repository; Salesforce confirmed missing access`
-                : `${item.reason === "FIELD_READ" ? "Field" : "Object"} Read not established in repository; Salesforce verification inconclusive`}</span>
-              {item.orgMessage && <small>{item.orgMessage}</small>}</li>
-          )}</ul> : <p className="muted">No outstanding object or field Read findings for the analyzed queries.</p>}
-          </div>}
-        </section>
-
-        <section className="panel stack-queries">
-          <div className="panel-heading"><div><h2>Discovered SOQL queries</h2><p>Expandable query details include selected fields, unresolved relationships and persona impacts.</p></div>
-            <div className="stack-query-filter"><label htmlFor="stack-query-filter">Query filter</label>
-              <select id="stack-query-filter" value={queryFilter} onChange={(event) => setQueryFilter(event.target.value)}>
-                <option value="all">All queries</option>
-                {result.personas.map((persona) => <option key={persona.personaName} value={persona.personaName}>Issues for {persona.personaName}</option>)}
-              </select></div>
-          </div>
-          {queries.length ? <div className="stack-query-list">{queries.map((query) => <details className="stack-query-card" key={query.id}>
-            <summary><span className="stack-query-object">{query.object}</span><span>{query.className}.{query.methodName} · line {query.lineNumber}</span>
-              <span className="stack-mode">{query.securityMode === "UNSPECIFIED" ? "Mode not explicit" : `WITH ${query.securityMode}`}</span>
-              <span className="stack-query-count">{query.personas.filter((persona) => persona.status === "AT_RISK").length} at risk</span></summary>
-            <div className="stack-query-detail"><pre>{query.query}</pre>
-              <h4>Resolved field references ({query.checkedFields.length})</h4>
-              {query.checkedFields.length ? <div className="stack-fields">{query.checkedFields.map((field) => <code key={`${field.object}.${field.field}`}>{field.object}.{field.field}</code>)}</div>
-                : <p className="muted">No non-excluded field references were resolved. Object Read access is still checked.</p>}
-              {query.unresolvedFields.length > 0 && <div className="stack-caution"><strong>Unresolved fields</strong>
-                <ul>{query.unresolvedFields.map((field) => <li key={field}>{field}</li>)}</ul></div>}
-              {query.limitations.length > 0 && <div className="stack-caution"><strong>Additional review</strong>
-                <ul>{query.limitations.map((note) => <li key={note}>{note}</li>)}</ul></div>}
-              <h4>Persona results</h4>
-              <div className="stack-query-personas">{query.personas.map((persona) => <div key={persona.personaName}>
-                <strong>{persona.personaName}</strong><StatusPill value={persona.status} />
-                {persona.missing.length > 0 && <small>Missing: {persona.missing.map((missing) => `${missing.object}${missing.field ? `.${missing.field}` : ""}`).join(", ")}</small>}
-                {persona.verifiedFromOrg?.map((evidence) => <small key={`${evidence.object}.${evidence.field ?? ""}`} className="stack-org-note">
-                  Verified from Org: {evidence.object}{evidence.field ? `.${evidence.field}` : ""} Read — {evidence.message}</small>)}
-                {persona.notes.length > 0 && <small>{persona.notes.join(" ")}</small>}
-              </div>)}</div>
-            </div>
-          </details>)}</div> : <div className="stack-empty">No static SOQL queries match this filter.</div>}
-        </section>
-
-        {result.warnings.length > 0 && <details className="stack-warnings">
-          <summary>Analysis limitations and warnings ({result.warnings.length})</summary>
-          <ul>{result.warnings.map((warning, index) => <li key={`${index}-${warning}`}>{warning}</li>)}</ul>
-        </details>}
-        <p className="stack-disclaimer">Apex reachability is static. Salesforce verification checks object and field Read for matching active users, not live SOQL execution. Additional assigned permissions can contribute to those users' access. Dynamic SOQL, runtime conditions and sharing can still affect query execution.</p>
-      </>}
-    </div>
-  );
+  return <div className="stack-page">
+    <form className="panel stack-form" onSubmit={analyze}>
+      <div className="panel-heading"><div>
+        <h2>Trace an Apex execution path</h2>
+        <p>Paste the stack trace. We'll follow resolvable method calls and check SOQL access for configured personas.</p>
+      </div><span className="mini-tag">Repository first · Salesforce fallback</span></div>
+      <div className="form-field stack-input">
+        <label htmlFor="stack-text">Apex stack trace</label>
+        <textarea id="stack-text" spellCheck={false} rows={5} value={trace}
+          onChange={(event) => { setTrace(event.target.value); setError(""); }}
+          placeholder={SAMPLE} disabled={loading} />
+      </div>
+      <div className="stack-controls">
+        <span>Starts at the first matching Class frame. Static SOQL only; branches may be considered reachable even if they do not run.</span>
+        <button className="primary-button" type="submit" disabled={loading}>
+          {loading ? "Analysing stack trace…" : "Run Stack Trace Analysis"}
+        </button>
+      </div>
+      {error && <div className="error-card" role="alert">{error}</div>}
+    </form>
+    {result && <StackResults result={result} />}
+  </div>;
 }

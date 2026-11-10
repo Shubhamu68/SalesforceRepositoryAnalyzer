@@ -119,6 +119,7 @@ export class StackTraceImpactService {
     const prepared: {
       persona: Persona;
       resolved: ResolvedPersonaPermissions;
+      evaluator: ReturnType<typeof createPersonaAccessEvaluator>;
       incomplete: boolean;
       externalSkipped: boolean;
     }[] = [];
@@ -153,7 +154,7 @@ export class StackTraceImpactService {
       }
       if (resolved.permissionSetGroups.length > 1 && persona.mutingPermissionSets.some((mute) =>
         !resolved.permissionSetGroups.some((group) => group.mutingPermissionSetNames.some((name) => equal(name, mute))))) incomplete = true;
-      prepared.push({ persona, resolved, incomplete, externalSkipped });
+      prepared.push({ persona, resolved, evaluator: createPersonaAccessEvaluator(resolved), incomplete, externalSkipped });
     }
 
     const allQueries: StackQueryImpact[] = [];
@@ -172,7 +173,8 @@ export class StackTraceImpactService {
         const impacts: QueryPersonaImpact[] = prepared.map((person) => {
           const missing: MissingReadPermission[] = [];
           const notes: string[] = [];
-          const evaluator = createPersonaAccessEvaluator(person.resolved);
+          // Reuse this persona's object/field cache across all reached queries.
+          const evaluator = person.evaluator;
           // Object Read findings are scoped to explicit FROM objects, not every
           // parent traversed by a dotted field path (e.g. OriginalOrderItem.Order).
           // This restores the pre-deep-resolution reporting scope without losing
@@ -235,13 +237,14 @@ export class StackTraceImpactService {
     // XML first, Salesforce second, for BOTH object and field Read.
     // Cache identical requests across methods and queries. The verifier itself
     // caches per-user/per-object UserFieldAccess queries to prevent excessive API calls.
+    const personaByName = new Map(prepared.map((person) => [person.persona.name, person.persona]));
     const verifyRequests = new Map<string, {
       persona: Persona; object: string; field?: string
     }>();
     const requestKey = (persona: string, object: string, field?: string) =>
       `${persona.toLowerCase()}|${object.toLowerCase()}|${(field ?? "").toLowerCase()}`;
     for (const query of allQueries) for (const impact of query.personas) {
-      const persona = prepared.find((person) => person.persona.name === impact.personaName)?.persona;
+      const persona = personaByName.get(impact.personaName);
       if (!persona) continue;
       for (const missing of impact.missing) {
         verifyRequests.set(requestKey(persona.name, missing.object, missing.field), {
@@ -283,7 +286,8 @@ export class StackTraceImpactService {
             sampled: result.sampled, message: result.message });
         } else {
           remaining.push({ ...missing, orgOutcome: result?.outcome ?? "UNVERIFIED",
-            orgMessage: result?.message ?? "Salesforce org verification is unavailable." });
+            orgMessage: result?.message ?? "Salesforce org verification is unavailable.",
+            ...(result?.unverifiedReason ? { orgReason: result.unverifiedReason } : {}) });
         }
       }
       impact.missing = remaining;
