@@ -64,3 +64,17 @@
 .workspace.sidebar-collapsed .results-section,
 .workspace.sidebar-collapsed .reports-panel,
 .workspace.sidebar-collapsed .matrix-query-panel { max-width: none; }
+
+/* Stack Trace evidence for live Salesforce object-access checks. */
+.stack-org-verified{background:#fff0d6;color:#995c09}
+.stack-org-evidence{display:grid;gap:9px;margin-top:14px;padding:12px;border:1px solid #f0d6a8;border-radius:8px;background:#fffbf2;font-size:12px}
+.stack-org-evidence>strong{color:#995c09}
+.stack-org-evidence>div{display:grid;gap:3px}
+.stack-org-evidence small,.stack-persona-detail li small{font-size:11px;color:#765c39;line-height:1.5}
+.stack-persona-detail li{flex-wrap:wrap}
+.stack-persona-detail li small{flex:0 0 100%}
+.stack-org-note{color:#995c09!important}
+
+.stack-review{background:#eff2f7;color:#657891}
+
+.matrix-org-verified{background:#fff3db;color:#995e0a}.matrix-org-unverified{background:#ecf1fa;color:#526a88}

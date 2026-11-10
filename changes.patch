@@ -1,0 +1,41 @@
+--- a/src/services/StackTraceImpactService.ts
++++ b/src/services/StackTraceImpactService.ts
+@@ -1,6 +1,7 @@
+ import path from "node:path";
+ import { access } from "node:fs/promises";
+ import { isKnownSalesforcePermissionSet } from "../config/knownSalesforcePermissionSets.js";
++import { isStatusNeutralOrgObjectRead, type OrgVerificationStatusPolicy } from "../config/orgVerificationStatusPolicy.js";
+ import type { Persona } from "../models/Persona.js";
+ import type {
+   StackTraceImpactResult, StackQueryImpact, QueryPersonaImpact, StackPersonaImpact,
+@@ -52,7 +53,8 @@
+     private readonly resolver: PersonaPermissionResolver,
+     private readonly mutingDirectory: string,
+     private readonly orgVerifier?: SalesforcePersonaAccessVerifier,
+-    private readonly orgRelationshipMetadata?: SalesforceRelationshipMetadataService
++    private readonly orgRelationshipMetadata?: SalesforceRelationshipMetadataService,
++    private readonly orgVerificationStatusPolicy?: OrgVerificationStatusPolicy
+   ) {}
+ 
+   async analyze(stackTrace: string): Promise<StackTraceImpactResult> {
+@@ -292,9 +294,17 @@
+       // but should not overwrite a completed object/field permission assessment.
+       // Unresolved FIELD paths are different: their access was never evaluated.
+       const unableToVerifyAccess = remaining.length > 0 || query.unresolvedFields.length > 0;
++      // A verified object Read may be status-neutral (e.g. OrderItemSummary),
++      // but this does not hide the Salesforce evidence or exempt any field Read.
++      // All other org-verified permissions still make the result ORG_VERIFIED.
++      const hasNonNeutralOrgVerification = verified.some((grant) =>
++        !this.orgVerificationStatusPolicy || !isStatusNeutralOrgObjectRead(
++          this.orgVerificationStatusPolicy, grant.object, grant.field
++        )
++      );
+       impact.status = denied ? "AT_RISK"
+         : unableToVerifyAccess ? "REVIEW"
+-        : verified.length ? "ORG_VERIFIED" : "NO_GAPS";
++        : hasNonNeutralOrgVerification ? "ORG_VERIFIED" : "NO_GAPS";
+     }
+     allQueries.sort((a, b) => a.filePath.localeCompare(b.filePath) || a.lineNumber - b.lineNumber);
+     const traversalIncomplete = warnings.some((warning) =>
+
+# src/api/server.ts: already contains policy as eighth argument in uploaded version; restore if removed locally.

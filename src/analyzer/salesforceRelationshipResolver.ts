@@ -17,6 +17,9 @@ export interface RelationshipMetadata {
 interface ParentEdge {
   targets: string[];
   sourceField: string;
+  /** From Salesforce Describe; required to identify the polymorphic Name pseudo-object safely. */
+  namePointing?: boolean;
+  polymorphicForeignKey?: boolean;
 }
 
 export interface ResolvedFieldPath {
@@ -56,14 +59,17 @@ export class RelationshipMap extends Map<string, Map<string, RelationshipMetadat
     if (name.trim()) this.objectNames.set(norm(name), name);
   }
 
-  addParent(child: string, relationship: string, targets: string[], sourceField: string): void {
+  addParent(
+    child: string, relationship: string, targets: string[], sourceField: string,
+    options: { namePointing?: boolean; polymorphicForeignKey?: boolean } = {}
+  ): void {
     if (!child || !relationship || !targets.length) return;
     this.registerObject(child);
     for (const target of targets) this.registerObject(target);
     const key = norm(child);
     const entries = this.parentEdges.get(key) ?? new Map<string, ParentEdge>();
     // Org Describe data is applied last and supersedes inferred/repository metadata.
-    entries.set(norm(relationship), { targets: [...new Set(targets)], sourceField });
+    entries.set(norm(relationship), { targets: [...new Set(targets)], sourceField, ...options });
     this.parentEdges.set(key, entries);
   }
 
@@ -85,6 +91,11 @@ export class RelationshipMap extends Map<string, Map<string, RelationshipMetadat
       relationshipName: relationship, sourceField, childObject: child, targetObjects: [parent],
     });
     this.set(existingKey, children);
+  }
+
+  /** All targets, without guessing one for polymorphic relationships. */
+  parentTargets(child: string, relationship: string): string[] | undefined {
+    return this.parentEdges.get(norm(child))?.get(norm(relationship))?.targets;
   }
 
   /** Return undefined for absent or polymorphic/ambiguous relationships. */
@@ -118,10 +129,27 @@ export class RelationshipMap extends Map<string, Map<string, RelationshipMetadat
     if (!parts.length || parts.some((part) => !/^[A-Za-z_]\w*$/.test(part))) return undefined;
     let object = this.objectNames.get(norm(baseObject)) ?? baseObject;
     const objects = [object];
-    for (const relationship of parts.slice(0, -1)) {
-      const parent = this.parentObject(object, relationship);
-      if (!parent) return undefined;
-      object = parent;
+    for (let hop = 0; hop < parts.length - 1; hop++) {
+      const relationship = parts[hop];
+      const edge = this.parentEdges.get(norm(object))?.get(norm(relationship));
+      if (!edge) return undefined;
+      if (edge.targets.length !== 1) {
+        // Salesforce exposes common fields such as Owner.Name through the
+        // polymorphic, non-queryable Name pseudo-object (User OR Group).
+        // Name has no configurable FLS grant. Do NOT pick User or Group, and
+        // do NOT extrapolate this to Owner.Email or further relationship hops.
+        const terminalName = hop === parts.length - 2 && norm(parts[parts.length - 1]) === "name";
+        const sfNameReference = edge.namePointing === true || edge.polymorphicForeignKey === true;
+        const ownerUserOrGroup = norm(relationship) === "owner" &&
+          edge.targets.length === 2 &&
+          edge.targets.some((target) => norm(target) === "user") &&
+          edge.targets.some((target) => norm(target) === "group");
+        if (terminalName && (sfNameReference || ownerUserOrGroup)) {
+          return { object: "Name", field: "Name", objects };
+        }
+        return undefined;
+      }
+      object = edge.targets[0];
       objects.push(object);
     }
     return { object, field: parts[parts.length - 1], objects };

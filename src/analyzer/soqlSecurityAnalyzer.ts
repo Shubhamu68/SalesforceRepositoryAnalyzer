@@ -3,6 +3,7 @@ import { SoqlSecurityFinding } from "../models/SoqlSecurityFinding.js";
 import { Persona } from "../models/Persona.js";
 import { PersonaPermissionResolver } from "./PersonaPermissionResolver.js";
 import { createPersonaAccessEvaluator } from "./personaAccessEvaluator.js";
+import { OrgObjectReadVerificationService } from "../services/OrgObjectReadVerificationService.js";
 import {
   buildRelationshipMap,
 } from "./salesforceRelationshipResolver.js";
@@ -14,7 +15,8 @@ export class SoqlSecurityAnalyzer {
   constructor(
     private readonly personaPermissionResolver:
       PersonaPermissionResolver,
-    private readonly objectsDirectory: string
+    private readonly objectsDirectory: string,
+    private readonly orgReadVerification?: OrgObjectReadVerificationService
   ) {}
 
   async analyze(
@@ -75,6 +77,13 @@ export class SoqlSecurityAnalyzer {
           .toLowerCase();
 
       const objectAccess = evaluator.evaluateObject(objectName).access;
+      // Reuse a single org check across every field/query referencing an object.
+      // A configured exception does not grant Read; Salesforce must confirm it.
+      const managedRead = !objectAccess.read && this.orgReadVerification?.isConfigured(objectName);
+      const readDecision = managedRead
+        ? await this.orgReadVerification!.resolve(persona, objectName, false)
+        : undefined;
+      const readable = objectAccess.read || readDecision?.readable === true;
 
       for (
         const [
@@ -91,7 +100,7 @@ export class SoqlSecurityAnalyzer {
         // No object permission information
         // --------------------------------------------
 
-        if (!objectAccess.read && !knownObjects.has(objectKey)) {
+        if (!readable && !knownObjects.has(objectKey) && !managedRead) {
           for (const reference of references) {
             findings.push({
               severity: "REVIEW",
@@ -136,12 +145,12 @@ export class SoqlSecurityAnalyzer {
         // Object itself is not readable
         // --------------------------------------------
 
-        if (!objectAccess.read) {
+        if (!readable) {
           for (
             const reference of references
           ) {
             findings.push({
-              severity: "ERROR",
+              severity: managedRead && readDecision?.source !== "ORG_DENIED" ? "REVIEW" : "ERROR",
 
               filePath:
                 reference.filePath,
@@ -170,9 +179,10 @@ export class SoqlSecurityAnalyzer {
                 ),
 
               reason:
-                `Persona "${persona.name}" does not ` +
-                `have READ access to object ` +
-                `${objectName}.`,
+                managedRead
+                  ? `Object ${objectName} has no repository Read grant. ` +
+                    (readDecision?.message ?? "Live org verification was unavailable.")
+                  : `Persona "${persona.name}" does not have READ access to object ${objectName}.`,
             });
           }
 
@@ -197,14 +207,27 @@ export class SoqlSecurityAnalyzer {
         // It is NOT an unresolved field.
         // --------------------------------------------
 
-        const fieldRead = evaluator.evaluateField(fieldKey).readable;
+        const fieldGrant = evaluator.evaluateField(fieldKey);
+        // When object Read came from Salesforce, repository field metadata must
+        // be assessed independently (evaluateField().readable is object-gated).
+        let fieldRead = objectAccess.read
+          ? fieldGrant.readable
+          : fieldGrant.schemaRequired === true || fieldGrant.permissionable === false || fieldGrant.readGrantedBy.length > 0;
+        let fieldOrgOutcome: "VERIFIED" | "DENIED" | "UNVERIFIED" | undefined;
+        let fieldOrgMessage: string | undefined;
+        if (!fieldRead && managedRead && readable) {
+          const evidence = await this.orgReadVerification!.resolveField(persona, objectName, fieldName);
+          fieldOrgOutcome = evidence?.outcome ?? "UNVERIFIED";
+          fieldOrgMessage = evidence?.message ?? "Live field verification is unavailable.";
+          fieldRead = fieldOrgOutcome === "VERIFIED";
+        }
 
         if (!fieldRead) {
           for (
             const reference of references
           ) {
             findings.push({
-              severity: "ERROR",
+              severity: fieldOrgOutcome === "UNVERIFIED" ? "REVIEW" : "ERROR",
 
               filePath:
                 reference.filePath,
@@ -233,9 +256,8 @@ export class SoqlSecurityAnalyzer {
                 ),
 
               reason:
-                `Persona "${persona.name}" does not ` +
-                `have READ access to ` +
-                `${reference.object}.${reference.field}.`,
+                fieldOrgMessage ?? (`Persona "${persona.name}" does not ` +
+                `have READ access to ${reference.object}.${reference.field}.`),
             });
           }
         }

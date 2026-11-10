@@ -9,6 +9,8 @@ import { AccessQueryService } from "./services/AccessQueryService.js";
 import { promptForAccessQuery } from "./cli/accessPrompt.js";
 import { scanApexSoql } from "./scanner/apexSoqlScanner.js";
 import { SoqlSecurityAnalyzer } from "./analyzer/soqlSecurityAnalyzer.js";
+import { loadOrgVerificationStatusPolicy } from "./config/orgVerificationStatusPolicy.js";
+import { OrgObjectReadVerificationService } from "./services/OrgObjectReadVerificationService.js";
 import { writeSoqlReport } from "./reporter/soqlReportWriter.js";
 
 const repositoryPath = process.argv[2];
@@ -84,7 +86,8 @@ const soqlSecurityAnalyzer =
     path.join(
       paths.defaultPath,
       "objects"
-    )
+    ),
+    new OrgObjectReadVerificationService(await loadOrgVerificationStatusPolicy("./config/org-verification-status-policy.json"))
   );
 
 // --------------------------------------------------
