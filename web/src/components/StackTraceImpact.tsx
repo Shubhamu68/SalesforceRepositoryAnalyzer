@@ -1,5 +1,6 @@
 import { Fragment, memo, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import "./StackTraceImpact.css";
+import { StackTraceLoadingOverlay } from "./StackTraceLoadingOverlay";
 import type { Impact, Missing, OrgCheckedUser, Persona, Query, Result, Status } from "./stackTraceTypes";
 import { focusedQueries, hasNoMatchingUsers, orgVerifiedSummary, partitionFindings, permissionLabel } from "./stackTraceViewModel";
 
@@ -244,11 +245,6 @@ const StackResults = memo(function StackResults({ result }: { result: Result }) 
         </> : <div className="stack-empty">No queries match this filter for {selectedPersona}.</div>}
     </section>
 
-    {result.warnings.length > 0 && <details className="stack-warnings">
-      <summary>Analysis limitations and warnings ({result.warnings.length})</summary>
-      <ul>{result.warnings.map((warning, index) => <li key={`${index}-${warning}`}>{warning}</li>)}</ul>
-    </details>}
-    <p className="stack-disclaimer">Apex reachability is static. Salesforce verification checks object and field Read for matching active users, not live SOQL execution. Other assigned permissions can contribute to those users' access. Dynamic SOQL, runtime conditions, and sharing may affect execution.</p>
   </>;
 });
 
@@ -275,7 +271,7 @@ export default function StackTraceImpact() {
     } finally { setLoading(false); }
   }
 
-  return <div className="stack-page">
+  return <div className="stack-page" aria-busy={loading}>
     <form className="panel stack-form" onSubmit={analyze}>
       <div className="panel-heading"><div>
         <h2>Trace an Apex execution path</h2>
@@ -296,5 +292,6 @@ export default function StackTraceImpact() {
       {error && <div className="error-card" role="alert">{error}</div>}
     </form>
     {result && <StackResults result={result} />}
+    {loading && <StackTraceLoadingOverlay />}
   </div>;
 }
