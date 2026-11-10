@@ -18,6 +18,23 @@ export interface OrgObjectAccessEvidence {
   checkedUserDetails?: OrgCheckedUser[];
   verifiedAt?: string;
   message: string;
+  /** Structured explanation for an inconclusive check (never inferred from message text). */
+  unverifiedReason?: "NO_MATCHING_USERS";
+}
+
+type MatchedUsers = {
+  users: string[];
+  checkedUserDetails: OrgCheckedUser[];
+  matchedUsers: number;
+  sampled: boolean;
+};
+
+/** The org responded, but no active users could be associated with this persona. */
+class NoMatchingOrgUsersError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "NoMatchingOrgUsersError";
+  }
 }
 
 type SfProfile = { Id: string; Name: string };
@@ -65,6 +82,9 @@ const quoteId = (id: string) => `'${id}'`; // IDs are validated before interpola
 export class SalesforcePersonaAccessVerifier {
   private inventoryCache: { key: string; until: number; value: Inventory } | null = null;
   private inventoryInflight: Promise<Inventory> | null = null;
+  // Reuse persona matching within the same (three-minute) metadata inventory.
+  // WeakMap means an expired inventory and its matches can be garbage-collected.
+  private readonly matchingCache = new WeakMap<Inventory, Map<string, MatchedUsers | NoMatchingOrgUsersError>>();
   // Many fields on one object share the same user-level FLS response.
   // Cache the in-flight request to avoid duplicate Tooling API calls.
   private fieldAccessCache = new Map<string, { expires: number; promise: Promise<Map<string, boolean>> }>();
@@ -179,10 +199,27 @@ export class SalesforcePersonaAccessVerifier {
    * UserFieldAccess/UserEntityAccess measure the matched users' effective access;
    * they do not attribute access to an individual Permission Set.
    */
-  private async matchingUsers(persona: Persona): Promise<{
-    users: string[]; checkedUserDetails: OrgCheckedUser[]; matchedUsers: number; sampled: boolean;
-  }> {
+  private async matchingUsers(persona: Persona): Promise<MatchedUsers> {
     const inventory = await this.inventory();
+    const cacheKey = JSON.stringify([
+      normalized(persona.profile ?? ""),
+      [...(persona.permissionSets ?? [])].map(normalized).sort(),
+      [...(persona.permissionSetGroups ?? [])].map(normalized).sort()
+    ]);
+    let cache = this.matchingCache.get(inventory);
+    if (!cache) {
+      cache = new Map();
+      this.matchingCache.set(inventory, cache);
+    }
+    const cached = cache.get(cacheKey);
+    if (cached instanceof NoMatchingOrgUsersError) throw cached;
+    if (cached) return cached;
+
+    const cannotMatch = (message: string): never => {
+      const error = new NoMatchingOrgUsersError(message);
+      cache!.set(cacheKey, error);
+      throw error;
+    };
     const unavailableSets = (persona.permissionSets ?? []).filter(
       (name) => !inventory.knownPermissionSetNames.has(normalized(name)));
     if (unavailableSets.length) throw new Error(
@@ -191,13 +228,18 @@ export class SalesforcePersonaAccessVerifier {
       (name) => !inventory.knownGroupNames.has(normalized(name)));
     if (unavailableGroups.length) throw new Error(
       `Required Permission Set Groups not found in Salesforce: ${unavailableGroups.join(", ")}.`);
+
+    if (!persona.profile?.trim()) throw new Error("Persona has no configured Profile; org-user matching is inconclusive.");
     const match = matchPersonaUsers(persona, inventory.profiles, inventory.users, inventory.assignments);
-    if (!match.eligibleCount) throw new Error(match.reason ?? "No matching active users.");
+    if (!match.eligibleCount) cannotMatch(match.reason ?? "No matching active users.");
     const users = match.users.slice(0, MAX_USERS_PER_PERSONA);
     const checkedUserDetails = users.map((userId) => inventory.userDetails.get(idKey(userId)) ?? {
       id: idKey(userId), name: "Name unavailable", username: "Username unavailable"
     });
-    return { users, checkedUserDetails, matchedUsers: match.eligibleCount, sampled: users.length < match.eligibleCount };
+    const result = { users, checkedUserDetails, matchedUsers: match.eligibleCount,
+      sampled: users.length < match.eligibleCount };
+    cache.set(cacheKey, result);
+    return result;
   }
 
   /**
@@ -251,7 +293,8 @@ export class SalesforcePersonaAccessVerifier {
       return this.decide(object, undefined, matchedUsers, readable.length, sampled, checkedUserDetails, readable, `${object} object Read`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Salesforce verification failed.";
-      return uncertain(`Unable to verify object Read from Salesforce: ${message}`);
+      return { ...uncertain(`Unable to verify object Read from Salesforce: ${message}`),
+        ...(error instanceof NoMatchingOrgUsersError ? { unverifiedReason: "NO_MATCHING_USERS" as const } : {}) };
     }
   }
 
@@ -331,7 +374,8 @@ export class SalesforcePersonaAccessVerifier {
       return this.decide(object, field, matchedUsers, readable.length, sampled, checkedUserDetails, readable, `${object}.${field} field Read`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Salesforce verification failed.";
-      return uncertain(`Unable to verify field Read from Salesforce: ${message}`);
+      return { ...uncertain(`Unable to verify field Read from Salesforce: ${message}`),
+        ...(error instanceof NoMatchingOrgUsersError ? { unverifiedReason: "NO_MATCHING_USERS" as const } : {}) };
     }
   }
 }

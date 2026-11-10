@@ -12,7 +12,8 @@
     "api": "tsx src/api/server.ts",
     "test:matrix": "tsx --test tests/objectAccessMatrix.test.ts",
     "import:field-metadata": "node scripts/import-field-permissionability.mjs",
-    "export:relationships": "node scripts/export-relationship-schema.mjs"
+    "export:relationships": "node scripts/export-relationship-schema.mjs",
+    "test:stack-ux": "tsx --test tests/stackTraceUx.test.ts tests/stackTraceOrgVerification.test.ts"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",

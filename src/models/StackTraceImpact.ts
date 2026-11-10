@@ -39,6 +39,8 @@ export interface MissingReadPermission {
   /** Live verification status for either object or field Read. */
   orgOutcome?: "DENIED" | "UNVERIFIED";
   orgMessage?: string;
+  /** The org had no matching active users; distinct from authentication/API failures. */
+  orgReason?: "NO_MATCHING_USERS";
 }
 
 export interface VerifiedOrgObject {
