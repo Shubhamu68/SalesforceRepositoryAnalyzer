@@ -14,7 +14,7 @@ import {
 import { createReportOutputRouter } from "../src/api/reportOutputRoutes.js";
 import { SoqlAnalysisService } from "../src/services/SoqlAnalysisService.js";
 import type { Persona } from "../src/models/Persona.js";
-import { chooseWindowsReportFolder } from "../src/services/windowsReportFolderPicker.js";
+import { chooseWindowsReportFolder, buildWindowsFolderPickerScript, WINDOWS_FOLDER_PICKER_TIMEOUT_MS } from "../src/services/windowsReportFolderPicker.js";
 
 async function fixture() {
   const root = await mkdtemp(path.join(os.tmpdir(), "analyzer-output-config-"));
@@ -228,3 +228,29 @@ test("Windows native dialog fails clearly on non-Windows hosts", { skip: process
     await assert.rejects(chooseWindowsReportFolder(), (error: unknown) =>
       error instanceof ReportOutputConfigurationError && error.statusCode === 501);
   });
+
+test("native folder picker is owned by an invisible topmost window", () => {
+  const script = buildWindowsFolderPickerScript();
+  assert.match(script, /\$owner = New-Object System\.Windows\.Forms\.Form/);
+  assert.match(script, /\$owner\.TopMost = \$true/);
+  assert.match(script, /\$owner\.ShowInTaskbar = \$false/);
+  assert.match(script, /\$owner\.Opacity = 0/);
+  assert.match(script, /\$owner\.Show\(\)/);
+  assert.match(script, /\$owner\.Activate\(\)/);
+  assert.match(script, /\$dialog\.ShowDialog\(\$owner\)/);
+  assert.doesNotMatch(script, /\$dialog\.ShowDialog\(\)/);
+});
+
+test("folder picker disposes its owner and dialog, even on cancel", () => {
+  const script = buildWindowsFolderPickerScript();
+  assert.match(script, /finally \{ \$dialog\.Dispose\(\); \$owner\.Close\(\); \$owner\.Dispose\(\) \}/);
+  assert.match(script, /\[System\.Windows\.Forms\.DialogResult\]::OK/);
+  assert.equal(WINDOWS_FOLDER_PICKER_TIMEOUT_MS, 600_000);
+});
+
+test("folder picker PowerShell source contains no user-controlled data", () => {
+  const script = buildWindowsFolderPickerScript();
+  assert.match(script, /FolderBrowserDialog/);
+  assert.match(script, /ShowNewFolderButton = \$true/);
+  assert.doesNotMatch(script, /SALESFORCE_CLIENT_SECRET|process\.env|req\.body/);
+});
