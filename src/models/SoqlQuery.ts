@@ -25,6 +25,12 @@ export interface SoqlSubquery {
    * Child Object
    */
   relationshipName: string;
+  /** CHILD resolves through parent childRelationships; semi-/anti-joins use an object API name. */
+  kind?: "CHILD" | "SEMI_JOIN" | "ANTI_JOIN";
+  /** Source of this nested SELECT, retained for its own WHERE/ORDER BY analysis. */
+  query?: string;
+  /** Precise Apex line on which the nested SELECT starts. */
+  lineNumber?: number;
 
   fields: string[];
 

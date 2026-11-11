@@ -24,5 +24,8 @@ export interface SoqlSecurityFinding {
   effectiveMode?: EffectiveSoqlMode;
   runtimeImpact?: SoqlRuntimeImpact;
   apiVersion?: number;
+  /** Resolved nested query scope, e.g. Account -> Contacts. */
+  relationshipPath?: string;
+  queryLevel?: number;
   reason: string;
 }
