@@ -154,6 +154,8 @@ function buildDetailedReport(
     lines.push(`Runtime Impact: ${finding.runtimeImpact ?? "Undetermined"}`);
     lines.push(`Effective Query Mode: ${finding.effectiveMode ?? "UNKNOWN"}`);
     lines.push(`Apex API Version: ${finding.apiVersion ?? "Unknown"}`);
+    lines.push(`Relationship Path: ${finding.relationshipPath ?? finding.object}`);
+    lines.push(`Query Level: ${finding.queryLevel ?? 1}`);
     lines.push(
       `File: ${finding.filePath}`
     );
@@ -199,6 +201,8 @@ interface ConciseFinding {
     effectiveMode: string;
     runtimeImpact: string;
     apiVersion?: number;
+    relationshipPath?: string;
+    queryLevel?: number;
     /** Severity and explanation are specific to this Apex query, not its group. */
     criticality: string;
     explanation: string;
@@ -254,7 +258,8 @@ function buildConciseFindings(
           reference.filePath ===
             finding.filePath &&
           reference.lineNumber ===
-            finding.lineNumber
+            finding.lineNumber &&
+          (reference.relationshipPath ?? "") === (finding.relationshipPath ?? "")
       );
 
     if (!alreadyPresent) {
@@ -268,6 +273,8 @@ function buildConciseFindings(
         runtimeImpact: finding.runtimeImpact ?? "Undetermined",
         criticality: finding.criticality ?? (finding.severity === "ERROR" ? "High" : "Unable to verify"),
         explanation: finding.reason,
+        ...(finding.relationshipPath ? { relationshipPath: finding.relationshipPath } : {}),
+        ...(finding.queryLevel ? { queryLevel: finding.queryLevel } : {}),
         ...(finding.apiVersion !== undefined ? { apiVersion: finding.apiVersion } : {}),
       });
     }
@@ -330,7 +337,7 @@ async function writeSummaryWorkbook(
     );
 
   summarySheet.mergeCells(
-    "A1:I1"
+    "A1:K1"
   );
 
   summarySheet.getCell("A1").value =
@@ -374,7 +381,7 @@ async function writeSummaryWorkbook(
     findings.length;
 
   summarySheet.addRow([]);
-  summarySheet.mergeCells("A5:I5");
+  summarySheet.mergeCells("A5:K5");
   summarySheet.getCell("A5").value = "High = confirmed missing Read with enforced SOQL access; Low = advisory or org-verified Read. Mixed findings show the highest severity here; see References.";
   summarySheet.getCell("A5").font = { italic: true, color: { argb: "FF60748D" }, size: 10 };
 
@@ -389,6 +396,8 @@ async function writeSummaryWorkbook(
       "Runtime Impact",
       "Effective Query Mode",
       "Apex API Version",
+      "Relationship Path",
+      "Query Level",
     ]);
 
   styleHeader(summaryHeader);
@@ -420,6 +429,8 @@ async function writeSummaryWorkbook(
         summariseReferenceProperty(finding.references.map(ref => ref.runtimeImpact)),
         summariseReferenceProperty(finding.references.map(ref => ref.effectiveMode)),
         summariseReferenceProperty(finding.references.map(ref => ref.apiVersion?.toString() ?? "Unknown")),
+        summariseReferenceProperty(finding.references.map(ref => ref.relationshipPath ?? finding.object)),
+        summariseReferenceProperty(finding.references.map(ref => String(ref.queryLevel ?? 1))),
       ]);
 
     const apexCell =
@@ -461,6 +472,8 @@ async function writeSummaryWorkbook(
   summarySheet.getColumn(7).width = 30;
   summarySheet.getColumn(8).width = 24;
   summarySheet.getColumn(9).width = 20;
+  summarySheet.getColumn(10).width = 46;
+  summarySheet.getColumn(11).width = 14;
 
   summarySheet.getColumn(4).alignment = {
     wrapText: true,
@@ -488,6 +501,8 @@ async function writeSummaryWorkbook(
       "Effective Query Mode",
       "Runtime Impact",
       "Apex API Version",
+      "Relationship Path",
+      "Query Level",
     ]);
 
   styleHeader(referenceHeader);
@@ -510,6 +525,8 @@ async function writeSummaryWorkbook(
         reference.effectiveMode,
         reference.runtimeImpact,
         reference.apiVersion ?? "Unknown",
+        reference.relationshipPath ?? finding.object,
+        reference.queryLevel ?? 1,
       ]);
       row.getCell(6).font = { bold: true, color: {
         argb: reference.criticality === "High" ? "FFB42332" :
@@ -537,6 +554,8 @@ async function writeSummaryWorkbook(
   referenceSheet.getColumn(8).width = 25;
   referenceSheet.getColumn(9).width = 28;
   referenceSheet.getColumn(10).width = 19;
+  referenceSheet.getColumn(11).width = 46;
+  referenceSheet.getColumn(12).width = 14;
 
   // ------------------------------------------------
   // Auto filter
@@ -544,12 +563,12 @@ async function writeSummaryWorkbook(
 
   summarySheet.autoFilter = {
     from: "A6",
-    to: `I${Math.max(6, summarySheet.rowCount)}`,
+    to: `K${Math.max(6, summarySheet.rowCount)}`,
   };
 
   referenceSheet.autoFilter = {
     from: "A1",
-    to: `J${Math.max(1, referenceSheet.rowCount)}`,
+    to: `L${Math.max(1, referenceSheet.rowCount)}`,
   };
 
   await workbook.xlsx.writeFile(

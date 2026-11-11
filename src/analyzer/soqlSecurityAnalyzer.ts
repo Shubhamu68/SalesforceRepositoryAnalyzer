@@ -6,6 +6,8 @@ import { createPersonaAccessEvaluator } from "./personaAccessEvaluator.js";
 import type { OrgObjectReadVerificationService, ReadDecisionSource } from "../services/OrgObjectReadVerificationService.js";
 import { buildRelationshipMap } from "./salesforceRelationshipResolver.js";
 import { buildSoqlFieldInventory, type UnresolvedSoqlField } from "./soqlFieldInventoryBuilder.js";
+import { collectQueryFields } from "./soqlQueryFieldResolver.js";
+import type { SalesforceRelationshipMetadataService } from "../salesforce/SalesforceRelationshipMetadataService.js";
 import type { SoqlFieldReference } from "../models/SoqlFieldInventory.js";
 import { ApexExecutionSecurityModeResolver } from "../services/ApexExecutionSecurityModeResolver.js";
 import { runtimeImpactForFinding, type SoqlExecutionMode } from "./soqlExecutionMode.js";
@@ -58,12 +60,24 @@ export class SoqlSecurityAnalyzer {
     private readonly objectsDirectory: string,
     private readonly readVerification?: OrgObjectReadVerificationService,
     private readonly executionModeResolver = new ApexExecutionSecurityModeResolver(),
+    private readonly orgRelationshipMetadata?: SalesforceRelationshipMetadataService,
   ) {}
 
   async analyze(persona: Persona, queries: SoqlQuery[]): Promise<SoqlSecurityFinding[]> {
     const resolved = await this.personaPermissionResolver.resolve(persona);
     const evaluator = createPersonaAccessEvaluator(resolved);
     const relationshipMap = await buildRelationshipMap(this.objectsDirectory);
+    // The same scoped collector and Describe hydrator are used by Stack Trace.
+    // Only queries with unresolved paths trigger optional Salesforce Describe.
+    if (this.orgRelationshipMetadata) {
+      const hydrator = this.orgRelationshipMetadata.createHydrator(relationshipMap);
+      await boundedMap(queries, async (query) => {
+        const firstPass = collectQueryFields(query, relationshipMap);
+        if (firstPass.unresolved.length) {
+          await hydrator.hydrateQuery(query, firstPass.unresolved);
+        }
+      });
+    }
     const unresolvedFields: UnresolvedSoqlField[] = [];
     const inventory = buildSoqlFieldInventory(queries, relationshipMap, (entry) => unresolvedFields.push(entry));
     this.executionModeResolver.clearCache();
@@ -102,8 +116,9 @@ export class SoqlSecurityAnalyzer {
           ? `${subject}: Repository metadata did not establish Read access; Salesforce confirmed it is missing for the selected user.`
           : `${subject}: Read permission wasn't established in repository metadata, and Salesforce couldn't verify access.`;
       return refs.map((ref) => {
-        const queryDetails = queryInfo(ref.filePath, ref.lineNumber);
-        const execution = queryByLocation.get(`${ref.filePath}|${ref.lineNumber}`)?.execution;
+        const parentLine = ref.queryLineNumber ?? ref.lineNumber;
+        const queryDetails = queryInfo(ref.filePath, parentLine);
+        const execution = queryByLocation.get(`${ref.filePath}|${parentLine}`)?.execution;
         const outcome = findingOutcome(decision.source, execution);
         const advisory = decision.source === "ORG_DENIED" && outcome.criticality === "Low"
           ? execution?.enforcement === "NONE"
@@ -113,6 +128,7 @@ export class SoqlSecurityAnalyzer {
         return {
           ...outcome, findingType: type, filePath: ref.filePath, lineNumber: ref.lineNumber,
           object, field, ...queryDetails,
+          ...(ref.relationshipPath ? { relationshipPath: ref.relationshipPath, queryLevel: ref.relationshipPath.split(" -> ").length } : {}),
           runtimeImpact: execution
             ? runtimeImpactForFinding(execution, decision.source === "ORG_VERIFIED" ? "VERIFIED" :
                 decision.source === "ORG_DENIED" ? "DENIED" : "UNVERIFIED")
@@ -138,11 +154,12 @@ export class SoqlSecurityAnalyzer {
       const objectFindings: SoqlSecurityFinding[] = [];
       if (objectDecision.source !== "REPOSITORY") {
         // Produce one object Read row per SOQL reference (dedupe source location).
-        const references = new Map<string, SoqlFieldReference>();
-        for (const fieldRefs of fields.values()) {
-          for (const ref of fieldRefs) references.set(`${ref.filePath}|${ref.lineNumber}`, ref);
+        const references = inventory.objectReferences.get(object) ?? [];
+        const distinct = new Map<string, SoqlFieldReference>();
+        for (const ref of references) {
+          distinct.set(`${ref.filePath}|${ref.queryLineNumber ?? ref.lineNumber}`, ref);
         }
-        objectFindings.push(...findingFor([...references.values()], object, OBJECT_READ_FIELD,
+        objectFindings.push(...findingFor([...distinct.values()], object, OBJECT_READ_FIELD,
           "OBJECT_READ", objectDecision));
       }
 
@@ -184,17 +201,23 @@ export class SoqlSecurityAnalyzer {
     // Relationship resolution gaps are also inconclusive, not access denials.
     const reported = new Set<string>();
     for (const unresolved of unresolvedFields) {
-      const id = `${unresolved.query.filePath}:${unresolved.query.lineNumber}:${unresolved.baseObject}:${unresolved.fieldPath}`.toLowerCase();
+      const id = `${unresolved.query.filePath}:${unresolved.lineNumber ?? unresolved.query.lineNumber}:${unresolved.baseObject}:${unresolved.fieldPath}`.toLowerCase();
       if (reported.has(id)) continue;
       reported.add(id);
       findings.push({
         severity: "REVIEW", criticality: "Unable to verify", verificationSource: "UNVERIFIED",
         findingType: "RELATIONSHIP", filePath: unresolved.query.filePath,
-        lineNumber: unresolved.query.lineNumber, object: unresolved.baseObject,
-        field: unresolved.fieldPath,
+        lineNumber: unresolved.lineNumber ?? unresolved.query.lineNumber, object: unresolved.baseObject,
+        field: unresolved.kind === "RELATIONSHIP" ? `Child relationship: ${unresolved.fieldPath}` : unresolved.fieldPath,
         ...queryInfo(unresolved.query.filePath, unresolved.query.lineNumber),
+        ...(unresolved.relationshipPath ? {
+          relationshipPath: unresolved.relationshipPath,
+          queryLevel: unresolved.relationshipPath.split(" -> ").length
+        } : {}),
         runtimeImpact: "Not assessed",
-        reason: `Could not resolve ${unresolved.baseObject}.${unresolved.fieldPath} from relationship metadata. Field access wasn't assessed.`,
+        reason: unresolved.kind === "RELATIONSHIP"
+          ? `Unable to resolve child relationship ${unresolved.baseObject}.${unresolved.fieldPath}; access was not assessed.`
+          : `Could not resolve ${unresolved.baseObject}.${unresolved.fieldPath} from relationship metadata. Field access wasn't assessed.`,
       });
     }
     // API 67.0+ rejects WITH SECURITY_ENFORCED at compile time, regardless

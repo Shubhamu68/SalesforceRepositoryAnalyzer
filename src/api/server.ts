@@ -101,7 +101,9 @@ const soqlSecurityAnalyzer =
       paths.defaultPath,
       "objects"
     ),
-    orgObjectReadVerification
+    orgObjectReadVerification,
+    undefined,
+    salesforceRelationshipMetadata
   );
 
 const soqlAnalysisService =

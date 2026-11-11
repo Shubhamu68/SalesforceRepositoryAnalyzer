@@ -14,13 +14,14 @@ export class SalesforceRelationshipMetadataService {
   createHydrator(graph: RelationshipMap): {
     hydrateQuery(query: SoqlQuery, unresolvedPaths?: string[]): Promise<string[]>;
   } {
-    const loaded = new Set<string>();
+    const loaded = new Map<string, Promise<void>>();
     const warnings = new Set<string>();
 
     const load = async (objectName: string): Promise<void> => {
       const key = objectName.toLowerCase();
-      if (loaded.has(key)) return;
-      loaded.add(key);
+      const pending = loaded.get(key);
+      if (pending) return pending;
+      const lookup = (async () => {
       try {
         const description = await this.connection.describeSObject(objectName);
         graph.registerObject(objectName);
@@ -39,6 +40,9 @@ export class SalesforceRelationshipMetadataService {
       } catch {
         warnings.add(`Could not retrieve Salesforce relationship Describe for ${objectName}; local metadata was retained.`);
       }
+      })();
+      loaded.set(key, lookup);
+      await lookup;
     };
 
     const followField = async (baseObject: string, fieldPath: string): Promise<void> => {
@@ -55,31 +59,42 @@ export class SalesforceRelationshipMetadataService {
       }
     };
 
-    const followChildren = async (parentObject: string, subqueries: SoqlSubquery[]): Promise<void> => {
+    const followUnresolved = async (baseObject: string, unresolvedPaths: string[]): Promise<void> => {
+      const prefix = baseObject.toLowerCase() + ".";
+      for (const issue of unresolvedPaths) {
+        const source = issue.split(" — ", 1)[0];
+        if (source.toLowerCase().startsWith(prefix)) {
+          await followField(baseObject, source.slice(prefix.length));
+        }
+      }
+    };
+
+    const followChildren = async (
+      parentObject: string, subqueries: SoqlSubquery[], unresolvedPaths: string[]
+    ): Promise<void> => {
+      // Child relationship metadata is supplied by Describe on the *parent*.
       await load(parentObject);
       for (const subquery of subqueries) {
-        const child = graph.childObject(parentObject, subquery.relationshipName);
-        if (!child) continue;
+        const join = subquery.kind === "SEMI_JOIN" || subquery.kind === "ANTI_JOIN";
+        const child = join ? subquery.relationshipName :
+          graph.childObject(parentObject, subquery.relationshipName);
+        if (!child) continue; // The collector retains a REVIEW finding.
         for (const field of subquery.fields) await followField(child, field);
-        await followChildren(child, subquery.subqueries);
+        await followUnresolved(child, unresolvedPaths);
+        if (subquery.subqueries.length) {
+          await followChildren(child, subquery.subqueries, unresolvedPaths);
+        }
       }
     };
 
     return {
       hydrateQuery: async (query: SoqlQuery, unresolvedPaths: string[] = []): Promise<string[]> => {
-        warnings.clear();
         await load(query.object);
         for (const field of query.fields) await followField(query.object, field);
-        await followChildren(query.object, query.subqueries);
+        await followChildren(query.object, query.subqueries, unresolvedPaths);
         // Include fields referenced in WHERE / ORDER BY that the static
         // collector couldn't resolve on the first pass.
-        const prefix = `${query.object}.`;
-        for (const unresolved of unresolvedPaths) {
-          const source = unresolved.split(" — ", 1)[0];
-          if (source.toLowerCase().startsWith(prefix.toLowerCase())) {
-            await followField(query.object, source.slice(prefix.length));
-          }
-        }
+        await followUnresolved(query.object, unresolvedPaths);
         return [...warnings];
       },
     };

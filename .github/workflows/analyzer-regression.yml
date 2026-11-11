@@ -1,0 +1,30 @@
+name: Salesforce Analyzer Regression
+on:
+  push:
+    branches:
+      - feature/nested-soql-relationship-resolution
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Install backend dependencies
+        run: npm ci
+      - name: Backend TypeScript compilation
+        run: npm run build
+      - name: All regression tests
+        run: npm run test:all
+      - name: Install frontend dependencies
+        working-directory: web
+        run: npm ci
+      - name: Frontend production build
+        working-directory: web
+        run: npm run build

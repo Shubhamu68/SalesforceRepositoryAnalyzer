@@ -1,13 +1,15 @@
 export interface SoqlFieldReference {
   object: string;
   field: string;
-
-  // Original value exactly as it appeared in SOQL.
   queryFieldPath: string;
-
   filePath: string;
+  /** Actual field/subquery line in Apex. */
   lineNumber: number;
+  /** Parent SOQL line for execution-mode lookup. */
+  queryLineNumber?: number;
+  relationshipPath?: string;
 }
-
-export type SoqlFieldInventory =
-  Map<string, Map<string, SoqlFieldReference[]>>;
+export interface SoqlFieldInventory extends Map<string, Map<string, SoqlFieldReference[]>> {
+  /** Object Read references, independent of field/FLS (covers COUNT() too). */
+  objectReferences: Map<string, SoqlFieldReference[]>;
+}
