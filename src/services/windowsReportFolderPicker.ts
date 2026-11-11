@@ -20,7 +20,7 @@ export async function chooseWindowsReportFolder(): Promise<string | null> {
   const script = [
     "$ErrorActionPreference = 'Stop'",
     "Add-Type -AssemblyName System.Windows.Forms",
-    "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)",
+    "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)",
     "$dialog = New-Object System.Windows.Forms.FolderBrowserDialog",
     "$dialog.Description = 'Select a folder for Salesforce Analyzer Excel and TXT reports'",
     "$dialog.ShowNewFolderButton = $true",
