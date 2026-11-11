@@ -34,11 +34,11 @@ test("nested SELECT scopes resolve child of child", () => {
   assert.deepEqual(names(q), ["Account.Name", "Contact.LastName", "Case.Subject"]);
 });
 test("four descendant levels are represented without flattening into fields", () => {
-  const q = parse("SELECT Name, (SELECT LastName, (SELECT Subject, (SELECT Body, (SELECT Name FROM Grandchildren__r) FROM Comments__r) FROM Cases) FROM Contacts) FROM Account");
+  const q = parse("SELECT Name, (SELECT LastName, (SELECT Subject, (SELECT Body, (SELECT Grandchild_Field__c FROM Grandchildren__r) FROM Comments__r) FROM Cases) FROM Contacts) FROM Account");
   const m = graph();
   m.addChild("Case", "Comments__r", "Comment__c");
   m.addChild("Comment__c", "Grandchildren__r", "Grandchild__c");
-  assert.deepEqual(names(q, m), ["Account.Name", "Contact.LastName", "Case.Subject", "Comment__c.Body", "Grandchild__c.Name"]);
+  assert.deepEqual(names(q, m), ["Account.Name", "Contact.LastName", "Case.Subject", "Comment__c.Body", "Grandchild__c.Grandchild_Field__c"]);
 });
 test("self-referencing ChildAccounts resolves without circular graph traversal", () => {
   const m = graph(); m.addChild("Account", "ChildAccounts", "Account");
