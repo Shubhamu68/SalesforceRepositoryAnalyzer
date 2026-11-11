@@ -12,6 +12,7 @@ import { loadOrgVerificationStatusPolicy } from "../config/orgVerificationStatus
 import { SalesforceOrgConnection } from "../salesforce/SalesforceOrgConnection.js";
 import { SalesforceRelationshipMetadataService } from "../salesforce/SalesforceRelationshipMetadataService.js";
 import { SalesforcePersonaAccessVerifier } from "../salesforce/SalesforcePersonaAccessVerifier.js";
+import { resolveReportOutputDirectory } from "../config/reportOutputDirectory.js";
 
 if (existsSync(".env")) process.loadEnvFile(".env");
 
@@ -65,7 +66,7 @@ async function main(): Promise<void> {
       new ApexExecutionSecurityModeResolver(),
       new SalesforceRelationshipMetadataService(connection),
     ),
-    path.resolve(first("output") ?? process.env.SALESFORCE_ANALYZER_OUTPUT_DIRECTORY ?? "reports"),
+    resolveReportOutputDirectory(first("output") ?? process.env.SALESFORCE_ANALYZER_OUTPUT_DIRECTORY),
   );
   const persona = await new PersonaConfigLoader("./config/personas.json").getPersona(personaName);
   const report = await service.analyze(persona, scope);

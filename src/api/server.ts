@@ -20,6 +20,7 @@ import { SalesforcePersonaAccessVerifier } from "../salesforce/SalesforcePersona
 import { SalesforceRelationshipMetadataService } from "../salesforce/SalesforceRelationshipMetadataService.js";
 import { createSalesforceRouter } from "./salesforceRoutes.js";
 import { existsSync } from "node:fs";
+import { resolveReportOutputDirectory } from "../config/reportOutputDirectory.js";
 
 // Optional local .env file; existing shell environment variables take precedence.
 // Node.js 22+ is required for this dependency-free configuration loader.
@@ -48,8 +49,7 @@ if (!repositoryPath) {
   );
 }
 
-const outputDirectory =
-  "C:\\Users\\703394232\\Desktop\\SalesforceAnalyzerOutputReports";
+const outputDirectory = resolveReportOutputDirectory();
 
 const paths =
   await scanRepository(repositoryPath);

@@ -15,6 +15,7 @@ import { SoqlSecurityAnalyzer } from "./analyzer/soqlSecurityAnalyzer.js";
 import { loadOrgVerificationStatusPolicy } from "./config/orgVerificationStatusPolicy.js";
 import { OrgObjectReadVerificationService } from "./services/OrgObjectReadVerificationService.js";
 import { writeSoqlReport } from "./reporter/soqlReportWriter.js";
+import { resolveReportOutputDirectory } from "./config/reportOutputDirectory.js";
 
 // Match the API's optional .env initialization; shell variables still take precedence.
 if (existsSync(".env")) process.loadEnvFile(".env");
@@ -144,7 +145,7 @@ try {
 
     const reportPaths =
       await writeSoqlReport(
-        "C:\\Users\\703394232\\Desktop\\SalesforceAnalyzerOutputReports",
+        resolveReportOutputDirectory(),
         persona.name,
         soqlQueries.length,
         soqlFindings
