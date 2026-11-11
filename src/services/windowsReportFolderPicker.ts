@@ -58,7 +58,7 @@ export async function chooseWindowsReportFolder(): Promise<string | null> {
     const directory = stdout.trim();
     return directory || null;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).killed) {
+    if (error instanceof Error && "killed" in error && error.killed === true) {
       throw new ReportOutputConfigurationError(
         "The Windows folder picker timed out. Please select the folder again.",
         504,
