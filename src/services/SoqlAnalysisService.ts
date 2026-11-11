@@ -33,7 +33,7 @@ export class SoqlAnalysisService {
   constructor(
   private readonly repositoryPath: string,
   private readonly soqlSecurityAnalyzer: SoqlSecurityAnalyzer,
-  private readonly outputDirectory: string
+  private readonly outputDirectory: string | (() => string)
 ) {}
 
   async analyze(
@@ -50,8 +50,9 @@ export class SoqlAnalysisService {
         queries
       );
 
-    const outputDirectory =
-  this.outputDirectory;
+    const outputDirectory = typeof this.outputDirectory === "function"
+      ? this.outputDirectory()
+      : this.outputDirectory;
 
     const reports =
       await writeSoqlReport(
