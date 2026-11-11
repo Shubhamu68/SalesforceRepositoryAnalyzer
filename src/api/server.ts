@@ -10,6 +10,7 @@ import { PersonaAccessService } from "../services/PersonaAccessService.js";
 import { PersonaFieldAccessService } from "../services/PersonaFieldAccessService.js";
 import { AccessQueryService } from "../services/AccessQueryService.js";
 import { SoqlAnalysisService } from "../services/SoqlAnalysisService.js";
+import { normalizeSoqlScope, ScopeSelectionError } from "../analyzer/soqlAnalysisScope.js";
 import { SoqlSecurityAnalyzer } from "../analyzer/soqlSecurityAnalyzer.js";
 import { createMetadataRouter } from "./metadataRoutes.js";
 import { ObjectAccessMatrixService } from "../services/ObjectAccessMatrixService.js";
@@ -270,17 +271,21 @@ app.post(
           personaName
         );
 
-      const result =
-        await soqlAnalysisService.analyze(
-          persona
-        );
+      const scope = normalizeSoqlScope(req.body?.scope);
+      const result = await soqlAnalysisService.analyze(persona, scope);
 
       res.json({
         personaName: result.personaName,
         summary: result.summary,
+        scope: result.scope,
         outputFolder: outputDirectory,
       });
     } catch (error) {
+      if (error instanceof ScopeSelectionError ||
+          (error instanceof Error && ["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? ""))) {
+        res.status(400).json({ error: error.message });
+        return;
+      }
       handleApiError(error, res);
     }
   }

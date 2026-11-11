@@ -4,6 +4,7 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import ExcelJS from "exceljs";
+import type { SoqlScopeSummary } from "../analyzer/soqlAnalysisScope.js";
 
 import {
   SoqlSecurityFinding,
@@ -15,7 +16,8 @@ export async function writeSoqlReport(
   outputDirectory: string,
   personaName: string,
   queryCount: number,
-  findings: SoqlSecurityFinding[]
+  findings: SoqlSecurityFinding[],
+  scope?: SoqlScopeSummary,
 ): Promise<{
   errorReportPath: string;
   otherReportPath: string;
@@ -103,7 +105,8 @@ export async function writeSoqlReport(
     summaryReportPath,
     personaName,
     queryCount,
-    conciseFindings
+    conciseFindings,
+    scope
   );
 
   return {
@@ -316,7 +319,8 @@ async function writeSummaryWorkbook(
   filePath: string,
   personaName: string,
   queryCount: number,
-  findings: ConciseFinding[]
+  findings: ConciseFinding[],
+  scope?: SoqlScopeSummary,
 ): Promise<void> {
   const workbook =
     new ExcelJS.Workbook();
@@ -570,6 +574,25 @@ async function writeSummaryWorkbook(
     from: "A1",
     to: `L${Math.max(1, referenceSheet.rowCount)}`,
   };
+
+  if (scope) {
+    const sheet = workbook.addWorksheet("Analysis Scope");
+    sheet.addRow(["Analysis scope", "Value"]);
+    sheet.addRow(["Mode", scope.mode === "FULL" ? "Full Repository" : "Selective Metadata"]);
+    sheet.addRow(["All static SOQL queries", scope.totalQueriesFound]);
+    sheet.addRow(["Selected SOQL queries", scope.queriesSelected]);
+    sheet.addRow(["Expanded to full scan", scope.expandedToFull ? "Yes" : "No"]);
+    sheet.addRow(["Manifest", scope.manifestPath ?? "Not specified"]);
+    sheet.addRow(["Selected metadata members", scope.components.join("\n") || "All supported"]);
+    sheet.addRow(["Scope warnings", scope.warnings.join("\n") || "None"]);
+    sheet.addRow(["Limitations", "Checks static Apex .cls SOQL. This is not yet a post-deployment permission-state simulation."]);
+    sheet.getColumn(1).width = 29;
+    sheet.getColumn(2).width = 95;
+    sheet.getColumn(2).alignment = { wrapText: true, vertical: "top" };
+    sheet.getRow(1).font = { bold: true };
+    sheet.getRow(7).height = Math.min(160, Math.max(25, scope.components.length * 15));
+    sheet.getRow(8).height = Math.min(140, Math.max(25, scope.warnings.length * 30));
+  }
 
   await workbook.xlsx.writeFile(
     filePath

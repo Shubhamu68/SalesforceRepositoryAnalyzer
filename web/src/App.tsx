@@ -48,8 +48,19 @@ type FieldAccessResult = {
   mutedBy: string[];
 };
 
+type SoqlRunMode = "FULL" | "SELECTIVE";
+type SoqlAnalysisScope = {
+  mode: SoqlRunMode;
+  totalQueriesFound: number;
+  queriesSelected: number;
+  expandedToFull: boolean;
+  components: string[];
+  manifestPath?: string;
+  warnings: string[];
+};
 type SoqlAnalysisResult = {
   personaName: string;
+  scope?: SoqlAnalysisScope;
   summary: {
     queriesAnalyzed: number;
     totalFindings: number;
@@ -118,6 +129,9 @@ function App() {
   const [apiConnected, setApiConnected] = useState(false);
   const [salesforceConnection, setSalesforceConnection] = useState<"connected" | "connecting" | "unavailable" | "not-configured">("connecting");
   const [lastSoql, setLastSoql] = useState<SoqlAnalysisResult | null>(null);
+  const [soqlRunMode, setSoqlRunMode] = useState<SoqlRunMode>("FULL");
+  const [soqlManifestPath, setSoqlManifestPath] = useState("");
+  const [soqlMetadataMembers, setSoqlMetadataMembers] = useState("");
   const [lastRunAt, setLastRunAt] = useState<Date | null>(null);
 
   useEffect(() => {
@@ -335,8 +349,14 @@ function App() {
                 "application/json",
             },
             body: JSON.stringify({
-              personaName:
-                selectedPersona,
+              personaName: selectedPersona,
+              scope: soqlRunMode === "FULL"
+                ? { mode: "FULL" }
+                : {
+                    mode: "SELECTIVE",
+                    ...(soqlManifestPath.trim() ? { manifestPath: soqlManifestPath.trim() } : {}),
+                    components: soqlMetadataMembers.split(/[\n,]+/).map(item => item.trim()).filter(Boolean),
+                  },
             }),
           }
         );
@@ -672,6 +692,14 @@ function App() {
 
     return (
       <div className="soql-result-layout">
+        {analysis.scope && (
+          <div className="scope-result-banner" role="status">
+            <strong>{analysis.scope.mode === "FULL" ? "Full Repository" : "Selective Metadata"} analysis</strong>
+            <span>{analysis.scope.queriesSelected} of {analysis.scope.totalQueriesFound} static SOQL queries selected</span>
+            {analysis.scope.expandedToFull && <span>Safely expanded to a full SOQL scan because the selected metadata has broader dependencies.</span>}
+            {analysis.scope.warnings.map((warning, index) => <span key={index} className="scope-warning">{warning}</span>)}
+          </div>
+        )}
         <div className="soql-success-banner" role="status" aria-live="polite">
           <div className="soql-success-icon" aria-hidden="true">✓</div>
           <div className="soql-success-copy">
@@ -861,7 +889,50 @@ function App() {
           </>
         )}
         {page === "soql" && (
-          <div className="helper-box">Scans Apex SOQL queries against the selected persona. The backend saves your TXT and Excel reports in the configured output folder.</div>
+          <>
+            <div className="form-field">
+              <label>Analysis scope</label>
+              <div className="segmented" role="group" aria-label="SOQL analysis scope">
+                <button type="button" className={soqlRunMode === "FULL" ? "selected" : ""}
+                  disabled={checking} aria-pressed={soqlRunMode === "FULL"}
+                  onClick={() => { setSoqlRunMode("FULL"); setResult(null); setError(""); }}>
+                  Full Repository
+                </button>
+                <button type="button" className={soqlRunMode === "SELECTIVE" ? "selected" : ""}
+                  disabled={checking} aria-pressed={soqlRunMode === "SELECTIVE"}
+                  onClick={() => { setSoqlRunMode("SELECTIVE"); setResult(null); setError(""); }}>
+                  Selective Metadata
+                </button>
+              </div>
+              <span className="scope-description">
+                {soqlRunMode === "FULL"
+                  ? "Analyze static SOQL in all Apex classes found in the configured repository."
+                  : "Analyze queries potentially affected by selected Salesforce metadata components."}
+              </span>
+            </div>
+            {soqlRunMode === "SELECTIVE" && (
+              <div className="scope-options">
+                <div className="form-field">
+                  <label htmlFor="scope-manifest">Deployment package.xml path (optional)</label>
+                  <input id="scope-manifest" value={soqlManifestPath} disabled={checking}
+                    placeholder="manifest/package.xml (relative to repository root)"
+                    onChange={event => { setSoqlManifestPath(event.target.value); setResult(null); }} />
+                </div>
+                <div className="form-field">
+                  <label htmlFor="scope-members">Metadata members (optional)</label>
+                  <textarea id="scope-members" rows={4} value={soqlMetadataMembers} disabled={checking}
+                    placeholder={"ApexClass:OrderSummaryHandler\\nCustomField:OrderSummary.CSR_External_Notes__c\\nCustomObject:OrderSummary"}
+                    onChange={event => { setSoqlMetadataMembers(event.target.value); setResult(null); }} />
+                  <span className="scope-description">One MetadataType:Member per line. You can use a package.xml, manual entries, or both. Permission Set and Profile changes safely widen to a full SOQL scan.</span>
+                </div>
+              </div>
+            )}
+            <div className="helper-box">
+              Uses the same repository-first and Salesforce-fallback permission checks as the full SOQL Analyzer.
+              Selective analysis narrows static Apex SOQL coverage; it does not yet simulate all post-deployment permission changes.
+              TXT and Excel reports are saved to the configured output folder.
+            </div>
+          </>
         )}
       </div>
       <div className="form-footer">

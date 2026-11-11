@@ -4,6 +4,7 @@ import { SoqlQuery } from "../models/SoqlQuery.js";
 import { SoqlSecurityFinding } from "../models/SoqlSecurityFinding.js";
 import { SoqlSecurityAnalyzer } from "../analyzer/soqlSecurityAnalyzer.js";
 import { scanApexSoql } from "../scanner/apexSoqlScanner.js";
+import { selectScopedSoqlQueries, type SoqlScopeRequest, type SoqlScopeSummary } from "../analyzer/soqlAnalysisScope.js";
 import { writeSoqlReport } from "../reporter/soqlReportWriter.js";
 
 export interface SoqlAnalysisSummary {
@@ -27,6 +28,7 @@ export interface SoqlAnalysisResult {
   summary: SoqlAnalysisSummary;
   findings: SoqlSecurityFinding[];
   reports: SoqlAnalysisReports;
+  scope: SoqlScopeSummary;
 }
 
 export class SoqlAnalysisService {
@@ -37,12 +39,11 @@ export class SoqlAnalysisService {
 ) {}
 
   async analyze(
-    persona: Persona
+    persona: Persona,
+    options: SoqlScopeRequest = { mode: "FULL" }
   ): Promise<SoqlAnalysisResult> {
-    const queries: SoqlQuery[] =
-      await scanApexSoql(
-        this.repositoryPath
-      );
+    const allQueries: SoqlQuery[] = await scanApexSoql(this.repositoryPath);
+    const { queries, scope } = await selectScopedSoqlQueries(this.repositoryPath, allQueries, options);
 
     const findings =
       await this.soqlSecurityAnalyzer.analyze(
@@ -58,7 +59,8 @@ export class SoqlAnalysisService {
         outputDirectory,
         persona.name,
         queries.length,
-        findings
+        findings,
+        scope
       );
 
     const affectedApexClasses =
@@ -70,6 +72,7 @@ export class SoqlAnalysisService {
 
     return {
       personaName: persona.name,
+      scope,
 
       summary: {
         queriesAnalyzed: queries.length,

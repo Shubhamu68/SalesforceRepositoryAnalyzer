@@ -14,7 +14,8 @@
     "import:field-metadata": "node scripts/import-field-permissionability.mjs",
     "export:relationships": "node scripts/export-relationship-schema.mjs",
     "test:stack-ux": "tsx --test tests/stackTraceUx.test.ts tests/stackTraceOrgVerification.test.ts",
-    "test:all": "node scripts/run-all-tests.mjs"
+    "test:all": "node scripts/run-all-tests.mjs",
+    "soql:scope": "tsx src/cli/runScopedSoqlAnalysis.ts"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",

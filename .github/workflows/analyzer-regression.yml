@@ -3,6 +3,7 @@ on:
   push:
     branches:
       - feature/nested-soql-relationship-resolution
+      - feature/deployment-analysis-scope-modes
   pull_request:
   workflow_dispatch:
 permissions:
