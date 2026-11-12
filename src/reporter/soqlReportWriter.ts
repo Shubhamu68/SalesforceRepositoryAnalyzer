@@ -1,7 +1,4 @@
-import {
-  mkdir,
-  writeFile,
-} from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import ExcelJS from "exceljs";
 
@@ -9,16 +6,12 @@ import {
   SoqlSecurityFinding,
 } from "../models/SoqlSecurityFinding.js";
 
-const EXCLUDED_ERROR_OBJECT_SUFFIX = "__mdt";
-
 export async function writeSoqlReport(
   outputDirectory: string,
   personaName: string,
   queryCount: number,
   findings: SoqlSecurityFinding[]
 ): Promise<{
-  errorReportPath: string;
-  otherReportPath: string;
   summaryReportPath: string;
 }> {
   await mkdir(outputDirectory, {
@@ -35,21 +28,6 @@ export async function writeSoqlReport(
       "_"
     );
 
-  const errorFindings =
-    findings.filter(
-      (finding) =>
-        finding.severity === "ERROR" &&
-        !isMetadataObject(
-          finding.object
-        )
-    );
-
-  const otherFindings =
-    findings.filter(
-      (finding) =>
-        finding.severity !== "ERROR"
-    );
-
   // Include High, Low and Unable to verify. A successful Salesforce
   // verification is evidence worth keeping, not an error to suppress.
   const conciseFindings = buildConciseFindings(
@@ -59,45 +37,11 @@ export async function writeSoqlReport(
   const baseName =
     `soql-fls-${safePersonaName}-${timestamp}`;
 
-  const errorReportPath =
-    path.join(
-      outputDirectory,
-      `${baseName}-errors.txt`
-    );
-
-  const otherReportPath =
-    path.join(
-      outputDirectory,
-      `${baseName}-other.txt`
-    );
-
   const summaryReportPath =
     path.join(
       outputDirectory,
       `${baseName}-summary.xlsx`
     );
-
-  await writeFile(
-    errorReportPath,
-    buildDetailedReport(
-      personaName,
-      queryCount,
-      "ERROR",
-      errorFindings
-    ),
-    "utf-8"
-  );
-
-  await writeFile(
-    otherReportPath,
-    buildDetailedReport(
-      personaName,
-      queryCount,
-      "OTHER",
-      otherFindings
-    ),
-    "utf-8"
-  );
 
   await writeSummaryWorkbook(
     summaryReportPath,
@@ -106,80 +50,7 @@ export async function writeSoqlReport(
     conciseFindings
   );
 
-  return {
-    errorReportPath,
-    otherReportPath,
-    summaryReportPath,
-  };
-}
-
-// --------------------------------------------------
-// Detailed TXT report
-// --------------------------------------------------
-
-function buildDetailedReport(
-  personaName: string,
-  queryCount: number,
-  reportType: "ERROR" | "OTHER",
-  findings: SoqlSecurityFinding[]
-): string {
-  const lines: string[] = [];
-
-  lines.push(
-    "Salesforce Repository Analyzer - SOQL FLS Vulnerability Report"
-  );
-  lines.push("=".repeat(70));
-  lines.push(`Persona: ${personaName}`);
-  lines.push(`Queries analyzed: ${queryCount}`);
-  lines.push(`Report type: ${reportType}`);
-  lines.push(`Findings: ${findings.length}`);
-  lines.push("");
-
-  if (findings.length === 0) {
-    lines.push("No findings.");
-    return lines.join("\n");
-  }
-
-  for (
-    const [index, finding] of
-      findings.entries()
-  ) {
-    lines.push(
-      `Finding ${index + 1}`
-    );
-    lines.push("-".repeat(70));
-    lines.push(`Severity: ${finding.criticality ?? (finding.severity === "ERROR" ? "High" : "Unable to verify")}`);
-    lines.push(`Verification: ${finding.verificationSource ?? "UNVERIFIED"}`);
-    lines.push(`Finding Type: ${finding.findingType ?? "FIELD_READ"}`);
-    lines.push(`Runtime Impact: ${finding.runtimeImpact ?? "Undetermined"}`);
-    lines.push(`Effective Query Mode: ${finding.effectiveMode ?? "UNKNOWN"}`);
-    lines.push(`Apex API Version: ${finding.apiVersion ?? "Unknown"}`);
-    lines.push(`Relationship Path: ${finding.relationshipPath ?? finding.object}`);
-    lines.push(`Query Level: ${finding.queryLevel ?? 1}`);
-    lines.push(
-      `File: ${finding.filePath}`
-    );
-    lines.push(
-      `Line: ${finding.lineNumber}`
-    );
-    lines.push(
-      `Object: ${finding.object}`
-    );
-    lines.push(
-      `Field: ${finding.field}`
-    );
-    lines.push(`Explicit Query Mode: ${finding.declaredMode ?? (finding.withUserMode ? "USER_MODE" : "UNSPECIFIED")}`);
-    lines.push("");
-    lines.push("Reason:");
-    lines.push(finding.reason);
-    lines.push("");
-    lines.push("SOQL:");
-    lines.push(finding.query);
-    lines.push("");
-    lines.push("");
-  }
-
-  return lines.join("\n");
+  return { summaryReportPath };
 }
 
 // --------------------------------------------------
@@ -290,7 +161,7 @@ function buildConciseFindings(
     entry.criticality = highest.criticality;
     const isMixed = entry.references.some(ref => ref.criticality !== highest.criticality);
     entry.explanation = highest.explanation + (isMixed
-      ? " Severity differs across SOQL queries. Highest severity shown; see TXT reports for individual query details."
+      ? " Severity differs across SOQL queries. Highest severity shown; see the Apex Classes column for affected locations."
       : "");
   }
 
@@ -382,7 +253,7 @@ async function writeSummaryWorkbook(
 
   summarySheet.addRow([]);
   summarySheet.mergeCells("A5:H5");
-  summarySheet.getCell("A5").value = "High = confirmed missing Read with enforced SOQL access; Low = advisory or org-verified Read. Mixed findings show the highest severity; individual query details remain in TXT reports.";
+  summarySheet.getCell("A5").value = "High = confirmed missing Read with enforced SOQL access; Low = advisory or org-verified Read. Mixed findings show the highest severity.";
   summarySheet.getCell("A5").font = { italic: true, color: { argb: "FF60748D" }, size: 10 };
 
   const summaryHeader =

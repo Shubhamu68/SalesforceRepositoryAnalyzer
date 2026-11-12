@@ -388,7 +388,7 @@ function App() {
       if (checkType === "soql" && response.status === 409) {
         const body: { code?: string; error?: string } = await response.json().catch(() => ({}));
         if (body.code === "REPORT_OUTPUT_NOT_CONFIGURED") {
-          setReportFolderExplanation(body.error || "Choose a folder for Excel and TXT reports.");
+          setReportFolderExplanation(body.error || "Choose a folder for the Excel report.");
           setReportFolderError("");
           setReportFolderModalOpen(true);
           return;
@@ -737,8 +737,8 @@ function App() {
           <div className="soql-success-icon" aria-hidden="true">✓</div>
           <div className="soql-success-copy">
             <span className="soql-success-eyebrow">ANALYSIS COMPLETED</span>
-            <h3>Your SOQL reports are ready</h3>
-            <p>The TXT and Excel reports were generated successfully for <strong>{analysis.personaName}</strong>.</p>
+            <h3>Your SOQL Excel report is ready</h3>
+            <p>The Excel report was generated successfully for <strong>{analysis.personaName}</strong>.</p>
           </div>
           <div className="soql-success-actions">
             <span className="soql-output-label">Output folder</span>
@@ -922,7 +922,7 @@ function App() {
           </>
         )}
         {page === "soql" && (
-          <div className="helper-box">Scans Apex SOQL queries against the selected persona. The backend saves your TXT and Excel reports in the configured output folder.</div>
+          <div className="helper-box">Scans Apex SOQL queries against the selected persona. The backend saves one Excel workbook in the configured output folder.</div>
         )}
       </div>
       <div className="form-footer">
@@ -978,7 +978,7 @@ function App() {
               <section className="panel severity-panel"><h2>Finding severity</h2>{soqlSummary ? <><div className="severity-visual" style={{ background: `conic-gradient(#f04452 0 ${soqlSummary.totalFindings ? 100 * soqlSummary.errors / soqlSummary.totalFindings : 0}%, #f5a23c 0 100%)` }}><div><strong>{soqlSummary.totalFindings}</strong><span>Total findings</span></div></div><div className="legend"><span><i className="dot red-dot"/>Errors <strong>{soqlSummary.errors}</strong></span><span><i className="dot orange-dot"/>Reviews <strong>{soqlSummary.reviews}</strong></span></div></> : <div className="empty-visual"><span>◌</span><p>No analysis completed yet</p><small>Run SOQL Security Analysis to populate this chart.</small></div>}</section>
               <section className="panel summary-panel"><h2>Repository & latest analysis</h2><div className="detail-line"><span>Repository</span><strong title={repositoryName}>{repositoryName || "Not loaded"}</strong></div><div className="detail-line"><span>API status</span><strong className={apiConnected ? "text-success" : "text-danger"}>{apiConnected ? "Connected" : "Unavailable"}</strong></div><div className="detail-line"><span>Salesforce org</span><strong className={salesforceConnection === "connected" ? "text-success" : ""}>{salesforceConnection === "connected" ? "Connected automatically" : salesforceConnection === "connecting" ? "Connecting…" : salesforceConnection === "not-configured" ? "Not configured" : "Connection unavailable"}</strong></div><div className="detail-line"><span>Last analysed</span><strong>{lastRunAt ? lastRunAt.toLocaleString() : "Not yet run"}</strong></div><div className="detail-line"><span>Persona</span><strong>{lastSoql?.personaName || "—"}</strong></div><div className="detail-line"><span>Reports folder</span><strong title={lastSoql?.outputFolder}>{lastSoql?.outputFolder || "—"}</strong></div></section>
             </div>
-            <section className="panel shortcuts-panel"><div className="panel-heading"><div><h2>Quick actions</h2><p>Choose an analysis workflow.</p></div></div><div className="quick-actions"><button onClick={() => navigate("access")}><span className="shortcut-icon">◇</span><strong>Check object or field access</strong><small>Resolve permissions for a persona</small><span className="shortcut-arrow">→</span></button><button onClick={() => navigate("soql")}><span className="shortcut-icon">◎</span><strong>Scan SOQL security</strong><small>Generate findings and reports</small><span className="shortcut-arrow">→</span></button><button onClick={() => navigate("reports")}><span className="shortcut-icon">▧</span><strong>View report location</strong><small>Find generated Excel and TXT files</small><span className="shortcut-arrow">→</span></button></div></section>
+            <section className="panel shortcuts-panel"><div className="panel-heading"><div><h2>Quick actions</h2><p>Choose an analysis workflow.</p></div></div><div className="quick-actions"><button onClick={() => navigate("access")}><span className="shortcut-icon">◇</span><strong>Check object or field access</strong><small>Resolve permissions for a persona</small><span className="shortcut-arrow">→</span></button><button onClick={() => navigate("soql")}><span className="shortcut-icon">◎</span><strong>Scan SOQL security</strong><small>Generate findings and reports</small><span className="shortcut-arrow">→</span></button><button onClick={() => navigate("reports")}><span className="shortcut-icon">▧</span><strong>View report location</strong><small>Find generated Excel reports</small><span className="shortcut-arrow">→</span></button></div></section>
           </>
         )}
 
@@ -1006,7 +1006,7 @@ function App() {
 
         {showSoqlOverlay && <AnalysisLoadingOverlay title="Analysis in Progress" description="Scanning Apex SOQL queries and preparing your security reports..." hint="This may take 20–30 seconds." />}
 
-        {page === "reports" && <section className="panel reports-panel"><div className="panel-heading"><div><h2>Latest SOQL analysis reports</h2><p>Files are written by the backend, not downloaded by the browser.</p></div></div>{lastSoql ? <><div className="detail-line"><span>Persona</span><strong>{lastSoql.personaName}</strong></div><div className="detail-line"><span>Report folder</span><strong className="path-text">{lastSoql.outputFolder}</strong></div><div className="detail-line"><span>Findings</span><strong>{lastSoql.summary.totalFindings}</strong></div><button className="secondary-button" onClick={() => navigator.clipboard.writeText(lastSoql.outputFolder)}>Copy folder path</button></> : <div className="empty-reports"><span>▧</span><h3>No reports from this session</h3><p>Run SOQL Security Analysis to generate TXT and Excel reports.</p><button className="primary-button" onClick={() => navigate("soql")}>Run SOQL Analysis</button></div>}</section>}
+        {page === "reports" && <section className="panel reports-panel"><div className="panel-heading"><div><h2>Latest SOQL analysis reports</h2><p>Files are written by the backend, not downloaded by the browser.</p></div></div>{lastSoql ? <><div className="detail-line"><span>Persona</span><strong>{lastSoql.personaName}</strong></div><div className="detail-line"><span>Report folder</span><strong className="path-text">{lastSoql.outputFolder}</strong></div><div className="detail-line"><span>Findings</span><strong>{lastSoql.summary.totalFindings}</strong></div><button className="secondary-button" onClick={() => navigator.clipboard.writeText(lastSoql.outputFolder)}>Copy folder path</button></> : <div className="empty-reports"><span>▧</span><h3>No reports from this session</h3><p>Run SOQL Security Analysis to generate an Excel workbook.</p><button className="primary-button" onClick={() => navigate("soql")}>Run SOQL Analysis</button></div>}</section>}
       </main>
       {reportFolderModalOpen && (
         <ReportOutputSetupModal

@@ -55,7 +55,7 @@ export default function ReportOutputSetupModal({
           </div>
         </div>
         <p id="report-folder-description">
-          Choose where the Salesforce Repository Analyzer should save its Excel and TXT reports.
+          Choose where the Salesforce Repository Analyzer should save its Excel report.
           The selected location will be saved in your project's <code>.env</code> file for future runs.
         </p>
         {explanation && <p className="report-folder-hint">{explanation}</p>}

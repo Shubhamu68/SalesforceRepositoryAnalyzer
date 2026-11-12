@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import os from "node:os";
 import path from "node:path";
-import { mkdtemp, mkdir, readFile, rm, writeFile, stat } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile, stat, readdir } from "node:fs/promises";
 import express from "express";
 import type { AddressInfo } from "node:net";
 import {
@@ -182,8 +182,8 @@ test("the newly selected folder is used by the actual SOQL report writer without
     const result = await service.analyze({ name: "OMS View Only" } as Persona);
     assert.ok(result.reports.summaryReportPath.startsWith(f.reports));
     assert.equal((await stat(result.reports.summaryReportPath)).isFile(), true);
-    assert.equal((await stat(result.reports.errorReportPath)).isFile(), true);
-    assert.equal((await stat(result.reports.otherReportPath)).isFile(), true);
+    assert.deepEqual(Object.keys(result.reports), ["summaryReportPath"]);
+    assert.deepEqual(await readdir(f.reports), [path.basename(result.reports.summaryReportPath)]);
   } finally { await f.clean(); }
 });
 

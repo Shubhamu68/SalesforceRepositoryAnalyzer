@@ -151,37 +151,8 @@ try {
         soqlFindings
       );
 
-    console.log(
-      `SOQL findings: ${soqlFindings.length}`
-    );
-
-    console.log(
-      `ERROR report: ${reportPaths.errorReportPath}`
-    );
-
-    console.log(
-      `Other findings report: ${reportPaths.otherReportPath}`
-    );
-
-    console.log(
-      `Excel summary: ${reportPaths.summaryReportPath}`
-    );
-
-    console.log(
-      `SOQL findings: ${soqlFindings.length}`
-    );
-
-    console.log(
-      `ERROR report: ${reportPaths.errorReportPath}`
-    );
-
-    console.log(
-      `Other findings report: ${reportPaths.otherReportPath}`
-    );
-
-    console.log(
-      `Summary report: ${reportPaths.summaryReportPath}`
-    );
+    console.log(`SOQL findings: ${soqlFindings.length}`);
+    console.log(`Excel summary: ${reportPaths.summaryReportPath}`);
 
     process.exit(0);
   }
