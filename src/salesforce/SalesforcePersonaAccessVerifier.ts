@@ -273,6 +273,40 @@ export class SalesforcePersonaAccessVerifier {
   }
 
   /**
+   * Full-consensus access checks use every matching ACTIVE user, not the
+   * representative last-login user used by legacy stack/Read analysis.
+   * An excessive match count is REVIEW, never silently sampled as Yes.
+   */
+  async matchingActiveUsersForConsensus(persona: Persona, limit = 50): Promise<{
+    users: Array<{ id: string; profileId: string; detail: OrgCheckedUser }>;
+    eligibleUsers: number;
+  }> {
+    const inventory = await this.inventory();
+    if (!persona.profile?.trim()) throw new Error("Persona has no configured Profile; org verification needs review.");
+    const missingSets = (persona.permissionSets ?? []).filter(
+      (name) => !inventory.knownPermissionSetNames.has(normalized(name)));
+    const missingGroups = (persona.permissionSetGroups ?? []).filter(
+      (name) => !inventory.knownGroupNames.has(normalized(name)));
+    if (missingSets.length || missingGroups.length) throw new Error(
+      `Configured Salesforce assignments not found: ${[...missingSets, ...missingGroups].join(", ")}.`);
+    const matched = matchPersonaUsers(persona, inventory.profiles, inventory.users, inventory.assignments);
+    if (matched.eligibleCount === 0) throw new Error(matched.reason ?? "No active Salesforce users match this persona.");
+    if (matched.eligibleCount > limit) throw new Error(
+      `Found ${matched.eligibleCount} matching active users; limit is ${limit}. Org verification requires review, not sampling.`);
+    const byId = new Map(inventory.users.map((user) => [idKey(user.id), user]));
+    return {
+      eligibleUsers: matched.eligibleCount,
+      users: matched.users.map((id) => ({
+        id,
+        profileId: byId.get(idKey(id))!.profileId,
+        detail: inventory.userDetails.get(idKey(id)) ?? {
+          id, name: "Name unavailable", username: "Username unavailable",
+        }
+      })),
+    };
+  }
+
+  /**
    * Results describe the ONE most recently logged-in matched active user.
    * This optimizes representative-user checks, but does not establish
    * permission parity for all users assigned to a persona.

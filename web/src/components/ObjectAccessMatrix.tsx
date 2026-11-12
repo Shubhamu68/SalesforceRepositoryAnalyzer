@@ -1,4 +1,6 @@
 import { useMemo, useState, type FormEvent } from "react";
+import PermissionIndicator from "./PermissionIndicator";
+import type { PermissionEvidence } from "./permissionPresentation";
 
 const PERMISSIONS = [
   { key: "read", label: "Read", shortLabel: "Read" },
@@ -41,6 +43,7 @@ type ReadEvidence = {
 type MatrixPersona = {
   personaName: string;
   readEvidence?: ReadEvidence;
+  permissionEvidence?: Partial<Record<PermissionKey, PermissionEvidence>>;
   access: PermissionAccess;
   sources: Record<PermissionKey, PermissionSourceDetail>;
   warnings: string[];
@@ -60,20 +63,8 @@ type Props = {
   beforeAnalysis?: () => Promise<boolean>;
 };
 
-function AccessIndicator({ granted, evidence }: { granted: boolean; evidence?: ReadEvidence }) {
-  const fromOrg = evidence?.source === "ORG_VERIFIED";
-  const unresolved = evidence?.source === "UNVERIFIED";
-  const title = evidence?.message ?? (granted ? "Granted from repository" : "No repository grant");
-  return (
-    <span
-      className={`matrix-access-chip ${fromOrg ? "matrix-org-verified" : unresolved ? "matrix-org-unverified" : granted ? "matrix-allowed" : "matrix-denied"}`}
-      title={title}
-      aria-label={title}
-    >
-      <span aria-hidden="true">{fromOrg || granted ? "✓" : "—"}</span>
-      <span className="matrix-chip-text">{fromOrg ? "Org" : unresolved ? "Review" : granted ? "Yes" : "No"}</span>
-    </span>
-  );
+function AccessIndicator({ granted, evidence }: { granted: boolean; evidence?: PermissionEvidence }) {
+  return <PermissionIndicator granted={granted} evidence={evidence} matrix />;
 }
 
 function PermissionDetail({
@@ -85,7 +76,7 @@ function PermissionDetail({
   label: string;
   granted: boolean;
   detail: PermissionSourceDetail;
-  evidence?: ReadEvidence;
+  evidence?: PermissionEvidence;
 }) {
   return (
     <div className="matrix-permission-detail">
@@ -114,7 +105,7 @@ function PermissionDetail({
           ))}
         </div>
       ) : (
-        <p className="matrix-empty-grant">No effective Permission Set grant</p>
+        <p className="matrix-empty-grant">No effective grant established in repository metadata</p>
       )}
 
       {detail.mutedBy.map((mute, index) => (
@@ -184,7 +175,7 @@ export default function ObjectAccessMatrix({ objects, loadingObjects, beforeAnal
             <h2>Analyze object access across personas</h2>
             <p>Enter one Salesforce object API name to compare all configured personas.</p>
           </div>
-          <span className="mini-tag">Repository metadata</span>
+          <span className="mini-tag">Repository + Salesforce verification</span>
         </div>
         <div className="matrix-query-row">
           <div className="form-field matrix-object-input">
@@ -268,7 +259,7 @@ export default function ObjectAccessMatrix({ objects, loadingObjects, beforeAnal
                     <th scope="row">{persona.personaName}{persona.warnings.length > 0 && <span className="matrix-persona-warning" title={persona.warnings.join("\n")}> ⚠</span>}</th>
                     {PERMISSIONS.map((permission) => (
                       <td key={permission.key}>
-                        <AccessIndicator granted={persona.access[permission.key]} evidence={permission.key === "read" ? persona.readEvidence : undefined} />
+                        <AccessIndicator granted={persona.access[permission.key]} evidence={persona.permissionEvidence?.[permission.key] ?? (permission.key === "read" ? persona.readEvidence : undefined)} />
                       </td>
                     ))}
                   </tr>
@@ -307,7 +298,7 @@ export default function ObjectAccessMatrix({ objects, loadingObjects, beforeAnal
               ))}
             </div>
           )}
-          <p className="matrix-disclaimer">Repository Profile, Permission Set and PSG permissions are evaluated first; configured managed object Read exceptions are checked in the connected org. Record-level sharing is not evaluated.</p>
+          <p className="matrix-disclaimer">Profile, Permission Set and PSG metadata are evaluated first. Missing repository grants are verified against matching active Salesforce users. A warning icon indicates an org-only grant; Review indicates failed, incomplete or mixed verification. Record-level sharing is not evaluated.</p>
         </section>
       )}
     </div>

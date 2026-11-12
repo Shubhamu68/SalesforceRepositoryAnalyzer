@@ -2,6 +2,7 @@ import { PersonaConfigLoader } from "../config/PersonaConfigLoader.js";
 import { PersonaPermissionResolver, type ResolvedPersonaPermissions } from "../analyzer/PersonaPermissionResolver.js";
 import { createPersonaAccessEvaluator } from "../analyzer/personaAccessEvaluator.js";
 import { OrgObjectReadVerificationService } from "./OrgObjectReadVerificationService.js";
+import { OrgPermissionFallbackService } from "./OrgPermissionFallbackService.js";
 import type { PermissionSet } from "../models/PermissionSet.js";
 import type { ObjectAccessMatrixPersona, ObjectAccessMatrixResult } from "../models/ObjectAccessMatrixResult.js";
 
@@ -22,7 +23,8 @@ export class ObjectAccessMatrixService {
   constructor(
     private readonly personaConfigLoader: PersonaConfigLoader,
     private readonly personaPermissionResolver: PersonaPermissionResolver,
-    private readonly orgReadVerification?: OrgObjectReadVerificationService
+    private readonly orgReadVerification?: OrgObjectReadVerificationService,
+    private readonly permissionFallback?: OrgPermissionFallbackService,
   ) {}
 
   async analyze(objectName: string): Promise<ObjectAccessMatrixResult> {
@@ -72,7 +74,11 @@ export class ObjectAccessMatrixService {
           }
         }
         const entry = calculateMatrixPersona(object, resolved, resolved.mutesByGroup, warnings);
-        if (!entry.access.read && this.orgReadVerification) {
+        if (this.permissionFallback) {
+          const resolvedAccess = await this.permissionFallback.resolveObject(persona, object, entry.access);
+          entry.access = resolvedAccess.access;
+          entry.permissionEvidence = resolvedAccess.evidence;
+        } else if (!entry.access.read && this.orgReadVerification) {
           const evidence = await this.orgReadVerification.resolve(persona, object, false);
           entry.readEvidence = evidence;
           if (evidence.readable) entry.access.read = true;

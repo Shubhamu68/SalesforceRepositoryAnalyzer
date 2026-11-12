@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
 import ObjectAccessMatrix from "./components/ObjectAccessMatrix";
+import PermissionIndicator from "./components/PermissionIndicator";
+import type { PermissionEvidence } from "./components/permissionPresentation";
 import StackTraceImpact from "./components/StackTraceImpact";
 import SalesforceOrgConnection from "./components/SalesforceOrgConnection";
 import AnalysisLoadingOverlay from "./components/AnalysisLoadingOverlay";
@@ -23,6 +25,7 @@ type ObjectReadEvidence = {
 type ObjectAccessResult = {
   object: string;
   readEvidence?: ObjectReadEvidence;
+  permissionEvidence?: Partial<Record<"read" | "create" | "edit" | "delete" | "viewAllRecords" | "modifyAllRecords" | "viewAllFields", PermissionEvidence>>;
   read: boolean;
   create: boolean;
   edit: boolean;
@@ -43,6 +46,7 @@ type FieldAccessResult = {
   field: string;
   objectReadEvidence?: ObjectReadEvidence;
   fieldReadEvidence?: { outcome: "VERIFIED" | "DENIED" | "UNVERIFIED"; message: string };
+  permissionEvidence?: Partial<Record<"read" | "edit", PermissionEvidence>>;
   read: boolean;
   edit: boolean;
   permissionable?: boolean;
@@ -624,68 +628,37 @@ function App() {
     return value ? "Yes" : "No";
   }
 
-  function renderObjectResult(
-    access: ObjectAccessResult
-  ) {
+  function renderObjectResult(access: ObjectAccessResult) {
     const permissions = [
-      ["Read", access.read],
-      ["Create", access.create],
-      ["Edit", access.edit],
-      ["Delete", access.delete],
-      [
-        "View All Records",
-        access.viewAllRecords,
-      ],
-      [
-        "Modify All Records",
-        access.modifyAllRecords,
-      ],
-      [
-        "View All Fields",
-        access.viewAllFields,
-      ],
-    ];
-
+      { label: "Read", key: "read" }, { label: "Create", key: "create" },
+      { label: "Edit", key: "edit" }, { label: "Delete", key: "delete" },
+      { label: "View All Records", key: "viewAllRecords" },
+      { label: "Modify All Records", key: "modifyAllRecords" },
+      { label: "View All Fields", key: "viewAllFields" },
+    ] as const;
     return (
       <div className="result-card">
-        <div className="result-header">
-          <span className="result-type">
-            OBJECT
-          </span>
-
-          <h2>{access.object}</h2>
-        </div>
-
+        <div className="result-header"><span className="result-type">OBJECT</span><h2>{access.object}</h2></div>
         <div className="permission-grid">
-          {permissions.map(
-            ([label, value]) => (
-              <div
-                className="permission-row"
-                key={String(label)}
-              >
-                <span>{label}</span>
-
-                <strong
-                  className={
-                    String(label) === "Read" && access.readEvidence?.source === "UNVERIFIED"
-                      ? "status"
-                      : value
-                        ? "status yes"
-                        : "status no"
-                  }
-                >
-                  {String(label) === "Read" && access.readEvidence?.source === "UNVERIFIED"
-                    ? "Review"
-                    : formatBoolean(Boolean(value))}
-                </strong>
-              </div>
-            )
-          )}
+          {permissions.map(({ label, key }) => (
+            <div className="permission-row" key={key}>
+              <span>{label}</span>
+              <PermissionIndicator granted={access[key]}
+                evidence={access.permissionEvidence?.[key] ?? (key === "read" && access.readEvidence
+                  ? { source: access.readEvidence.source, message: access.readEvidence.message }
+                  : undefined)} />
+            </div>
+          ))}
         </div>
-        {access.readEvidence && (
-          <p className="muted" role="status">
-            <strong>{access.readEvidence.source === "ORG_VERIFIED" ? "Verified from Org" : access.readEvidence.source === "UNVERIFIED" ? "Unable to verify" : "Org access denied"}:</strong> {access.readEvidence.message}
-          </p>
+        {access.permissionEvidence && Object.keys(access.permissionEvidence).length > 0 && (
+          <div className="source-section">
+            <h3>Salesforce verification and repository differences</h3>
+            {permissions.filter(({ key }) => access.permissionEvidence?.[key]).map(({ label, key }) =>
+              <p key={key} className="muted"><strong>{label}:</strong> {access.permissionEvidence?.[key]?.message}</p>)}
+          </div>
+        )}
+        {!access.permissionEvidence && access.readEvidence && (
+          <p className="muted" role="status">{access.readEvidence.message}</p>
         )}
       </div>
     );
@@ -707,42 +680,23 @@ function App() {
         <div className="permission-grid">
           <div className="permission-row">
             <span>Read</span>
-
-            <strong
-              className={
-                access.fieldReadEvidence?.outcome === "UNVERIFIED" || access.objectReadEvidence?.source === "UNVERIFIED"
-                  ? "status"
-                  : access.read
-                    ? "status yes"
-                    : "status no"
-              }
-            >
-              {access.fieldReadEvidence?.outcome === "UNVERIFIED" || access.objectReadEvidence?.source === "UNVERIFIED"
-                ? "Review"
-                : formatBoolean(access.read)}
-            </strong>
+            <PermissionIndicator granted={access.read}
+              evidence={access.permissionEvidence?.read ?? (access.fieldReadEvidence
+                ? { source: access.fieldReadEvidence.outcome === "VERIFIED" ? "ORG_VERIFIED" : access.fieldReadEvidence.outcome === "DENIED" ? "ORG_DENIED" : "UNVERIFIED", message: access.fieldReadEvidence.message }
+                : access.objectReadEvidence ? { source: access.objectReadEvidence.source, message: access.objectReadEvidence.message } : undefined)} />
           </div>
-
           <div className="permission-row">
             <span>Edit</span>
-
-            <strong
-              className={
-                access.edit
-                  ? "status yes"
-                  : "status no"
-              }
-            >
-              {formatBoolean(access.edit)}
-            </strong>
+            <PermissionIndicator granted={access.edit} evidence={access.permissionEvidence?.edit}/>
           </div>
         </div>
-
-        {(access.objectReadEvidence || access.fieldReadEvidence) && (
+        {(access.permissionEvidence || access.objectReadEvidence || access.fieldReadEvidence) && (
           <div className="source-section" role="status">
-            <h3>Live Salesforce verification</h3>
-            {access.objectReadEvidence && <p className="muted">Object Read: {access.objectReadEvidence.message}</p>}
-            {access.fieldReadEvidence && <p className="muted">Field Read: {access.fieldReadEvidence.message}</p>}
+            <h3>Salesforce verification and repository differences</h3>
+            {access.permissionEvidence?.read && <p className="muted">Field Read: {access.permissionEvidence.read.message}</p>}
+            {access.permissionEvidence?.edit && <p className="muted">Field Edit: {access.permissionEvidence.edit.message}</p>}
+            {!access.permissionEvidence && access.objectReadEvidence && <p className="muted">Object Read: {access.objectReadEvidence.message}</p>}
+            {!access.permissionEvidence && access.fieldReadEvidence && <p className="muted">Field Read: {access.fieldReadEvidence.message}</p>}
           </div>
         )}
         <div className="source-section">
