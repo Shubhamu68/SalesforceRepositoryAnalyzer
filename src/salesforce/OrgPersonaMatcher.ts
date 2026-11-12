@@ -56,11 +56,16 @@ export function matchPersonaUsers(
     reason: "Persona has no configured Profile; an org user cannot be matched safely." };
 
   const profileName = norm(persona.profile);
-  const profilesForPersona = profiles.filter((profile) =>
-    norm(profile.name) === profileName || norm(profile.developerName ?? "") === profileName ||
-    // The standard Admin profile is named System Administrator in the UI.
-    (profileName === "admin" && norm(profile.name) === "system administrator")
+  // Prefer exact Profile matches. Salesforce's System Administrator UI name
+  // differs from commonly retrieved Admin/Administrator metadata basenames.
+  // Do not mix an exact custom "Administrator" profile with the standard one.
+  const exactProfiles = profiles.filter((profile) =>
+    norm(profile.name) === profileName || norm(profile.developerName ?? "") === profileName
   );
+  const profilesForPersona = exactProfiles.length ? exactProfiles :
+    profileName === "admin" || profileName === "administrator"
+      ? profiles.filter((profile) => norm(profile.name) === "system administrator")
+      : [];
   if (!profilesForPersona.length) return { ...empty,
     reason: `Profile ${persona.profile} was not found in the connected org.` };
 

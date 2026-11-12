@@ -246,7 +246,7 @@ export class SalesforceEffectivePermissionVerifier {
       try {
         fieldGrants.push(...await this.connection.queryAll<ObjectGrant>(
           `SELECT ParentId, PermissionsViewAllFields FROM ObjectPermissions WHERE SobjectType = '${object}' AND ParentId IN (${part.map(quote).join(",")})`,
-          "data", 20000));
+          "data", 20000, "v63.0"));
       } catch (error) {
         viewAllFieldsFailure = error instanceof Error ? error.message : "View All Fields metadata unavailable.";
       }

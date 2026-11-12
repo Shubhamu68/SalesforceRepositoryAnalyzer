@@ -624,10 +624,6 @@ function App() {
     }
   }
 
-  function formatBoolean(value: boolean) {
-    return value ? "Yes" : "No";
-  }
-
   function renderObjectResult(access: ObjectAccessResult) {
     const permissions = [
       { label: "Read", key: "read" }, { label: "Create", key: "create" },

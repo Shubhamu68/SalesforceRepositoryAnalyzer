@@ -293,7 +293,10 @@ export class SalesforceOrgConnection {
    * this never silently truncates permission inventory. An excessive result
    * fails closed so incomplete user data cannot produce an access verdict.
    */
-  async queryAll<T>(soql: string, api: SalesforceQueryApi, limit = 20000): Promise<T[]> {
+  async queryAll<T>(
+    soql: string, api: SalesforceQueryApi, limit = 20000,
+    minimumVersion?: "v63.0",
+  ): Promise<T[]> {
     if (api !== "data" && api !== "tooling") throw new SalesforceConnectionError("Invalid API type.", 400);
     if (!/^SELECT\s/i.test(soql.trim()) || soql.length > MAX_QUERY_LENGTH || soql.includes(";")) {
       throw new SalesforceConnectionError("Only a single read-only SELECT SOQL query is supported.", 400);
@@ -302,7 +305,13 @@ export class SalesforceOrgConnection {
     const all: T[] = [];
     let nextPath: string | null = null;
     let retried = false;
-    const apiBase = `/services/data/${getApiVersion()}/${api === "tooling" ? "tooling/" : ""}query/`;
+    // View All Fields permission metadata was introduced in v63.0. The
+    // targeted internal query can use that version without changing the org's
+    // configured/default API version for all other analyzer operations.
+    const requested = getApiVersion();
+    const effectiveVersion = minimumVersion && Number(requested.slice(1)) < Number(minimumVersion.slice(1))
+      ? minimumVersion : requested;
+    const apiBase = `/services/data/${effectiveVersion}/${api === "tooling" ? "tooling/" : ""}query/`;
     for (;;) {
       const conn = this.connection;
       if (!conn) throw new SalesforceConnectionError("Salesforce connection unavailable.", 503);
