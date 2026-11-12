@@ -4,6 +4,7 @@ import ObjectAccessMatrix from "./components/ObjectAccessMatrix";
 import StackTraceImpact from "./components/StackTraceImpact";
 import SalesforceOrgConnection from "./components/SalesforceOrgConnection";
 import AnalysisLoadingOverlay from "./components/AnalysisLoadingOverlay";
+import ReportOutputSetupModal from "./components/ReportOutputSetupModal";
 
 type Persona = {
   name: string;
@@ -118,6 +119,10 @@ function App() {
   const [apiConnected, setApiConnected] = useState(false);
   const [salesforceConnection, setSalesforceConnection] = useState<"connected" | "connecting" | "unavailable" | "not-configured">("connecting");
   const [lastSoql, setLastSoql] = useState<SoqlAnalysisResult | null>(null);
+  const [reportFolderModalOpen, setReportFolderModalOpen] = useState(false);
+  const [reportFolderExplanation, setReportFolderExplanation] = useState("");
+  const [reportFolderError, setReportFolderError] = useState("");
+  const [choosingReportFolder, setChoosingReportFolder] = useState(false);
   const [lastRunAt, setLastRunAt] = useState<Date | null>(null);
 
   useEffect(() => {
@@ -295,7 +300,7 @@ function App() {
       .slice(0, 20);
   }, [fields, fieldSearch]);
 
-  async function handleCheck() {
+  async function handleCheck(skipReportOutputCheck = false) {
     setError("");
     setResult(null);
 
@@ -324,6 +329,20 @@ function App() {
 
     try {
       let response: Response;
+
+      if (checkType === "soql" && !skipReportOutputCheck) {
+        const configurationResponse = await fetch("/api/report-output/status", { cache: "no-store" });
+        if (!configurationResponse.ok) {
+          throw new Error("Unable to check the report output folder. Ensure the local API is running.");
+        }
+        const configuration: { configured: boolean; message: string } = await configurationResponse.json();
+        if (!configuration.configured) {
+          setReportFolderExplanation(configuration.message);
+          setReportFolderError("");
+          setReportFolderModalOpen(true);
+          return;
+        }
+      }
 
       if (checkType === "soql") {
         response = await fetch(
@@ -366,6 +385,17 @@ function App() {
         response = await fetch(url);
       }
 
+      if (checkType === "soql" && response.status === 409) {
+        const body: { code?: string; error?: string } = await response.json().catch(() => ({}));
+        if (body.code === "REPORT_OUTPUT_NOT_CONFIGURED") {
+          setReportFolderExplanation(body.error || "Choose a folder for Excel and TXT reports.");
+          setReportFolderError("");
+          setReportFolderModalOpen(true);
+          return;
+        }
+        throw new Error(body.error || "Unable to run SOQL analysis.");
+      }
+
       if (response.status === 404) {
         setError(
           checkType === "object"
@@ -406,6 +436,37 @@ function App() {
       );
     } finally {
       setChecking(false);
+    }
+  }
+
+  async function chooseReportFolderAndRun() {
+    if (choosingReportFolder) return;
+    setChoosingReportFolder(true);
+    setReportFolderError("");
+    try {
+      const response = await fetch("/api/report-output/choose", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      const data: { saved?: boolean; cancelled?: boolean; directory?: string; error?: string } =
+        await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data.error || "Unable to open the Windows folder picker.");
+      }
+      if (data.cancelled) {
+        setReportFolderError("No folder was selected. Choose a folder to continue, or cancel this analysis.");
+        return;
+      }
+      if (!data.saved || !data.directory) {
+        throw new Error("The output directory was not saved. Please try again.");
+      }
+      setReportFolderModalOpen(false);
+      await handleCheck(true);
+    } catch (error) {
+      setReportFolderError(error instanceof Error ? error.message : "Unable to configure the report output folder.");
+    } finally {
+      setChoosingReportFolder(false);
     }
   }
 
@@ -866,7 +927,7 @@ function App() {
       </div>
       <div className="form-footer">
         <span>Uses repository metadata · No Salesforce org connection required</span>
-        <button className="primary-button" disabled={checking} type="button" onClick={handleCheck}>
+        <button className="primary-button" disabled={checking} type="button" onClick={() => { void handleCheck(); }}>
           {checking ? (page === "soql" ? "Analysing…" : "Checking…") : (page === "soql" ? "▷  Run SOQL Analysis" : "Check Access")}
         </button>
       </div>
@@ -947,6 +1008,18 @@ function App() {
 
         {page === "reports" && <section className="panel reports-panel"><div className="panel-heading"><div><h2>Latest SOQL analysis reports</h2><p>Files are written by the backend, not downloaded by the browser.</p></div></div>{lastSoql ? <><div className="detail-line"><span>Persona</span><strong>{lastSoql.personaName}</strong></div><div className="detail-line"><span>Report folder</span><strong className="path-text">{lastSoql.outputFolder}</strong></div><div className="detail-line"><span>Findings</span><strong>{lastSoql.summary.totalFindings}</strong></div><button className="secondary-button" onClick={() => navigator.clipboard.writeText(lastSoql.outputFolder)}>Copy folder path</button></> : <div className="empty-reports"><span>▧</span><h3>No reports from this session</h3><p>Run SOQL Security Analysis to generate TXT and Excel reports.</p><button className="primary-button" onClick={() => navigate("soql")}>Run SOQL Analysis</button></div>}</section>}
       </main>
+      {reportFolderModalOpen && (
+        <ReportOutputSetupModal
+          busy={choosingReportFolder}
+          explanation={reportFolderExplanation}
+          error={reportFolderError}
+          onCancel={() => {
+            setReportFolderModalOpen(false);
+            setReportFolderError("");
+          }}
+          onChoose={() => { void chooseReportFolderAndRun(); }}
+        />
+      )}
     </div>
   );
 }

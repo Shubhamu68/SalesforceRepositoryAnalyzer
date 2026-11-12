@@ -1,0 +1,17 @@
+.report-folder-backdrop{position:fixed;inset:0;z-index:9999;background:rgba(9,24,45,.58);display:flex;align-items:center;justify-content:center;padding:18px}
+.report-folder-dialog{width:min(100%,540px);background:#fff;color:#1c2c45;border:1px solid #dce7f6;border-radius:14px;box-shadow:0 24px 80px rgba(6,20,42,.3);padding:27px;outline:0}
+.report-folder-heading{display:flex;align-items:center;gap:14px}
+.report-folder-symbol{background:#e9f2ff;color:#2769df;border-radius:11px;width:48px;height:48px;display:grid;place-items:center;font-size:27px}
+.report-folder-kicker{font-weight:750;letter-spacing:.09em;color:#6886b3;font-size:10px}
+.report-folder-dialog h2{font-size:21px;margin:4px 0 0;letter-spacing:-.025em}
+.report-folder-dialog p{font-size:13px;line-height:1.65;color:#60728d}
+.report-folder-dialog code{font-size:12px;background:#f0f4fa;padding:2px 4px;border-radius:4px}
+.report-folder-hint{padding:10px 12px;border:1px solid #e2e9f4;background:#f7faff;border-radius:7px}
+.report-folder-selection{border:1px dashed #bbcce5;background:#f9fbfe;border-radius:9px;padding:17px;margin:17px 0}
+.report-folder-selection .report-folder-label{font-size:11px;font-weight:750;color:#60728d;display:block;margin-bottom:7px}
+.report-folder-empty{font-size:14px;font-weight:750;color:#263b5c}
+.report-folder-selection p{margin-bottom:0}
+.report-folder-error{font-size:12px;color:#ae2944;background:#fff2f3;border:1px solid #f5bcc6;border-radius:7px;padding:11px 13px;margin-bottom:14px}
+.report-folder-actions{display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap}
+.report-folder-actions button{min-height:43px}
+@media(max-width:540px){.report-folder-dialog{padding:19px}.report-folder-actions{flex-direction:column-reverse}.report-folder-actions button{width:100%;white-space:normal}}

@@ -18,6 +18,8 @@ import { SalesforceOrgConnection } from "../salesforce/SalesforceOrgConnection.j
 import { SalesforcePersonaAccessVerifier } from "../salesforce/SalesforcePersonaAccessVerifier.js";
 import { SalesforceRelationshipMetadataService } from "../salesforce/SalesforceRelationshipMetadataService.js";
 import { createSalesforceRouter } from "./salesforceRoutes.js";
+import { createReportOutputRouter } from "./reportOutputRoutes.js";
+import { ReportOutputConfigurationService } from "../services/ReportOutputConfigurationService.js";
 import { existsSync } from "node:fs";
 
 // Optional local .env file; existing shell environment variables take precedence.
@@ -47,8 +49,8 @@ if (!repositoryPath) {
   );
 }
 
-const outputDirectory =
-  "C:\\Users\\703394232\\Desktop\\SalesforceAnalyzerOutputReports";
+const reportOutputConfiguration = new ReportOutputConfigurationService();
+app.use("/api/report-output", createReportOutputRouter(reportOutputConfiguration));
 
 const paths =
   await scanRepository(repositoryPath);
@@ -110,7 +112,7 @@ const soqlAnalysisService =
   new SoqlAnalysisService(
     repositoryPath,
     soqlSecurityAnalyzer,
-    outputDirectory
+    () => reportOutputConfiguration.requireConfiguredDirectory()
   );
 
 const objectAccessMatrixService = new ObjectAccessMatrixService(
@@ -265,6 +267,15 @@ app.post(
         return;
       }
 
+      const outputStatus = await reportOutputConfiguration.getStatus();
+      if (!outputStatus.configured || !outputStatus.directory) {
+        res.status(409).json({
+          code: "REPORT_OUTPUT_NOT_CONFIGURED",
+          error: outputStatus.message,
+        });
+        return;
+      }
+
       const persona =
         await personaConfigLoader.getPersona(
           personaName
@@ -278,7 +289,7 @@ app.post(
       res.json({
         personaName: result.personaName,
         summary: result.summary,
-        outputFolder: outputDirectory,
+        outputFolder: outputStatus.directory,
       });
     } catch (error) {
       handleApiError(error, res);

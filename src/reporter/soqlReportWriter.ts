@@ -281,8 +281,8 @@ function buildConciseFindings(
   }
 
   // A field may be accessed by system-mode and user-mode queries. The Summary
-  // displays the highest priority finding; References keeps each query's own
-  // grade and explanation so no system-mode reference is falsely marked High.
+  // displays the highest priority finding; retain per-query grades internally
+  // so mixed execution modes are represented accurately in the one-sheet report.
   for (const entry of grouped.values()) {
     const priority = (criticality: string) => criticality === "High" ? 0 : criticality === "Unable to verify" ? 1 : 2;
     const highest = [...entry.references].sort((a, b) => priority(a.criticality) - priority(b.criticality))[0];
@@ -290,7 +290,7 @@ function buildConciseFindings(
     entry.criticality = highest.criticality;
     const isMixed = entry.references.some(ref => ref.criticality !== highest.criticality);
     entry.explanation = highest.explanation + (isMixed
-      ? " Severity differs across SOQL references. The Summary shows the highest; see References for individual query severity."
+      ? " Severity differs across SOQL queries. Highest severity shown; see TXT reports for individual query details."
       : "");
   }
 
@@ -305,7 +305,7 @@ function buildConciseFindings(
 
 function summariseReferenceProperty(values: string[]): string {
   const unique = [...new Set(values)];
-  return unique.length === 1 ? unique[0] : "Mixed (see References)";
+  return unique.length === 1 ? unique[0] : "Mixed";
 }
 
 // --------------------------------------------------
@@ -337,7 +337,7 @@ async function writeSummaryWorkbook(
     );
 
   summarySheet.mergeCells(
-    "A1:K1"
+    "A1:H1"
   );
 
   summarySheet.getCell("A1").value =
@@ -381,8 +381,8 @@ async function writeSummaryWorkbook(
     findings.length;
 
   summarySheet.addRow([]);
-  summarySheet.mergeCells("A5:K5");
-  summarySheet.getCell("A5").value = "High = confirmed missing Read with enforced SOQL access; Low = advisory or org-verified Read. Mixed findings show the highest severity here; see References.";
+  summarySheet.mergeCells("A5:H5");
+  summarySheet.getCell("A5").value = "High = confirmed missing Read with enforced SOQL access; Low = advisory or org-verified Read. Mixed findings show the highest severity; individual query details remain in TXT reports.";
   summarySheet.getCell("A5").font = { italic: true, color: { argb: "FF60748D" }, size: 10 };
 
   const summaryHeader =
@@ -395,9 +395,6 @@ async function writeSummaryWorkbook(
       "Explanation",
       "Runtime Impact",
       "Effective Query Mode",
-      "Apex API Version",
-      "Relationship Path",
-      "Query Level",
     ]);
 
   styleHeader(summaryHeader);
@@ -428,9 +425,6 @@ async function writeSummaryWorkbook(
         finding.explanation,
         summariseReferenceProperty(finding.references.map(ref => ref.runtimeImpact)),
         summariseReferenceProperty(finding.references.map(ref => ref.effectiveMode)),
-        summariseReferenceProperty(finding.references.map(ref => ref.apiVersion?.toString() ?? "Unknown")),
-        summariseReferenceProperty(finding.references.map(ref => ref.relationshipPath ?? finding.object)),
-        summariseReferenceProperty(finding.references.map(ref => String(ref.queryLevel ?? 1))),
       ]);
 
     const apexCell =
@@ -471,9 +465,6 @@ async function writeSummaryWorkbook(
   summarySheet.getColumn(6).width = 64;
   summarySheet.getColumn(7).width = 30;
   summarySheet.getColumn(8).width = 24;
-  summarySheet.getColumn(9).width = 20;
-  summarySheet.getColumn(10).width = 46;
-  summarySheet.getColumn(11).width = 14;
 
   summarySheet.getColumn(4).alignment = {
     wrapText: true,
@@ -481,94 +472,12 @@ async function writeSummaryWorkbook(
   };
 
   // ------------------------------------------------
-  // References sheet
-  // ------------------------------------------------
-
-  const referenceSheet =
-    workbook.addWorksheet(
-      "References"
-    );
-
-  const referenceHeader =
-    referenceSheet.addRow([
-      "Object",
-      "Field",
-      "Apex File",
-      "Line",
-      "Security Mode",
-      "Criticality / Severity",
-      "Explanation",
-      "Effective Query Mode",
-      "Runtime Impact",
-      "Apex API Version",
-      "Relationship Path",
-      "Query Level",
-    ]);
-
-  styleHeader(referenceHeader);
-
-  for (
-    const finding of findings
-  ) {
-    for (
-      const reference
-        of finding.references
-    ) {
-      const row = referenceSheet.addRow([
-        finding.object,
-        finding.field,
-        reference.filePath,
-        reference.lineNumber,
-        reference.securityMode,
-        reference.criticality,
-        reference.explanation,
-        reference.effectiveMode,
-        reference.runtimeImpact,
-        reference.apiVersion ?? "Unknown",
-        reference.relationshipPath ?? finding.object,
-        reference.queryLevel ?? 1,
-      ]);
-      row.getCell(6).font = { bold: true, color: {
-        argb: reference.criticality === "High" ? "FFB42332" :
-          reference.criticality === "Low" ? "FF167349" : "FF916514",
-      } };
-      row.height = Math.min(84, Math.max(30, 15 * Math.ceil(reference.explanation.length / 65)));
-    }
-  }
-
-  referenceSheet.views = [
-    {
-      state: "frozen",
-      ySplit: 1,
-    },
-  ];
-
-  referenceSheet.getColumn(1).width = 28;
-  referenceSheet.getColumn(2).width = 42;
-  referenceSheet.getColumn(3).width = 80;
-  referenceSheet.getColumn(4).width = 10;
-  referenceSheet.getColumn(5).width = 18;
-  referenceSheet.getColumn(6).width = 23;
-  referenceSheet.getColumn(7).width = 64;
-  referenceSheet.getColumn(7).alignment = { wrapText: true, vertical: "top" };
-  referenceSheet.getColumn(8).width = 25;
-  referenceSheet.getColumn(9).width = 28;
-  referenceSheet.getColumn(10).width = 19;
-  referenceSheet.getColumn(11).width = 46;
-  referenceSheet.getColumn(12).width = 14;
-
-  // ------------------------------------------------
   // Auto filter
   // ------------------------------------------------
 
   summarySheet.autoFilter = {
     from: "A6",
-    to: `K${Math.max(6, summarySheet.rowCount)}`,
-  };
-
-  referenceSheet.autoFilter = {
-    from: "A1",
-    to: `L${Math.max(1, referenceSheet.rowCount)}`,
+    to: `H${Math.max(6, summarySheet.rowCount)}`,
   };
 
   await workbook.xlsx.writeFile(

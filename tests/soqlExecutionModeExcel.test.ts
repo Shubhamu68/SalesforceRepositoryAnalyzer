@@ -12,7 +12,7 @@ const shared = {
   object: 'ApexEmailNotification', field: '(Object Read Missing)', query: 'SELECT Id FROM ApexEmailNotification',
   withUserMode: false, reason: 'Salesforce confirmed Read access is missing',
 } as const;
-test('Excel summary separates one permission gap from mixed runtime modes', async () => {
+test('Excel summary has one sheet and 8 columns, retaining mixed-mode risk warnings', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'sf-mode-excel-'));
   try {
     const findings: SoqlSecurityFinding[] = [
@@ -30,18 +30,26 @@ test('Excel summary separates one permission gap from mixed runtime modes', asyn
     assert.equal(summary.getCell('E6').value, 'Criticality / Severity');
     assert.equal(summary.getCell('G6').value, 'Runtime Impact');
     assert.equal(summary.getCell('H6').value, 'Effective Query Mode');
-    assert.equal(summary.getCell('I6').value, 'Apex API Version');
+    assert.deepEqual(workbook.worksheets.map(sheet => sheet.name), ['Summary']);
+    assert.equal(summary.columnCount, 8);
+    assert.equal(summary.getCell('I6').value, null);
+    assert.equal(summary.getCell('J6').value, null);
+    assert.equal(summary.getCell('K6').value, null);
     assert.equal(summary.getCell('E7').value, 'High');
-    assert.equal(summary.getCell('G7').value, 'Mixed (see References)');
-    assert.match(String(summary.getCell('F7').value), /Severity differs across SOQL references/);
-    const refs = workbook.getWorksheet('References')!;
-    assert.equal(refs.getCell('I1').value, 'Runtime Impact');
-    assert.equal(refs.getCell('F2').value, 'Low');
-    assert.equal(refs.getCell('F3').value, 'High');
-    assert.match(String(refs.getCell('G2').value), /system-mode query/);
-    assert.match(String(refs.getCell('G3').value), /user-mode enforcement/);
-    assert.equal(refs.getCell('I2').value, 'Not enforced by query');
-    assert.equal(refs.getCell('I3').value, 'Potential access failure');
-    assert.equal(refs.getCell('J3').value, 67);
+    assert.equal(summary.getCell('C7').value, 2);
+    assert.equal(summary.getCell('G7').value, 'Mixed');
+    assert.equal(summary.getCell('H7').value, 'Mixed');
+    assert.match(String(summary.getCell('F7').value), /Severity differs across SOQL queries/);
+    assert.doesNotMatch(String(summary.getCell('F7').value), /see References/i);
+    // Per-query runtime modes and severity remain available in detailed TXT reports.
+    const { readFile } = await import('node:fs/promises');
+    const [errorTxt, otherTxt] = await Promise.all([
+      readFile(paths.errorReportPath, 'utf8'), readFile(paths.otherReportPath, 'utf8'),
+    ]);
+    assert.match(errorTxt, /Severity: High/);
+    assert.match(errorTxt, /Apex API Version: 67/);
+    assert.match(errorTxt, /Runtime Impact: Potential access failure/);
+    assert.match(otherTxt, /Severity: Low/);
+    assert.match(otherTxt, /Runtime Impact: Not enforced by query/);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
