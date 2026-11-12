@@ -71,7 +71,7 @@ test("metadata Describe failure remains unresolved and produces a warning, never
   assert.equal(collectQueryFields(q, graph).unresolvedEntries[0].kind, "RELATIONSHIP");
 });
 
-test("Excel Summary and References retain nested paths, levels, and original severity", async () => {
+test("Excel keeps one eight-column Summary while nested details remain in TXT", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "sf-nested-report-"));
   try {
     const findings: SoqlSecurityFinding[] = [
@@ -97,17 +97,29 @@ test("Excel Summary and References retain nested paths, levels, and original sev
     const output = await writeSoqlReport(tmp, "OTC", 2, findings);
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.readFile(output.summaryReportPath);
+    assert.deepEqual(workbook.worksheets.map(sheet => sheet.name), ["Summary"]);
     const summary = workbook.getWorksheet("Summary")!;
-    const refs = workbook.getWorksheet("References")!;
-    const header = (sheet: ExcelJS.Worksheet, col: number, row: number) => sheet.getRow(row).getCell(col).value;
-    assert.equal(header(summary, 10, 6), "Relationship Path");
-    assert.equal(header(summary, 11, 6), "Query Level");
-    assert.equal(header(refs, 11, 1), "Relationship Path");
-    assert.equal(header(refs, 12, 1), "Query Level");
-    assert.equal(summary.getRow(7).getCell(5).value, "High");
-    assert.equal(summary.getRow(7).getCell(10).value, "Account -> Contacts");
-    assert.equal(refs.getRow(2).getCell(4).value, 12);
-    assert.equal(refs.getRow(3).getCell(4).value, 30);
-    assert.deepEqual([refs.getRow(2).getCell(6).value, refs.getRow(3).getCell(6).value], ["High", "Low"]);
+    assert.equal(summary.columnCount, 8);
+    assert.equal(summary.getCell("H6").value, "Effective Query Mode");
+    assert.equal(summary.getCell("I6").value, null);
+    assert.equal(summary.getCell("J6").value, null);
+    assert.equal(summary.getCell("K6").value, null);
+    assert.equal(summary.getCell("E7").value, "High");
+    assert.equal(summary.getCell("C7").value, 2);
+    assert.equal(summary.getCell("G7").value, "Mixed");
+    assert.equal(summary.getCell("H7").value, "Mixed");
+    assert.match(String(summary.getCell("F7").value), /Severity differs across SOQL queries/);
+    const lines = summary.getCell("D7").value;
+    assert.ok(lines && typeof lines === "object" && "richText" in lines);
+    assert.match((lines.richText as Array<{ text: string }>).map(x => x.text).join(""), /Line Number 12/);
+    assert.match((lines.richText as Array<{ text: string }>).map(x => x.text).join(""), /Line Number 30/);
+    // Nested relationship metadata is still preserved in the detailed TXT report.
+    const [errorText, otherText] = await Promise.all([
+      import("node:fs/promises").then(fs => fs.readFile(output.errorReportPath, "utf8")),
+      import("node:fs/promises").then(fs => fs.readFile(output.otherReportPath, "utf8")),
+    ]);
+    assert.match(errorText, /Relationship Path: Account -> Contacts/);
+    assert.match(errorText, /Query Level: 2/);
+    assert.match(otherText, /Relationship Path: Account -> Contacts/);
   } finally { await rm(tmp, { recursive: true, force: true }); }
 });
