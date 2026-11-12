@@ -166,12 +166,15 @@ test("Excel contains HIGH, LOW and Unable to verify with explanation columns", a
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.readFile(report.summaryReportPath);
     const summary = workbook.getWorksheet("Summary")!;
-    const refs = workbook.getWorksheet("References")!;
+    assert.deepEqual(workbook.worksheets.map(sheet => sheet.name), ["Summary"]);
+    assert.equal(summary.columnCount, 8);
     assert.equal(summary.getCell("E6").value, "Criticality / Severity");
     assert.equal(summary.getCell("F6").value, "Explanation");
     assert.deepEqual([7, 8, 9].map((row) => summary.getCell(`E${row}`).value),
       ["High", "Unable to verify", "Low"]);
-    assert.equal(refs.getCell("F1").value, "Criticality / Severity");
-    assert.equal(refs.getCell("G1").value, "Explanation");
+    assert.equal(summary.getCell("H6").value, "Effective Query Mode");
+    assert.deepEqual([7, 8, 9].map(row => summary.getCell(`F${row}`).value),
+      ["Explanation for High", "Explanation for Unable to verify", "Explanation for Low"]);
+    assert.equal(summary.getCell("I6").value, null);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
