@@ -5,6 +5,7 @@ on:
       - feature/nested-soql-relationship-resolution
       - fix/configurable-report-output
       - fix/excel-only-soql-reports
+      - feature/repository-setup-and-org-credential-guards
   pull_request:
   workflow_dispatch:
 permissions:

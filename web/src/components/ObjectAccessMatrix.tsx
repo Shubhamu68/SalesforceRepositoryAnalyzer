@@ -57,6 +57,7 @@ type MatrixResult = {
 type Props = {
   objects: string[];
   loadingObjects: boolean;
+  beforeAnalysis?: () => Promise<boolean>;
 };
 
 function AccessIndicator({ granted, evidence }: { granted: boolean; evidence?: ReadEvidence }) {
@@ -129,7 +130,7 @@ function PermissionDetail({
   );
 }
 
-export default function ObjectAccessMatrix({ objects, loadingObjects }: Props) {
+export default function ObjectAccessMatrix({ objects, loadingObjects, beforeAnalysis }: Props) {
   const [objectName, setObjectName] = useState("");
   const [data, setData] = useState<MatrixResult | null>(null);
   const [loading, setLoading] = useState(false);
@@ -159,6 +160,7 @@ export default function ObjectAccessMatrix({ objects, loadingObjects }: Props) {
     setPersonaSearch("");
 
     try {
+      if (beforeAnalysis && !(await beforeAnalysis())) return;
       const response = await fetch(
         `/api/objects/${encodeURIComponent(name)}/persona-access`
       );

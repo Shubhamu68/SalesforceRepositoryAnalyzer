@@ -1,4 +1,4 @@
-import { Router, type Request } from "express";
+import { Router } from "express";
 import {
   ReportOutputConfigurationError,
   ReportOutputConfigurationService,
@@ -10,9 +10,7 @@ export function createReportOutputRouter(config: ReportOutputConfigurationServic
 
   // Reject DNS-rebinding hosts and cross-site requests to local configuration.
   router.use((req, res, next) => {
-    const host = req.get("host") ?? "";
-    const origin = req.get("origin");
-    if (!isLocalHost(host) || (origin !== undefined && !isLocalOrigin(origin))) {
+    if (!isLocalConfigurationRequest(req.get("host"), req.get("origin"))) {
       res.status(403).json({ error: "Report output configuration is accessible from localhost only." });
       return;
     }
@@ -52,4 +50,8 @@ function isLocalOrigin(value: string): boolean {
   } catch {
     return false;
   }
+}
+
+export function isLocalConfigurationRequest(host: string | undefined, origin: string | undefined): boolean {
+  return isLocalHost(host ?? "") && (origin === undefined || isLocalOrigin(origin));
 }

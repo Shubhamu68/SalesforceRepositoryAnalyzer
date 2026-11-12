@@ -254,7 +254,9 @@ const StackResults = memo(function StackResults({ result }: { result: Result }) 
   </>;
 });
 
-export default function StackTraceImpact() {
+export default function StackTraceImpact({ beforeAnalysis }: {
+  beforeAnalysis?: () => Promise<{ acknowledgeRepoOnly: boolean } | null>;
+}) {
   const [trace, setTrace] = useState("");
   const [result, setResult] = useState<Result | null>(null);
   const [loading, setLoading] = useState(false);
@@ -265,9 +267,11 @@ export default function StackTraceImpact() {
     if (!trace.trim()) { setError("Paste a Salesforce Apex stack trace first."); return; }
     setLoading(true); setError(""); setResult(null);
     try {
+      const authorization = beforeAnalysis ? await beforeAnalysis() : { acknowledgeRepoOnly: false };
+      if (!authorization) return;
       const response = await fetch("/api/stack-trace-impact", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ stackTrace: trace }),
+        body: JSON.stringify({ stackTrace: trace, acknowledgeRepoOnly: authorization.acknowledgeRepoOnly }),
       });
       const body: Result | { error?: string } = await response.json();
       if (!response.ok) throw new Error("error" in body ? body.error ?? "Analysis failed." : "Analysis failed.");

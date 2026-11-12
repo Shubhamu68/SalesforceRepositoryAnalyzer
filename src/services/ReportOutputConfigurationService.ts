@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { access, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { access, rm, stat, writeFile } from "node:fs/promises";
+import { saveLocalEnvEntry } from "./LocalEnvFileService.js";
 import path from "node:path";
 import { chooseWindowsReportFolder } from "./windowsReportFolderPicker.js";
 
@@ -129,48 +130,12 @@ export class ReportOutputConfigurationService {
   }
 
   private async persistEnvEntry(directory: string): Promise<void> {
-    let previous = "";
-    let fileMode = 0o600;
     try {
-      previous = await readFile(this.envFilePath, "utf8");
-      fileMode = (await stat(this.envFilePath)).mode & 0o777;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-        throw new ReportOutputConfigurationError("Unable to read the project's .env file.");
-      }
-    }
-    const newline = previous.includes("\r\n") ? "\r\n" : "\n";
-    // Forward slashes avoid Windows .env double-quote/backslash escaping ambiguity.
-    // Quoting preserves spaces, #, and other valid Windows folder name characters.
-    const entry = REPORT_OUTPUT_ENV_KEY + "=" + JSON.stringify(directory.replaceAll("\\", "/"));
-    const matchingLine = /^\s*(?:export\s+)?SALESFORCE_ANALYZER_OUTPUT_DIRECTORY\s*=/;
-    const originalLines = previous ? previous.split(/\r?\n/) : [];
-    const replacement: string[] = [];
-    let replaced = false;
-    for (const line of originalLines) {
-      if (matchingLine.test(line)) {
-        if (!replaced) replacement.push(entry);
-        replaced = true; // Deduplicate active entries, leave commented lines alone.
-      } else {
-        replacement.push(line);
-      }
-    }
-    if (!replaced) {
-      // Preserve all existing lines, including trailing newlines/comments.
-      if (replacement.length && replacement[replacement.length - 1] !== "") replacement.push("");
-      replacement.push(entry);
-    }
-    const content = replacement.join(newline).replace(new RegExp(newline === "\r\n" ? "(?:\\r\\n)*$" : "\\n*$"), "") + newline;
-    const tempFile = this.envFilePath + ".tmp-" + randomUUID();
-    try {
-      await writeFile(tempFile, content, { flag: "wx", mode: fileMode });
-      await rename(tempFile, this.envFilePath);
+      await saveLocalEnvEntry(this.envFilePath, REPORT_OUTPUT_ENV_KEY, directory);
     } catch {
       throw new ReportOutputConfigurationError(
         "Unable to save the report directory in the project .env file. Check folder permissions.",
       );
-    } finally {
-      await rm(tempFile, { force: true }).catch(() => undefined);
     }
   }
 }
