@@ -6,6 +6,7 @@ on:
       - fix/configurable-report-output
       - fix/excel-only-soql-reports
       - feature/repository-setup-and-org-credential-guards
+      - feature/org-fallback-all-access-permissions
   pull_request:
   workflow_dispatch:
 permissions:
