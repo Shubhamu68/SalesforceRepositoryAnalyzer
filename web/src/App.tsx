@@ -1026,7 +1026,7 @@ function App() {
         )}
       </div>
       <div className="form-footer">
-        <span>Uses repository metadata · No Salesforce org connection required</span>
+        <span>Repository-first analysis · Salesforce org verifies missing grants when connected</span>
         <button className="primary-button" disabled={checking} type="button" onClick={() => { void handleCheck(); }}>
           {checking ? (page === "soql" ? "Analysing…" : "Checking…") : (page === "soql" ? "▷  Run SOQL Analysis" : "Check Access")}
         </button>
