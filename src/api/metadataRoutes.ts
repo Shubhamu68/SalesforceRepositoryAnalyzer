@@ -3,7 +3,7 @@ import { readdir } from "node:fs/promises";
 import path from "node:path";
 
 export function createMetadataRouter(
-  defaultPath: string
+  defaultPath: string | (() => Promise<string>)
 ) {
   const router = Router();
 
@@ -14,7 +14,7 @@ export function createMetadataRouter(
   router.get("/objects", async (_req, res) => {
     try {
       const objectsPath = path.join(
-        defaultPath,
+        typeof defaultPath === "string" ? defaultPath : await defaultPath(),
         "objects"
       );
 
@@ -53,7 +53,7 @@ export function createMetadataRouter(
           req.params.objectName;
 
         const fieldsPath = path.join(
-          defaultPath,
+          typeof defaultPath === "string" ? defaultPath : await defaultPath(),
           "objects",
           objectName,
           "fields"

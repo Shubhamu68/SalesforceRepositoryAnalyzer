@@ -43,7 +43,7 @@ The backend still reads `SALESFORCE_ANALYZER_OUTPUT_DIRECTORY` from an existing 
 
 The interactive CLI (`npm run analyze`) has no graphical dialog; it uses the configured path or defaults to `./reports`. The UI/API workflow **does not** fall back silently: it requires folder configuration to be valid.
 
-`SALESFORCE_REPOSITORY_PATH` remains a separate, required startup setting. Selecting the report output folder does not configure the Salesforce source repository.
+`SALESFORCE_REPOSITORY_PATH` is a separate repository setting configured through a first-launch repository picker. The API no longer requires it at startup.
 
 ## Validation
 

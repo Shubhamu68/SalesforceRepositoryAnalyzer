@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
 import ObjectAccessMatrix from "./components/ObjectAccessMatrix";
 import StackTraceImpact from "./components/StackTraceImpact";
 import SalesforceOrgConnection from "./components/SalesforceOrgConnection";
 import AnalysisLoadingOverlay from "./components/AnalysisLoadingOverlay";
 import ReportOutputSetupModal from "./components/ReportOutputSetupModal";
+import RepositorySetupModal from "./components/RepositorySetupModal";
+import OrgAnalysisWarningModal, { type AnalysisWarning } from "./components/OrgAnalysisWarningModal";
 
 type Persona = {
   name: string;
@@ -124,6 +126,15 @@ function App() {
   const [reportFolderError, setReportFolderError] = useState("");
   const [choosingReportFolder, setChoosingReportFolder] = useState(false);
   const [lastRunAt, setLastRunAt] = useState<Date | null>(null);
+  const [repoReady, setRepoReady] = useState(false);
+  const [repoRevision, setRepoRevision] = useState(0);
+  const [repoModalOpen, setRepoModalOpen] = useState(false);
+  const [repoError, setRepoError] = useState("");
+  const [repoCurrentPath, setRepoCurrentPath] = useState<string | null>(null);
+  const [choosingRepo, setChoosingRepo] = useState(false);
+  const [orgWarning, setOrgWarning] = useState<AnalysisWarning | null>(null);
+  const orgWarningResolver = useRef<((confirmed: boolean) => void) | null>(null);
+
 
   useEffect(() => {
     fetch("/api/health")
@@ -154,6 +165,117 @@ function App() {
     const interval = window.setInterval(() => { void refreshSalesforceConnection(); }, 5000);
     return () => { active = false; window.clearInterval(interval); };
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    void fetch("/api/repository/status", { cache: "no-store" }).then(async response => {
+      if (!response.ok) throw new Error("Unable to check Salesforce repository configuration.");
+      return response.json() as Promise<{ configured: boolean; message: string; directory: string | null; repositoryName: string | null }>;
+    }).then(status => {
+      if (!active) return;
+      setRepoReady(status.configured);
+      setRepoModalOpen(!status.configured);
+      setRepoCurrentPath(status.directory);
+      setRepoError(status.configured ? "" : status.message);
+      if (status.configured) setRepositoryName(status.repositoryName || "Configured repository");
+    }).catch(cause => {
+      if (!active) return;
+      setRepoModalOpen(true);
+      setRepoError(cause instanceof Error ? cause.message : "Unable to contact the Analyzer API.");
+    });
+    return () => { active = false; };
+  }, []);
+
+  async function ensureRepositoryReady(): Promise<boolean> {
+    try {
+      const response = await fetch("/api/repository/status", { cache: "no-store" });
+      if (!response.ok) throw new Error("Cannot check repository configuration.");
+      const status: { configured: boolean; message: string; directory: string | null } = await response.json();
+      if (!status.configured) {
+        setRepoReady(false);
+        setRepoCurrentPath(status.directory);
+        setRepoError(status.message);
+        setRepoModalOpen(true);
+        return false;
+      }
+      return true;
+    } catch (cause) {
+      setRepoError(cause instanceof Error ? cause.message : "Repository validation failed.");
+      setRepoModalOpen(true);
+      return false;
+    }
+  }
+
+  async function chooseRepository(): Promise<void> {
+    if (choosingRepo) return;
+    setChoosingRepo(true);
+    setRepoError("");
+    try {
+      const response = await fetch("/api/repository/choose", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+      });
+      const result: { saved?: boolean; cancelled?: boolean; directory?: string; repositoryName?: string; error?: string } =
+        await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.error || "Invalid Salesforce repository folder.");
+      if (result.cancelled) {
+        setRepoError("No repository selected. Choose a valid Salesforce repository to continue.");
+        return;
+      }
+      if (!result.saved || !result.directory) throw new Error("Could not save Salesforce repository selection.");
+      setRepoReady(true);
+      setRepoCurrentPath(result.directory);
+      setRepositoryName(result.repositoryName || "Configured repository");
+      setRepoModalOpen(false);
+      setRepoRevision(value => value + 1);
+      setObjects([]);
+      setFields([]);
+      setObjectName("");
+      setFieldName("");
+      setResult(null);
+      setLastSoql(null);
+    } catch (cause) {
+      setRepoError(cause instanceof Error ? cause.message : "Unable to configure the Salesforce repository.");
+    } finally { setChoosingRepo(false); }
+  }
+
+  async function preflightOrgVerification(): Promise<{ acknowledgeRepoOnly: boolean } | null> {
+    try {
+      const response = await fetch("/api/analysis/preflight", { cache: "no-store" });
+      const payload: { mode?: string; warning?: string; error?: string; missing?: string[] } =
+        await response.json().catch(() => ({}));
+      if (!response.ok) {
+        setOrgWarning({
+          kind: "ERROR", title: "Invalid Salesforce Credentials",
+          message: payload.error || "Salesforce credentials are invalid or the org connection is unavailable. Correct the .env values and retry.",
+        });
+        return null;
+      }
+      if (payload.mode === "REPOSITORY_ONLY") {
+        const confirmed = await new Promise<boolean>(resolve => {
+          orgWarningResolver.current = resolve;
+          setOrgWarning({
+            kind: "WARNING", title: "Salesforce Credentials Missing",
+            message: payload.warning || "Salesforce Client Credentials are missing. Continue with repository-only checks?",
+          });
+        });
+        return confirmed ? { acknowledgeRepoOnly: true } : null;
+      }
+      return { acknowledgeRepoOnly: false };
+    } catch (cause) {
+      setOrgWarning({
+        kind: "ERROR", title: "Salesforce Connection Check Failed",
+        message: cause instanceof Error ? cause.message : "Unable to validate Salesforce connection.",
+      });
+      return null;
+    }
+  }
+
+  function dismissOrgWarning(confirmed: boolean): void {
+    const resolver = orgWarningResolver.current;
+    orgWarningResolver.current = null;
+    setOrgWarning(null);
+    resolver?.(confirmed);
+  }
 
   function navigate(next: Page) {
     setPage(next);
@@ -195,8 +317,8 @@ function App() {
       }
     }
 
-    loadPersonas();
-  }, []);
+    if (repoReady) loadPersonas();
+  }, [repoReady, repoRevision]);
 
   useEffect(() => {
     async function loadObjects() {
@@ -225,11 +347,11 @@ function App() {
       }
     }
 
-    loadObjects();
-  }, []);
+    if (repoReady) loadObjects();
+  }, [repoReady, repoRevision]);
 
   useEffect(() => {
-  if (!objectName) {
+  if (!repoReady || !objectName) {
     return;
   }
 
@@ -268,7 +390,7 @@ function App() {
   }
 
   loadFields();
-}, [objectName]);
+}, [objectName, repoReady, repoRevision]);
 
   const filteredObjects = useMemo(() => {
     const search =
@@ -328,6 +450,7 @@ function App() {
     setChecking(true);
 
     try {
+      if (!(await ensureRepositoryReady())) return;
       let response: Response;
 
       if (checkType === "soql" && !skipReportOutputCheck) {
@@ -345,6 +468,8 @@ function App() {
       }
 
       if (checkType === "soql") {
+        const preflight = await preflightOrgVerification();
+        if (!preflight) return;
         response = await fetch(
           "/api/soql-analysis",
           {
@@ -356,6 +481,7 @@ function App() {
             body: JSON.stringify({
               personaName:
                 selectedPersona,
+              acknowledgeRepoOnly: preflight.acknowledgeRepoOnly,
             }),
           }
         );
@@ -1000,14 +1126,32 @@ function App() {
           </>
         )}
 
-        {page === "matrix" && <ObjectAccessMatrix objects={objects} loadingObjects={loadingObjects} />}
-        {page === "stack" && <StackTraceImpact />}
+        {page === "matrix" && <ObjectAccessMatrix objects={objects} loadingObjects={loadingObjects} beforeAnalysis={ensureRepositoryReady} />}
+        {page === "stack" && <StackTraceImpact beforeAnalysis={async () => {
+          if (!(await ensureRepositoryReady())) return null;
+          return preflightOrgVerification();
+        }} />}
         {page === "salesforce" && <SalesforceOrgConnection />}
 
         {showSoqlOverlay && <AnalysisLoadingOverlay title="Analysis in Progress" description="Scanning Apex SOQL queries and preparing your security reports..." hint="This may take 20–30 seconds." />}
 
         {page === "reports" && <section className="panel reports-panel"><div className="panel-heading"><div><h2>Latest SOQL analysis reports</h2><p>Files are written by the backend, not downloaded by the browser.</p></div></div>{lastSoql ? <><div className="detail-line"><span>Persona</span><strong>{lastSoql.personaName}</strong></div><div className="detail-line"><span>Report folder</span><strong className="path-text">{lastSoql.outputFolder}</strong></div><div className="detail-line"><span>Findings</span><strong>{lastSoql.summary.totalFindings}</strong></div><button className="secondary-button" onClick={() => navigator.clipboard.writeText(lastSoql.outputFolder)}>Copy folder path</button></> : <div className="empty-reports"><span>▧</span><h3>No reports from this session</h3><p>Run SOQL Security Analysis to generate an Excel workbook.</p><button className="primary-button" onClick={() => navigate("soql")}>Run SOQL Analysis</button></div>}</section>}
       </main>
+      {repoModalOpen && (
+        <RepositorySetupModal
+          busy={choosingRepo}
+          error={repoError}
+          currentPath={repoCurrentPath}
+          onChoose={() => { void chooseRepository(); }}
+        />
+      )}
+      {orgWarning && (
+        <OrgAnalysisWarningModal
+          warning={orgWarning}
+          onCancel={() => dismissOrgWarning(false)}
+          onContinue={() => dismissOrgWarning(true)}
+        />
+      )}
       {reportFolderModalOpen && (
         <ReportOutputSetupModal
           busy={choosingReportFolder}

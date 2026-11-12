@@ -18,7 +18,10 @@ export const WINDOWS_FOLDER_PICKER_TIMEOUT_MS = 10 * 60 * 1000;
  * Windows may restrict stealing keyboard focus, but the topmost owned dialog
  * remains visible to the user.
  */
-export function buildWindowsFolderPickerScript(): string {
+export function buildWindowsFolderPickerScript(kind: "reports" | "repository" = "reports"): string {
+  const description = kind === "repository"
+    ? "Select the Salesforce source repository root (force-app/main/default)"
+    : "Select a folder for Salesforce Analyzer Excel reports";
   return [
     "$ErrorActionPreference = 'Stop'",
     "Add-Type -AssemblyName System.Windows.Forms",
@@ -31,13 +34,13 @@ export function buildWindowsFolderPickerScript(): string {
     "$owner.Opacity = 0",
     "$owner.TopMost = $true",
     "$dialog = New-Object System.Windows.Forms.FolderBrowserDialog",
-    "$dialog.Description = 'Select a folder for Salesforce Analyzer Excel reports'",
+    "$dialog.Description = '" + description + "'",
     "$dialog.ShowNewFolderButton = $true",
     "try { $owner.Show(); $owner.Activate(); $owner.BringToFront(); if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::WriteLine($dialog.SelectedPath) } } finally { $dialog.Dispose(); $owner.Close(); $owner.Dispose() }",
   ].join("; ");
 }
 
-export async function chooseWindowsReportFolder(): Promise<string | null> {
+export async function chooseWindowsFolder(kind: "reports" | "repository"): Promise<string | null> {
   if (process.platform !== "win32") {
     throw new ReportOutputConfigurationError(
       "Native folder selection is currently available only when the Analyzer API runs on a Windows desktop.",
@@ -48,7 +51,7 @@ export async function chooseWindowsReportFolder(): Promise<string | null> {
     // execFile does NOT use a command shell; the script contains no user input.
     // Hide only PowerShell's console window, not the owned Windows Forms dialog.
     const { stdout } = await execFileAsync("powershell.exe",
-      ["-NoProfile", "-STA", "-Command", buildWindowsFolderPickerScript()],
+      ["-NoProfile", "-STA", "-Command", buildWindowsFolderPickerScript(kind)],
       {
         encoding: "utf8",
         windowsHide: true,
@@ -69,4 +72,13 @@ export async function chooseWindowsReportFolder(): Promise<string | null> {
       503,
     );
   }
+}
+
+/** Preserve existing report-folder callers and regression tests. */
+export function chooseWindowsReportFolder(): Promise<string | null> {
+  return chooseWindowsFolder("reports");
+}
+
+export function chooseWindowsRepositoryFolder(): Promise<string | null> {
+  return chooseWindowsFolder("repository");
 }
