@@ -27,7 +27,7 @@ SALESFORCE_ANALYZER_OUTPUT_DIRECTORY="C:/Users/Example/Desktop/SalesforceAnalyze
 - Backslashes in Windows paths are normalized to forward slashes in the saved value; Windows accepts these paths.
 - The selected directory is reflected in `process.env` immediately, because Node does not automatically reread `.env` after startup.
 
-This path is a **folder**, not an Excel filename. Excel and TXT files are generated in the chosen directory as before.
+This path is a **folder**, not an Excel filename. Only one Excel workbook is generated per SOQL analysis in the chosen directory.
 
 ## Why not the browser's file selector?
 
@@ -47,4 +47,4 @@ The interactive CLI (`npm run analyze`) has no graphical dialog; it uses the con
 
 ## Validation
 
-The new Node test suite covers: missing setting, .env creation, preservation of existing secrets/comments/CRLF, replacing duplicate or invalid entries, cancellation, invalid and non-writable selection, concurrent picker requests, immediate real Excel/TXT generation, localhost HTTP routes and origin restriction, and non-Windows error handling.
+The new Node test suite covers: missing setting, .env creation, preservation of existing secrets/comments/CRLF, replacing duplicate or invalid entries, cancellation, invalid and non-writable selection, concurrent picker requests, immediate Excel generation, localhost HTTP routes and origin restriction, and non-Windows error handling.

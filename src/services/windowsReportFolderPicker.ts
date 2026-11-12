@@ -31,7 +31,7 @@ export function buildWindowsFolderPickerScript(): string {
     "$owner.Opacity = 0",
     "$owner.TopMost = $true",
     "$dialog = New-Object System.Windows.Forms.FolderBrowserDialog",
-    "$dialog.Description = 'Select a folder for Salesforce Analyzer Excel and TXT reports'",
+    "$dialog.Description = 'Select a folder for Salesforce Analyzer Excel reports'",
     "$dialog.ShowNewFolderButton = $true",
     "try { $owner.Show(); $owner.Activate(); $owner.BringToFront(); if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::WriteLine($dialog.SelectedPath) } } finally { $dialog.Dispose(); $owner.Close(); $owner.Dispose() }",
   ].join("; ");

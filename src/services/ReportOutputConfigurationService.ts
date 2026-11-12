@@ -55,7 +55,7 @@ export class ReportOutputConfigurationService {
     const directory = this.configuredDirectory();
     if (!directory) return {
       configured: false, directory: null, reason: "MISSING",
-      message: "Choose a folder to save Excel and TXT reports.",
+      message: "Choose a folder to save the Excel report.",
     };
     try {
       const details = await stat(directory);

@@ -17,8 +17,6 @@ export interface SoqlAnalysisSummary {
 }
 
 export interface SoqlAnalysisReports {
-  errorReportPath: string;
-  otherReportPath: string;
   summaryReportPath: string;
 }
 

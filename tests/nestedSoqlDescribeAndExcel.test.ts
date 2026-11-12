@@ -71,7 +71,7 @@ test("metadata Describe failure remains unresolved and produces a warning, never
   assert.equal(collectQueryFields(q, graph).unresolvedEntries[0].kind, "RELATIONSHIP");
 });
 
-test("Excel keeps one eight-column Summary while nested details remain in TXT", async () => {
+test("Excel retains one eight-column Summary with nested Apex references", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "sf-nested-report-"));
   try {
     const findings: SoqlSecurityFinding[] = [
@@ -113,13 +113,8 @@ test("Excel keeps one eight-column Summary while nested details remain in TXT", 
     assert.ok(lines && typeof lines === "object" && "richText" in lines);
     assert.match((lines.richText as Array<{ text: string }>).map(x => x.text).join(""), /Line Number 12/);
     assert.match((lines.richText as Array<{ text: string }>).map(x => x.text).join(""), /Line Number 30/);
-    // Nested relationship metadata is still preserved in the detailed TXT report.
-    const [errorText, otherText] = await Promise.all([
-      import("node:fs/promises").then(fs => fs.readFile(output.errorReportPath, "utf8")),
-      import("node:fs/promises").then(fs => fs.readFile(output.otherReportPath, "utf8")),
-    ]);
-    assert.match(errorText, /Relationship Path: Account -> Contacts/);
-    assert.match(errorText, /Query Level: 2/);
-    assert.match(otherText, /Relationship Path: Account -> Contacts/);
+    assert.deepEqual(Object.keys(output), ["summaryReportPath"]);
+    const { readdir } = await import("node:fs/promises");
+    assert.deepEqual(await readdir(tmp), [path.basename(output.summaryReportPath)]);
   } finally { await rm(tmp, { recursive: true, force: true }); }
 });

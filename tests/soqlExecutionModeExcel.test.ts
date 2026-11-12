@@ -41,15 +41,8 @@ test('Excel summary has one sheet and 8 columns, retaining mixed-mode risk warni
     assert.equal(summary.getCell('H7').value, 'Mixed');
     assert.match(String(summary.getCell('F7').value), /Severity differs across SOQL queries/);
     assert.doesNotMatch(String(summary.getCell('F7').value), /see References/i);
-    // Per-query runtime modes and severity remain available in detailed TXT reports.
-    const { readFile } = await import('node:fs/promises');
-    const [errorTxt, otherTxt] = await Promise.all([
-      readFile(paths.errorReportPath, 'utf8'), readFile(paths.otherReportPath, 'utf8'),
-    ]);
-    assert.match(errorTxt, /Severity: High/);
-    assert.match(errorTxt, /Apex API Version: 67/);
-    assert.match(errorTxt, /Runtime Impact: Potential access failure/);
-    assert.match(otherTxt, /Severity: Low/);
-    assert.match(otherTxt, /Runtime Impact: Not enforced by query/);
+    assert.deepEqual(Object.keys(paths), ['summaryReportPath']);
+    const { readdir } = await import('node:fs/promises');
+    assert.deepEqual(await readdir(dir), [path.basename(paths.summaryReportPath)]);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
