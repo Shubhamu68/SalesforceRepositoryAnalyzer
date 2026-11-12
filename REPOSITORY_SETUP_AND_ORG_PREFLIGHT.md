@@ -37,6 +37,19 @@ The API centrally gates Object/Field Access, Object Access Matrix, SOQL Security
 Stack Trace, and repository metadata lookups. No analysis starts with an invalid
 repository, even when called directly outside the UI.
 
+### Source of configuration
+
+For the **interactive local API**, the `.env` entry is the source of truth for the
+Salesforce repository. The app deliberately does not accept an inherited
+`SALESFORCE_REPOSITORY_PATH` as a substitute for a missing `.env` entry.
+This ensures deleting `.env` or removing its repository key genuinely triggers
+the setup prompt, even if PowerShell or Windows has an older environment variable.
+
+The repository and API indicators are independent and shown **only in the
+top-right header**. A healthy Express API never implies a configured repository.
+The repository status is refreshed periodically while the app is open. CLI
+analysis retains its existing environment-based configuration behavior.
+
 ## Salesforce OAuth preflight (SOQL and Stack Trace only)
 
 The browser and API check the Salesforce Client Credentials before these two

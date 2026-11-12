@@ -151,6 +151,7 @@ test("externally removed required directory invalidates previously configured pa
   const f = await fixture();
   try {
     f.environment[REPOSITORY_ENV_KEY] = f.valid;
+    await writeFile(f.envFile, REPOSITORY_ENV_KEY + "=" + JSON.stringify(f.valid.replaceAll("\\", "/")) + "\n");
     const config = new RepositoryConfigurationService(f.envFile, async () => f.valid, f.environment);
     assert.equal((await config.status()).configured, true);
     await rm(path.join(f.defaultPath, "classes"), { recursive: true });
@@ -203,6 +204,69 @@ test("local configuration router enforces origins and persists only validated na
     assert.equal(good.status, 200); assert.equal(called, 1); assert.equal(invalidated, 1);
     const next = await fetch(base + "/status");
     assert.equal((await next.json() as { configured: boolean }).configured, true);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    await f.clean();
+  }
+});
+
+test("deleting .env after prior configuration requires setup even if inherited process env remains set", async () => {
+  const f = await fixture();
+  try {
+    const inheritedEnvironment: NodeJS.ProcessEnv = { [REPOSITORY_ENV_KEY]: f.valid };
+    await writeFile(f.envFile, REPOSITORY_ENV_KEY + "=" + JSON.stringify(f.valid.replaceAll("\\", "/")) + "\n");
+    const config = new RepositoryConfigurationService(f.envFile, async () => f.valid, inheritedEnvironment);
+    assert.equal((await config.status()).configured, true);
+    await rm(f.envFile);
+    const status = await config.status();
+    assert.equal(status.configured, false);
+    assert.equal(status.reason, "MISSING");
+    assert.equal(status.directory, null);
+    assert.equal(inheritedEnvironment[REPOSITORY_ENV_KEY], f.valid);
+    await assert.rejects(config.resolvePaths(), (error: unknown) =>
+      error instanceof RepositorySetupError && error.statusCode === 409);
+  } finally { await f.clean(); }
+});
+
+test("existing .env without a repository key requires setup despite valid parent shell environment", async () => {
+  const f = await fixture();
+  try {
+    await writeFile(f.envFile, "SALESFORCE_ANALYZER_OUTPUT_DIRECTORY=C:/reports\n");
+    const inheritedEnvironment: NodeJS.ProcessEnv = { [REPOSITORY_ENV_KEY]: f.valid };
+    const config = new RepositoryConfigurationService(f.envFile, async () => f.valid, inheritedEnvironment);
+    assert.equal((await config.status()).reason, "MISSING");
+    assert.equal((await config.status()).configured, false);
+  } finally { await f.clean(); }
+});
+
+test("local .env repository selection takes precedence over stale inherited environment value", async () => {
+  const f = await fixture();
+  try {
+    const inheritedEnvironment: NodeJS.ProcessEnv = { [REPOSITORY_ENV_KEY]: path.join(f.root, "old-repo") };
+    await writeFile(f.envFile, REPOSITORY_ENV_KEY + "=" + JSON.stringify(f.valid.replaceAll("\\", "/")) + "\n");
+    const config = new RepositoryConfigurationService(f.envFile, async () => f.valid, inheritedEnvironment);
+    assert.equal((await config.status()).configured, true);
+    assert.equal((await config.resolvePaths()).repositoryPath, f.valid);
+  } finally { await f.clean(); }
+});
+
+test("HTTP repository status is not connected when .env absent but shell variable is set", async () => {
+  const f = await fixture();
+  const config = new RepositoryConfigurationService(
+    f.envFile, async () => f.valid, { [REPOSITORY_ENV_KEY]: f.valid },
+  );
+  const app = express();
+  app.use("/api/repository", createRepositoryRouter(config));
+  const server = app.listen(0, "127.0.0.1");
+  try {
+    await new Promise<void>(resolve => server.once("listening", resolve));
+    const port = (server.address() as AddressInfo).port;
+    const response = await fetch("http://127.0.0.1:" + port + "/api/repository/status");
+    assert.equal(response.status, 200);
+    const body: { configured: boolean; reason: string; repositoryName: string | null } = await response.json();
+    assert.equal(body.configured, false);
+    assert.equal(body.reason, "MISSING");
+    assert.equal(body.repositoryName, null);
   } finally {
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
     await f.clean();

@@ -7,6 +7,7 @@ import AnalysisLoadingOverlay from "./components/AnalysisLoadingOverlay";
 import ReportOutputSetupModal from "./components/ReportOutputSetupModal";
 import RepositorySetupModal from "./components/RepositorySetupModal";
 import OrgAnalysisWarningModal, { type AnalysisWarning } from "./components/OrgAnalysisWarningModal";
+import { repositoryConnectionIndicator } from "./utils/repositoryConnectionIndicator";
 
 type Persona = {
   name: string;
@@ -127,6 +128,7 @@ function App() {
   const [choosingReportFolder, setChoosingReportFolder] = useState(false);
   const [lastRunAt, setLastRunAt] = useState<Date | null>(null);
   const [repoReady, setRepoReady] = useState(false);
+  const [repoChecked, setRepoChecked] = useState(false);
   const [repoRevision, setRepoRevision] = useState(0);
   const [repoModalOpen, setRepoModalOpen] = useState(false);
   const [repoError, setRepoError] = useState("");
@@ -137,16 +139,19 @@ function App() {
 
 
   useEffect(() => {
-    fetch("/api/health")
-      .then((response) => {
+    let active = true;
+    async function refreshApiConnection() {
+      try {
+        const response = await fetch("/api/health", { cache: "no-store" });
         if (!response.ok) throw new Error("API unavailable");
-        return response.json();
-      })
-      .then((data: { repositoryName?: string }) => {
-        setRepositoryName(data.repositoryName || "Configured repository");
-        setApiConnected(true);
-      })
-      .catch(() => setApiConnected(false));
+        if (active) setApiConnected(true);
+      } catch {
+        if (active) setApiConnected(false);
+      }
+    }
+    void refreshApiConnection();
+    const interval = window.setInterval(() => { void refreshApiConnection(); }, 5000);
+    return () => { active = false; window.clearInterval(interval); };
   }, []);
 
   useEffect(() => {
@@ -167,24 +172,35 @@ function App() {
   }, []);
 
   useEffect(() => {
+    // Do not overwrite an invalid-folder selection error while setup is open.
+    if (repoModalOpen) return;
     let active = true;
-    void fetch("/api/repository/status", { cache: "no-store" }).then(async response => {
-      if (!response.ok) throw new Error("Unable to check Salesforce repository configuration.");
-      return response.json() as Promise<{ configured: boolean; message: string; directory: string | null; repositoryName: string | null }>;
-    }).then(status => {
-      if (!active) return;
-      setRepoReady(status.configured);
-      setRepoModalOpen(!status.configured);
-      setRepoCurrentPath(status.directory);
-      setRepoError(status.configured ? "" : status.message);
-      if (status.configured) setRepositoryName(status.repositoryName || "Configured repository");
-    }).catch(cause => {
-      if (!active) return;
-      setRepoModalOpen(true);
-      setRepoError(cause instanceof Error ? cause.message : "Unable to contact the Analyzer API.");
-    });
-    return () => { active = false; };
-  }, []);
+    async function refreshRepositoryStatus() {
+      try {
+        const response = await fetch("/api/repository/status", { cache: "no-store" });
+        if (!response.ok) throw new Error("Unable to check Salesforce repository configuration.");
+        const status: { configured: boolean; message: string; directory: string | null; repositoryName: string | null } =
+          await response.json();
+        if (!active) return;
+        setRepoReady(status.configured);
+        setRepoChecked(true);
+        setRepoModalOpen(!status.configured);
+        setRepoCurrentPath(status.directory);
+        setRepoError(status.configured ? "" : status.message);
+        setRepositoryName(status.configured ? (status.repositoryName || "") : "");
+      } catch (cause) {
+        if (!active) return;
+        setRepoChecked(true);
+        setRepoReady(false);
+        setRepositoryName("");
+        setRepoModalOpen(true);
+        setRepoError(cause instanceof Error ? cause.message : "Unable to contact the Analyzer API.");
+      }
+    }
+    void refreshRepositoryStatus();
+    const interval = window.setInterval(() => { void refreshRepositoryStatus(); }, 5000);
+    return () => { active = false; window.clearInterval(interval); };
+  }, [repoModalOpen]);
 
   async function ensureRepositoryReady(): Promise<boolean> {
     try {
@@ -193,13 +209,20 @@ function App() {
       const status: { configured: boolean; message: string; directory: string | null } = await response.json();
       if (!status.configured) {
         setRepoReady(false);
+        setRepoChecked(true);
+        setRepositoryName("");
         setRepoCurrentPath(status.directory);
         setRepoError(status.message);
         setRepoModalOpen(true);
         return false;
       }
+      setRepoReady(true);
+      setRepoChecked(true);
       return true;
     } catch (cause) {
+      setRepoReady(false);
+      setRepoChecked(true);
+      setRepositoryName("");
       setRepoError(cause instanceof Error ? cause.message : "Repository validation failed.");
       setRepoModalOpen(true);
       return false;
@@ -223,6 +246,7 @@ function App() {
       }
       if (!result.saved || !result.directory) throw new Error("Could not save Salesforce repository selection.");
       setRepoReady(true);
+      setRepoChecked(true);
       setRepoCurrentPath(result.directory);
       setRepositoryName(result.repositoryName || "Configured repository");
       setRepoModalOpen(false);
@@ -1066,7 +1090,15 @@ function App() {
       <header className="topbar">
         <div className="brand-mark" aria-hidden="true">⬡</div>
         <div className="brand-name"><strong>Salesforce</strong><span>Repository Analyzer</span></div>
-        <div className="topbar-right"><span className={apiConnected ? "connection online" : "connection offline"}><span className="connection-dot" />{apiConnected ? "API connected" : "API unavailable"}</span><span className={`connection ${salesforceConnection === "connected" ? "online" : "offline"}`} title="Salesforce authentication status"><span className="connection-dot" />{salesforceConnection === "connected" ? "Salesforce connected" : salesforceConnection === "connecting" ? "Salesforce connecting…" : salesforceConnection === "not-configured" ? "Salesforce not configured" : "Salesforce unavailable"}</span><span className="avatar">RA</span></div>
+        <div className="topbar-right">
+          <span className={apiConnected ? "connection online" : "connection offline"}><span className="connection-dot" />{apiConnected ? "API connected" : "API unavailable"}</span>
+          <span className={`connection ${repositoryConnectionIndicator(apiConnected, repoChecked, repoReady).connected ? "online" : "offline"}`}
+            title={repoReady ? repositoryName : "Salesforce repository setup status"}>
+            <span className="connection-dot" />{repositoryConnectionIndicator(apiConnected, repoChecked, repoReady).label}
+          </span>
+          <span className={`connection ${salesforceConnection === "connected" ? "online" : "offline"}`} title="Salesforce authentication status"><span className="connection-dot" />{salesforceConnection === "connected" ? "Salesforce connected" : salesforceConnection === "connecting" ? "Salesforce connecting…" : salesforceConnection === "not-configured" ? "Salesforce not configured" : "Salesforce unavailable"}</span>
+          <span className="avatar">RA</span>
+        </div>
       </header>
       <aside className="sidebar">
         <div className="sidebar-label">WORKSPACE</div>
@@ -1080,7 +1112,6 @@ function App() {
           <button className={page === "salesforce" ? "active" : ""} onClick={() => navigate("salesforce")}><span className="nav-symbol">☁</span>Salesforce Org</button>
         </nav>
         <div className="sidebar-bottom">
-          <div className="side-info-card"><div className="side-info-title">Repository</div><div className="side-repo">{apiConnected ? "● Connected" : "○ Not connected"}</div><div className="side-info-text" title={repositoryName}>{repositoryName || "Loading…"}</div></div>
           <div className="side-info-card"><div className="side-info-title">Output reports folder</div><div className="side-info-text" title={lastSoql?.outputFolder || ""}>{lastSoql?.outputFolder || "Available after SOQL analysis"}</div></div>
           <div className="sidebar-footnote">Repository access analyzer</div>
         </div>

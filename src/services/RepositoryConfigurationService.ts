@@ -1,4 +1,6 @@
 import path from "node:path";
+import { readFile } from "node:fs/promises";
+import { parseEnv } from "node:util";
 import { chooseWindowsRepositoryFolder } from "./windowsReportFolderPicker.js";
 import { saveLocalEnvEntry } from "./LocalEnvFileService.js";
 import { validateSalesforceRepository, RepositorySetupError } from "./SalesforceRepositoryValidator.js";
@@ -24,8 +26,25 @@ export class RepositoryConfigurationService {
     private readonly environment: NodeJS.ProcessEnv = process.env,
   ) {}
 
+  /**
+   * For the local UI, the project .env is the persisted source of truth.
+   * A SALESFORCE_REPOSITORY_PATH inherited from PowerShell/Windows must not
+   * silently bypass first-run setup after .env has been deleted.
+   *
+   * CLI entry points retain their own environment-based configuration.
+   */
+  private async configuredDirectory(): Promise<string | null> {
+    try {
+      const contents = await readFile(this.envFilePath, "utf8");
+      return parseEnv(contents)[REPOSITORY_ENV_KEY]?.trim() || null;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw new RepositorySetupError("Unable to read the project's .env configuration.", 409);
+    }
+  }
+
   async resolvePaths(): Promise<SalesforceMetadataPaths> {
-    const value = this.environment[REPOSITORY_ENV_KEY]?.trim();
+    const value = await this.configuredDirectory();
     if (!value) throw new RepositorySetupError("Salesforce repository is not configured. Choose a Salesforce source repository folder.", 409);
     try {
       return await validateSalesforceRepository(path.resolve(value));
@@ -38,7 +57,7 @@ export class RepositoryConfigurationService {
   }
 
   async status(): Promise<RepositoryStatus> {
-    const configuredValue = this.environment[REPOSITORY_ENV_KEY]?.trim();
+    const configuredValue = await this.configuredDirectory();
     if (!configuredValue) return {
       configured: false, directory: null, repositoryName: null, reason: "MISSING",
       message: "Choose a valid Salesforce source repository root to begin using the Analyzer.",
