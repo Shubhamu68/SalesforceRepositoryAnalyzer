@@ -13,9 +13,7 @@ import type { AddressInfo } from "node:net";
 const required = ["classes", "objects", "permissionsets", "permissionsetgroups", "mutingpermissionsets"];
 
 async function fixture() {
-  // realpath resolves Windows 8.3 aliases (e.g. 703394~1) to their canonical
-  // long path, matching validateSalesforceRepository without weakening assertions.
-  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "sf-repo-setup-")));
+  const root = await mkdtemp(path.join(os.tmpdir(), "sf-repo-setup-"));
   const valid = path.join(root, "salesforce source");
   const defaultPath = path.join(valid, "force-app", "main", "default");
   for (const folder of required) await mkdir(path.join(defaultPath, folder), { recursive: true });
@@ -30,8 +28,10 @@ test("valid Salesforce repo with core metadata and without optional flows is acc
   const f = await fixture();
   try {
     const paths = await validateSalesforceRepository(f.valid);
-    assert.equal(paths.defaultPath, f.defaultPath);
-    assert.equal(paths.repositoryPath, f.valid);
+    // Windows may create the fixture through an 8.3 short path while
+    // fs.realpath() returns the same directory via its canonical long path.
+    assert.equal(paths.defaultPath, await realpath(f.defaultPath));
+    assert.equal(paths.repositoryPath, await realpath(f.valid));
   } finally { await f.clean(); }
 });
 
@@ -83,10 +83,11 @@ test("first selection creates .env and immediately exposes repository paths", as
   const f = await fixture();
   try {
     const config = new RepositoryConfigurationService(f.envFile, async () => f.valid, f.environment);
+    const canonicalDirectory = await realpath(f.valid);
     assert.deepEqual(await config.chooseAndSave(),
-      { saved: true, cancelled: false, directory: f.valid, repositoryName: path.basename(f.valid) });
-    assert.equal(f.environment[REPOSITORY_ENV_KEY], f.valid);
-    assert.equal((await config.resolvePaths()).defaultPath, f.defaultPath);
+      { saved: true, cancelled: false, directory: canonicalDirectory, repositoryName: path.basename(canonicalDirectory) });
+    assert.equal(f.environment[REPOSITORY_ENV_KEY], canonicalDirectory);
+    assert.equal((await config.resolvePaths()).defaultPath, await realpath(f.defaultPath));
     assert.equal((await config.status()).configured, true);
     assert.match(await readFile(f.envFile, "utf8"), /SALESFORCE_REPOSITORY_PATH="/);
   } finally { await f.clean(); }
@@ -248,7 +249,7 @@ test("local .env repository selection takes precedence over stale inherited envi
     await writeFile(f.envFile, REPOSITORY_ENV_KEY + "=" + JSON.stringify(f.valid.replaceAll("\\", "/")) + "\n");
     const config = new RepositoryConfigurationService(f.envFile, async () => f.valid, inheritedEnvironment);
     assert.equal((await config.status()).configured, true);
-    assert.equal((await config.resolvePaths()).repositoryPath, f.valid);
+    assert.equal((await config.resolvePaths()).repositoryPath, await realpath(f.valid));
   } finally { await f.clean(); }
 });
 
@@ -273,4 +274,19 @@ test("HTTP repository status is not connected when .env absent but shell variabl
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
     await f.clean();
   }
+});
+
+test("stored repository path stays canonical across repeated validations", async () => {
+  const f = await fixture();
+  try {
+    const configuration = new RepositoryConfigurationService(f.envFile, async () => f.valid, f.environment);
+    const selected = await configuration.chooseAndSave();
+    const expected = await realpath(f.valid);
+    assert.equal(selected.directory, expected);
+    assert.equal((await configuration.status()).directory, expected);
+    assert.equal((await configuration.resolvePaths()).repositoryPath, expected);
+    // Path identity is canonical even when the configured picker gave the
+    // shorter OS-provided alias (common in Windows temp directories).
+    assert.equal((await validateSalesforceRepository(f.valid)).repositoryPath, expected);
+  } finally { await f.clean(); }
 });
