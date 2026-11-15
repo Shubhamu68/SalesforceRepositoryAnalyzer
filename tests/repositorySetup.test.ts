@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { validateSalesforceRepository, RepositorySetupError } from "../src/services/SalesforceRepositoryValidator.js";
@@ -13,7 +13,9 @@ import type { AddressInfo } from "node:net";
 const required = ["classes", "objects", "permissionsets", "permissionsetgroups", "mutingpermissionsets"];
 
 async function fixture() {
-  const root = await mkdtemp(path.join(os.tmpdir(), "sf-repo-setup-"));
+  // realpath resolves Windows 8.3 aliases (e.g. 703394~1) to their canonical
+  // long path, matching validateSalesforceRepository without weakening assertions.
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "sf-repo-setup-")));
   const valid = path.join(root, "salesforce source");
   const defaultPath = path.join(valid, "force-app", "main", "default");
   for (const folder of required) await mkdir(path.join(defaultPath, folder), { recursive: true });

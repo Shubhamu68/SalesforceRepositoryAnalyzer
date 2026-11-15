@@ -32,3 +32,17 @@ jobs:
       - name: Frontend production build
         working-directory: web
         run: npm run build
+
+  windows-repository-setup:
+    # Catch Windows path canonicalization differences that Ubuntu runners miss.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Install backend dependencies
+        run: npm ci
+      - name: Windows repository setup regression
+        run: npx tsx --test tests/repositorySetup.test.ts
