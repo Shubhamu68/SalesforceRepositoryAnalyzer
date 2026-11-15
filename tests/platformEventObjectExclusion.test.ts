@@ -45,8 +45,8 @@ test("direct Access Checker service calls cannot analyze event objects or fields
     getFieldAccess: async () => { throw Error("must not call field access service"); },
   } as never);
   const persona = { name: "Tester", permissionSets: [], permissionSetGroups: [], mutingPermissionSets: [] };
-  assert.throws(() => service.checkObject(persona, "Event__e"), { message: PLATFORM_EVENT_ANALYSIS_EXCLUSION_REASON });
-  assert.throws(() => service.checkField(persona, "ns__Event__e", "Payload__c"), { message: PLATFORM_EVENT_ANALYSIS_EXCLUSION_REASON });
+  await assert.rejects(() => service.checkObject(persona, "Event__e"), { message: PLATFORM_EVENT_ANALYSIS_EXCLUSION_REASON });
+  await assert.rejects(() => service.checkField(persona, "ns__Event__e", "Payload__c"), { message: PLATFORM_EVENT_ANALYSIS_EXCLUSION_REASON });
 });
 
 test("shared SOQL inventory drops Platform Event objects while keeping ordinary query references", async () => {
