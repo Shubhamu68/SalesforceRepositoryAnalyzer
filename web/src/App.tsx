@@ -50,6 +50,8 @@ type FieldAccessResult = {
   read: boolean;
   edit: boolean;
   permissionable?: boolean;
+  flsApplicable?: boolean;
+  flsReason?: string;
   schemaRequired?: boolean;
   readGrantedBy: PermissionSource[];
   editGrantedBy: PermissionSource[];
@@ -663,6 +665,22 @@ function App() {
   function renderFieldResult(
     access: FieldAccessResult
   ) {
+    if (access.flsApplicable === false) {
+      return (
+        <div className="result-card">
+          <div className="result-header"><span className="result-type">FIELD</span><h2>{access.field}</h2></div>
+          <div className="permission-grid">
+            <div className="permission-row"><span>Read FLS</span><strong className="status">N/A</strong></div>
+            <div className="permission-row"><span>Edit FLS</span><strong className="status">N/A</strong></div>
+          </div>
+          <div className="source-section" role="status">
+            <h3>Platform Event — FLS not applicable</h3>
+            <p className="muted">{access.flsReason}</p>
+            <p className="muted">Use Object Access to check publishing and subscription permissions. No individual field-level permission check was performed.</p>
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="result-card">
         <div className="result-header">

@@ -3,6 +3,7 @@ import { PersonaPermissionResolver, type ResolvedPersonaPermissions } from "../a
 import { createPersonaAccessEvaluator } from "../analyzer/personaAccessEvaluator.js";
 import { OrgObjectReadVerificationService } from "./OrgObjectReadVerificationService.js";
 import { OrgPermissionFallbackService } from "./OrgPermissionFallbackService.js";
+import { isKnownSalesforcePermissionSet } from "../config/knownSalesforcePermissionSets.js";
 import type { PermissionSet } from "../models/PermissionSet.js";
 import type { ObjectAccessMatrixPersona, ObjectAccessMatrixResult } from "../models/ObjectAccessMatrixResult.js";
 
@@ -46,13 +47,15 @@ export class ObjectAccessMatrixService {
           }
         }
         for (const name of persona.permissionSets) {
-          if (!resolved.directPermissionSets.some((ps) => equal(ps.name, name))) {
+          if (!resolved.directPermissionSets.some((ps) => equal(ps.name, name)) &&
+              !isKnownSalesforcePermissionSet(name)) {
             warnings.push(`Direct Permission Set metadata unavailable: ${name}`);
           }
         }
         for (const group of resolved.permissionSetGroups) {
           for (const name of group.permissionSetNames) {
-            if (!group.permissionSets.some((ps) => equal(ps.name, name))) {
+            if (!group.permissionSets.some((ps) => equal(ps.name, name)) &&
+                !isKnownSalesforcePermissionSet(name)) {
               warnings.push(`Permission Set metadata unavailable: ${name} (PSG: ${group.name})`);
             }
           }

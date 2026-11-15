@@ -1,6 +1,7 @@
 import type { Persona } from "../models/Persona.js";
 import { MATRIX_PERMISSION_KEYS, type MatrixAccess, type MatrixPermission } from "../models/ObjectAccessMatrixResult.js";
 import type { SalesforceEffectivePermissionVerifier, OrgPermissionEvidence } from "../salesforce/SalesforceEffectivePermissionVerifier.js";
+import { isFieldLevelSecurityApplicable } from "../config/fieldSecurityPolicy.js";
 
 export type PermissionEvidence = OrgPermissionEvidence;
 
@@ -45,6 +46,10 @@ export class OrgPermissionFallbackService {
     objectPermissions: { access: MatrixAccess; evidence: ObjectPermissionEvidence },
     repositoryFls: { read: boolean; edit: boolean },
   ): Promise<{ access: { read: boolean; edit: boolean }; evidence: FieldPermissionEvidence }> {
+    // Defensively enforce N/A for future callers; no org FLS lookup.
+    if (!isFieldLevelSecurityApplicable(object)) {
+      return { access: { read: false, edit: false }, evidence: {} };
+    }
     const evidence: FieldPermissionEvidence = {};
     const access = { read: false, edit: false };
     let org: Awaited<ReturnType<NonNullable<typeof this.verifier>["verifyField"]>> | undefined;

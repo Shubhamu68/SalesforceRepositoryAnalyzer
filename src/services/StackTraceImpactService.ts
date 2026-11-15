@@ -120,7 +120,6 @@ export class StackTraceImpactService {
       persona: Persona;
       resolved: ResolvedPersonaPermissions;
       incomplete: boolean;
-      externalSkipped: boolean;
     }[] = [];
     const missingKnownSets = new Map<string, Promise<boolean>>();
     const ignoreMissingKnown = (name: string, directory: string) => {
@@ -132,17 +131,14 @@ export class StackTraceImpactService {
       const resolved = await this.resolver.resolve(persona);
       let incomplete = persona.permissionSetGroups.some((psg) =>
         !resolved.permissionSetGroups.some((found) => equal(psg, found.name)));
-      let externalSkipped = false;
       for (const ps of persona.permissionSets) {
         if (resolved.directPermissionSets.some((found) => equal(ps, found.name))) continue;
-        if (await ignoreMissingKnown(ps, path.join(path.dirname(this.mutingDirectory), "permissionsets"))) externalSkipped = true;
-        else incomplete = true;
+        if (!(await ignoreMissingKnown(ps, path.join(path.dirname(this.mutingDirectory), "permissionsets")))) incomplete = true;
       }
       for (const group of resolved.permissionSetGroups) {
         for (const ps of group.permissionSetNames) {
           if (group.permissionSets.some((found) => equal(ps, found.name))) continue;
-          if (await ignoreMissingKnown(ps, path.join(path.dirname(this.mutingDirectory), "permissionsets"))) externalSkipped = true;
-          else incomplete = true;
+          if (!(await ignoreMissingKnown(ps, path.join(path.dirname(this.mutingDirectory), "permissionsets")))) incomplete = true;
         }
         const muteNames = group.mutingPermissionSetNames.length
           ? group.mutingPermissionSetNames
@@ -153,7 +149,7 @@ export class StackTraceImpactService {
       }
       if (resolved.permissionSetGroups.length > 1 && persona.mutingPermissionSets.some((mute) =>
         !resolved.permissionSetGroups.some((group) => group.mutingPermissionSetNames.some((name) => equal(name, mute))))) incomplete = true;
-      prepared.push({ persona, resolved, incomplete, externalSkipped });
+      prepared.push({ persona, resolved, incomplete });
     }
 
     const allQueries: StackQueryImpact[] = [];
@@ -206,7 +202,6 @@ export class StackTraceImpactService {
           if (mode.enforcement === "NONE") notes.push("Missing Read access is an advisory for this system-mode query, not a confirmed runtime permission failure.");
           if (mode.enforcement === "INVALID") notes.push("This query clause is unsupported at this Apex API version.");
           if (person.incomplete) notes.push("Some assigned Permission Set metadata is missing; absence of grants is not conclusive.");
-          if (person.externalSkipped) notes.push("Salesforce-owned Order Management Permission Set was excluded because its metadata is absent. A missing grant is a potential gap, not a confirmed runtime failure.");
           if (inventory.unresolved.length) notes.push("Some relationship fields could not be resolved.");
           if (inventory.limitations.length) notes.push("Some filter/sort expressions could not be fully evaluated.");
           // Repository missing grants are NOT confirmed denials. Defer final status
