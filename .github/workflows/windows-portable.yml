@@ -1,0 +1,82 @@
+name: Build Windows Portable Analyzer
+
+on:
+  push:
+    branches:
+      - feature/windows-portable-distribution
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  portable:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Install backend dependencies
+        run: npm ci
+      - name: Type-check backend
+        run: npm run build
+      - name: Run all analyzer regressions
+        run: npm run test:all
+      - name: Install frontend dependencies
+        working-directory: web
+        run: npm ci
+      - name: Build React UI
+        working-directory: web
+        run: npm run build
+      - name: Create portable folder (runtime included)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $package = Join-Path $env:RUNNER_TEMP "SalesforceRepositoryAnalyzer"
+          New-Item -ItemType Directory -Force -Path $package | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $package "runtime") | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $package "scripts") | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $package "app") | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $package "app/web") | Out-Null
+
+          Copy-Item -Path "dist" -Destination (Join-Path $package "app/dist") -Recurse -Force
+          Copy-Item -Path "web/dist" -Destination (Join-Path $package "app/web/dist") -Recurse -Force
+          Copy-Item -Path "config" -Destination (Join-Path $package "config") -Recurse -Force
+          Copy-Item -Path "package.json","package-lock.json" -Destination (Join-Path $package "app") -Force
+          Copy-Item -Path ".env.example" -Destination (Join-Path $package ".env.example") -Force
+          Copy-Item -Path "desktop/windows/Start Analyzer.cmd" -Destination (Join-Path $package "Start Analyzer.cmd") -Force
+          Copy-Item -Path "desktop/windows/README.txt" -Destination (Join-Path $package "README.txt") -Force
+          Copy-Item -Path "desktop/windows/launcher.mjs" -Destination (Join-Path $package "scripts/launcher.mjs") -Force
+
+          $node = (Get-Command node).Source
+          Copy-Item -Path $node -Destination (Join-Path $package "runtime/node.exe") -Force
+          $nodeLicense = Join-Path (Split-Path $node) "LICENSE"
+          if (Test-Path $nodeLicense) { Copy-Item $nodeLicense (Join-Path $package "runtime/LICENSE") }
+
+          Push-Location (Join-Path $package "app")
+          try {
+            npm ci --omit=dev --no-audit --no-fund
+            if ($LASTEXITCODE -ne 0) { throw "Production dependency installation failed." }
+          } finally { Pop-Location }
+
+          if (Test-Path (Join-Path $package ".env")) {
+            throw "Packaging must NEVER include a credential-bearing .env file."
+          }
+          "SALESFORCE_ANALYZER_PACKAGE_ROOT=$package" >> $env:GITHUB_ENV
+      - name: Smoke-test compiled API and React UI from extracted folder
+        shell: pwsh
+        run: node desktop/windows/smoke.mjs "$env:SALESFORCE_ANALYZER_PACKAGE_ROOT"
+      - name: Compress complete portable folder
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path "release" | Out-Null
+          Compress-Archive -Path "$env:SALESFORCE_ANALYZER_PACKAGE_ROOT" -DestinationPath "release/SalesforceRepositoryAnalyzer-Windows-Portable.zip" -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SalesforceRepositoryAnalyzer-Windows-Portable
+          path: release/SalesforceRepositoryAnalyzer-Windows-Portable.zip
+          if-no-files-found: error
+          retention-days: 30
