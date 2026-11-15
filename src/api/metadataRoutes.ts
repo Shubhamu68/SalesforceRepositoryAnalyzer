@@ -1,3 +1,4 @@
+import { isDataAccessAnalysisObject, PLATFORM_EVENT_ANALYSIS_EXCLUSION_REASON } from "../config/fieldSecurityPolicy.js";
 import { Router } from "express";
 import { readdir } from "node:fs/promises";
 import path from "node:path";
@@ -24,7 +25,7 @@ export function createMetadataRouter(
       );
 
       const names = objects
-        .filter((entry) => entry.isDirectory())
+        .filter((entry) => entry.isDirectory() && isDataAccessAnalysisObject(entry.name))
         .map((entry) => entry.name)
         .sort((a, b) =>
           a.localeCompare(b)
@@ -51,6 +52,10 @@ export function createMetadataRouter(
       try {
         const objectName =
           req.params.objectName;
+        if (!isDataAccessAnalysisObject(objectName)) {
+          res.status(400).json({ error: PLATFORM_EVENT_ANALYSIS_EXCLUSION_REASON });
+          return;
+        }
 
         const fieldsPath = path.join(
           typeof defaultPath === "string" ? defaultPath : await defaultPath(),

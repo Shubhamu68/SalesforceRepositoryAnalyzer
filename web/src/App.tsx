@@ -1,3 +1,4 @@
+import { isDataAccessAnalysisObject, PLATFORM_EVENT_ANALYSIS_EXCLUSION_REASON } from "./utils/objectSelectionPolicy";
 import { useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
 import ObjectAccessMatrix from "./components/ObjectAccessMatrix";
@@ -365,7 +366,7 @@ function App() {
         const data: string[] =
           await response.json();
 
-        setObjects(data);
+        setObjects(data.filter(isDataAccessAnalysisObject));
       } catch (err) {
         setError(
           err instanceof Error
@@ -466,6 +467,11 @@ function App() {
       !objectName.trim()
     ) {
       setError("Please select an object.");
+      return;
+    }
+
+    if (checkType !== "soql" && !isDataAccessAnalysisObject(objectName)) {
+      setError(PLATFORM_EVENT_ANALYSIS_EXCLUSION_REASON);
       return;
     }
 

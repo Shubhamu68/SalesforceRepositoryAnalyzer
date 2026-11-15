@@ -1,3 +1,4 @@
+import { isDataAccessAnalysisObject } from "../config/fieldSecurityPolicy.js";
 import path from "node:path";
 import { access } from "node:fs/promises";
 import { ApexExecutionSecurityModeResolver } from "./ApexExecutionSecurityModeResolver.js";
@@ -156,6 +157,7 @@ export class StackTraceImpactService {
     for (const methodInfo of reached.values()) {
       const method = sourceMethods.get(methodInfo.id)!;
       for (const query of method.queries) {
+        if (!isDataAccessAnalysisObject(query.object)) continue;
         const mode = await this.executionModeResolver.resolve(query.query, method.filePath);
         const securityMode = mode.declaredMode;
         let inventory = collectQueryFields(query, relationshipMap);

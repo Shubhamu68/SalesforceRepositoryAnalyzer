@@ -1,3 +1,4 @@
+import { PLATFORM_EVENT_ANALYSIS_EXCLUSION_REASON } from "../config/fieldSecurityPolicy.js";
 import express from "express";
 import path from "node:path";
 import { existsSync } from "node:fs";
@@ -94,7 +95,8 @@ app.get("/api/objects/:objectName/persona-access", async (req, res) => {
     res.json(await analyzer.objectAccessMatrixService.analyze(req.params.objectName));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    if (message.startsWith("Invalid object API name")) {
+    if (message.startsWith("Invalid object API name") ||
+        message === PLATFORM_EVENT_ANALYSIS_EXCLUSION_REASON) {
       res.status(400).json({ error: message }); return;
     }
     handleApiError(error, res);
@@ -151,6 +153,9 @@ function handleApiError(error: unknown, res: express.Response): void {
   }
   if (error instanceof RepositorySetupError) {
     res.status(error.statusCode).json({ code: "REPOSITORY_NOT_CONFIGURED", error: message }); return;
+  }
+  if (message === PLATFORM_EVENT_ANALYSIS_EXCLUSION_REASON) {
+    res.status(400).json({ error: message }); return;
   }
   if (message.startsWith("Persona not found:")) {
     res.status(404).json({ error: message }); return;

@@ -1,3 +1,4 @@
+import { assertDataAccessAnalysisObject } from "../config/fieldSecurityPolicy.js";
 import { PersonaConfigLoader } from "../config/PersonaConfigLoader.js";
 import { PersonaPermissionResolver, type ResolvedPersonaPermissions } from "../analyzer/PersonaPermissionResolver.js";
 import { createPersonaAccessEvaluator } from "../analyzer/personaAccessEvaluator.js";
@@ -33,6 +34,7 @@ export class ObjectAccessMatrixService {
     if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(object) || object.length > 255) {
       throw new Error("Invalid object API name. Enter an object API name such as Account or OrderSummary.");
     }
+    assertDataAccessAnalysisObject(object);
     const personas = await this.personaConfigLoader.getAllPersonas();
     const results: ObjectAccessMatrixPersona[] = [];
 

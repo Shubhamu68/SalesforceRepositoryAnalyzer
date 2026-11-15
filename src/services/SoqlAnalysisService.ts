@@ -1,3 +1,4 @@
+import { isDataAccessAnalysisObject } from "../config/fieldSecurityPolicy.js";
 
 import { Persona } from "../models/Persona.js";
 import { SoqlQuery } from "../models/SoqlQuery.js";
@@ -38,9 +39,9 @@ export class SoqlAnalysisService {
     persona: Persona
   ): Promise<SoqlAnalysisResult> {
     const queries: SoqlQuery[] =
-      await scanApexSoql(
+      (await scanApexSoql(
         this.repositoryPath
-      );
+      )).filter((query) => isDataAccessAnalysisObject(query.object));
 
     const findings =
       await this.soqlSecurityAnalyzer.analyze(

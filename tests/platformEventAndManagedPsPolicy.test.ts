@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { isFieldLevelSecurityApplicable, PLATFORM_EVENT_FLS_REASON } from "../src/config/fieldSecurityPolicy.js";
+import { isFieldLevelSecurityApplicable, isDataAccessAnalysisObject, assertDataAccessAnalysisObject, PLATFORM_EVENT_FLS_REASON, PLATFORM_EVENT_ANALYSIS_EXCLUSION_REASON } from "../src/config/fieldSecurityPolicy.js";
 import { isKnownSalesforcePermissionSet } from "../src/config/knownSalesforcePermissionSets.js";
 import { getFieldPermissionability } from "../src/analyzer/fieldPermissionability.js";
 import { createPersonaAccessEvaluator } from "../src/analyzer/personaAccessEvaluator.js";
@@ -46,6 +46,12 @@ test("central policy exempts only custom Platform Event field FLS, including nam
     assert.equal(isFieldLevelSecurityApplicable(name), true, name);
   }
   assert.equal(getFieldPermissionability(event, field), false);
+  assert.equal(isDataAccessAnalysisObject(event), false);
+  assert.equal(isDataAccessAnalysisObject("pkg__MyEvent__e"), false);
+  assert.equal(isDataAccessAnalysisObject("AccountChangeEvent"), true);
+  assert.equal(isDataAccessAnalysisObject("OrderSummary"), true);
+  assert.throws(() => assertDataAccessAnalysisObject(event), { message: PLATFORM_EVENT_ANALYSIS_EXCLUSION_REASON });
+  assert.doesNotThrow(() => assertDataAccessAnalysisObject("Account"));
   assert.match(PLATFORM_EVENT_FLS_REASON, /does not apply/);
 });
 
@@ -106,7 +112,7 @@ test("shared org FLS verification gateways skip Platform Events, but allow ordin
   assert.equal(calls, 0);
 });
 
-test("SOQL security skips Platform Event field-FLS findings but keeps object checks", async () => {
+test("SOQL security entirely excludes Platform Events while retaining ordinary object checks", async () => {
   const { resolver } = setup();
   const tmp = await mkdtemp(path.join(os.tmpdir(), "sf-event-fls-"));
   const query: SoqlQuery = {
@@ -118,11 +124,18 @@ test("SOQL security skips Platform Event field-FLS findings but keeps object che
     const findings = await new SoqlSecurityAnalyzer(resolver, tmp).analyze(persona, [query]);
     assert.deepEqual(findings.filter((f) => f.findingType === "FIELD_READ"), []);
     assert.deepEqual(findings.filter((f) => f.findingType === "OBJECT_READ"), []);
-    // A missing object grant must still be surfaced; FLS remains N/A.
+    // Event object permissions are not part of SOQL data-access reporting.
     const missing = setup(false);
     const missingFindings = await new SoqlSecurityAnalyzer(missing.resolver, tmp).analyze(persona, [query]);
-    assert.equal(missingFindings.some((f) => f.findingType === "OBJECT_READ"), true);
-    assert.equal(missingFindings.some((f) => f.findingType === "FIELD_READ"), false);
+    assert.deepEqual(missingFindings, []);
+    const accountQuery: SoqlQuery = {
+      ...query, object: "Account", fields: ["Name"],
+      query: "SELECT Name FROM Account WITH USER_MODE",
+    };
+    const ordinaryFindings = await new SoqlSecurityAnalyzer(missing.resolver, tmp)
+      .analyze(persona, [query, accountQuery]);
+    assert.equal(ordinaryFindings.some((f) => f.object === "Account" && f.findingType === "OBJECT_READ"), true);
+    assert.equal(ordinaryFindings.some((f) => f.object.toLowerCase().endsWith("__e")), false);
   } finally { await rm(tmp, { recursive: true, force: true }); }
 });
 
@@ -144,6 +157,7 @@ test("Matrix hides only missing managed OM PS metadata, preserving unrelated war
   const loader = { getAllPersonas: async () => [p] };
   const resolver = { resolve: async () => resolved };
   const matrix = new ObjectAccessMatrixService(loader as never, resolver as never);
+  await assert.rejects(() => matrix.analyze(event), { message: PLATFORM_EVENT_ANALYSIS_EXCLUSION_REASON });
   const result = await matrix.analyze("OrderSummary");
   assert.equal(result.warnings.length, 2);
   assert.ok(result.warnings.some((w) => w.includes("Missing_Custom_PS")));
