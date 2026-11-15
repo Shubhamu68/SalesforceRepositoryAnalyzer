@@ -1,3 +1,4 @@
+import { isDataAccessAnalysisObject, PLATFORM_EVENT_ANALYSIS_EXCLUSION_REASON } from "../utils/objectSelectionPolicy";
 import { useMemo, useState, type FormEvent } from "react";
 import PermissionIndicator from "./PermissionIndicator";
 import type { PermissionEvidence } from "./permissionPresentation";
@@ -144,6 +145,11 @@ export default function ObjectAccessMatrix({ objects, loadingObjects, beforeAnal
       return;
     }
 
+    if (!isDataAccessAnalysisObject(name)) {
+      setError(PLATFORM_EVENT_ANALYSIS_EXCLUSION_REASON);
+      return;
+    }
+
     setLoading(true);
     setError("");
     setData(null);
@@ -195,7 +201,7 @@ export default function ObjectAccessMatrix({ objects, loadingObjects, beforeAnal
               disabled={loading}
             />
             <datalist id="matrix-object-suggestions">
-              {objects.map((name) => <option key={name} value={name} />)}
+              {objects.filter(isDataAccessAnalysisObject).map((name) => <option key={name} value={name} />)}
             </datalist>
           </div>
           <button className="primary-button" type="submit" disabled={loading}>

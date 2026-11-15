@@ -1,3 +1,4 @@
+import { isDataAccessAnalysisObject } from "../config/fieldSecurityPolicy.js";
 import type { SoqlQuery, SoqlSubquery } from "../models/SoqlQuery.js";
 import type { ResolvedQueryField } from "../models/StackTraceImpact.js";
 import { isAggregateExpression, isIgnoredField } from "./soqlSystemFields.js";
@@ -67,20 +68,26 @@ export function collectQueryFields(query: SoqlQuery, relationships: Relationship
   const limitations: string[] = [];
   const scopes: QueryFieldCollection["scopes"] = [];
   const unresolved = (kind: "FIELD" | "RELATIONSHIP", baseObject: string,
-    fieldPath: string, lineNumber: number, path: string, message: string) =>
-    unresolvedEntries.push({ kind, baseObject, fieldPath, lineNumber, relationshipPath: path, message });
+    fieldPath: string, lineNumber: number, path: string, message: string): void => {
+    if (isDataAccessAnalysisObject(baseObject)) {
+      unresolvedEntries.push({ kind, baseObject, fieldPath, lineNumber, relationshipPath: path, message });
+    }
+  };
 
   const add = (baseObject: string, fieldPath: string, source: string,
     text: string, lineNumber: number, path: string): void => {
     const candidate = fieldPath.trim();
-    if (!candidate || isAggregateExpression(candidate)) return;
+    if (!candidate || isAggregateExpression(candidate) || !isDataAccessAnalysisObject(baseObject)) return;
     const resolved = relationships.resolveField(baseObject, candidate);
     if (!resolved) {
       unresolved("FIELD", baseObject, candidate, lineNumber, path,
         relationships.explainUnresolved(baseObject, candidate));
       return;
     }
-    for (const object of resolved.objects) objects.add(object);
+    if (!isDataAccessAnalysisObject(resolved.object)) return;
+    for (const object of resolved.objects) {
+      if (isDataAccessAnalysisObject(object)) objects.add(object);
+    }
     if (isIgnoredField(resolved.field, resolved.object)) return;
     const field: ScopedFieldReference = {
       object: resolved.object, field: resolved.field, source,
@@ -96,6 +103,7 @@ export function collectQueryFields(query: SoqlQuery, relationships: Relationship
 
   const scope = (object: string, fields: string[], children: SoqlSubquery[],
     text: string, lineNumber: number, relationshipPath: string, depth: number): void => {
+    if (!isDataAccessAnalysisObject(object)) return;
     scopes.push({ object, lineNumber, relationshipPath });
     if (depth > 20) {
       limitations.push("Nested query traversal limit exceeded at " + relationshipPath);
@@ -116,6 +124,7 @@ export function collectQueryFields(query: SoqlQuery, relationships: Relationship
           "Could not resolve child relationship " + object + "." + childQuery.relationshipName);
         continue;
       }
+      if (!isDataAccessAnalysisObject(childObject)) continue;
       objects.add(childObject);
       queriedObjects.add(childObject);
       scope(childObject, childQuery.fields, childQuery.subqueries,
@@ -126,7 +135,8 @@ export function collectQueryFields(query: SoqlQuery, relationships: Relationship
   scope(query.object, query.fields, query.subqueries, query.query, query.lineNumber, query.object, 1);
   return {
     fields: [...deduplicated.values()], references, scopes,
-    objects: [...objects], queriedObjects: [...queriedObjects],
+    objects: [...objects].filter(isDataAccessAnalysisObject),
+    queriedObjects: [...queriedObjects].filter(isDataAccessAnalysisObject),
     unresolved: [...new Set(unresolvedEntries.map(item => item.message))],
     unresolvedEntries, limitations: [...new Set(limitations)],
   };

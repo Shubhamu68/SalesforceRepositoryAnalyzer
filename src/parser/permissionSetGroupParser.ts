@@ -5,6 +5,7 @@ import path from "node:path";
 import { PermissionSet } from "../models/PermissionSet.js";
 import { PermissionSetGroup } from "../models/PermissionSetGroup.js";
 import { parsePermissionSet } from "./permissionSetParser.js";
+import { isKnownSalesforcePermissionSet } from "../config/knownSalesforcePermissionSets.js";
 
 const parser = new XMLParser({
   ignoreAttributes: true,
@@ -41,10 +42,13 @@ export async function parsePermissionSetGroup(
       );
 
       permissionSets.push(permissionSet);
-    } catch {
-      console.warn(
-        `Could not find or parse Permission Set: ${permissionSetName}`
-      );
+    } catch (error) {
+      // Salesforce-owned OM sets can be absent from repository metadata.
+      // Do not spam console or UI; never invent their missing permissions.
+      if (!isKnownSalesforcePermissionSet(permissionSetName) ||
+          (error as NodeJS.ErrnoException).code !== "ENOENT") {
+        console.warn(`Could not find or parse Permission Set: ${permissionSetName}`);
+      }
     }
   }
 

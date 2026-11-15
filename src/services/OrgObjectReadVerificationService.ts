@@ -1,6 +1,7 @@
 import type { Persona } from "../models/Persona.js";
 import type { OrgVerificationStatusPolicy } from "../config/orgVerificationStatusPolicy.js";
 import { isStatusNeutralOrgObjectRead } from "../config/orgVerificationStatusPolicy.js";
+import { isFieldLevelSecurityApplicable, PLATFORM_EVENT_FLS_REASON } from "../config/fieldSecurityPolicy.js";
 import type { SalesforcePersonaAccessVerifier, OrgObjectAccessEvidence } from "../salesforce/SalesforcePersonaAccessVerifier.js";
 
 /**
@@ -65,8 +66,8 @@ export class OrgObjectReadVerificationService {
   }
 
   /** All missing repository FLS grants must be checked, not only Account fields. */
-  shouldVerifyMissingRepositoryField(_object: string, _field: string): boolean {
-    return true;
+  shouldVerifyMissingRepositoryField(object: string, _field: string): boolean {
+    return isFieldLevelSecurityApplicable(object);
   }
 
   private cacheKey(persona: Persona, object: string, field?: string): string {
@@ -130,7 +131,7 @@ export class OrgObjectReadVerificationService {
 
   /** Cached raw field evidence, shared by SOQL, Stack Trace, Access Checker and future features. */
   async resolveField(persona: Persona, object: string, field: string): Promise<OrgObjectAccessEvidence | undefined> {
-    if (!this.verifier) return undefined;
+    if (!isFieldLevelSecurityApplicable(object) || !this.verifier) return undefined;
     return this.cached(this.fieldChecks, this.cacheKey(persona, object, field),
       () => this.limited(() => this.verifier!.verifyFieldRead(persona, object, field)));
   }
@@ -141,6 +142,9 @@ export class OrgObjectReadVerificationService {
    * proven non-permissionable fields. Do not infer a grant from a missing org row.
    */
   async resolveFieldRead(persona: Persona, object: string, field: string, repositoryRead: boolean): Promise<FieldReadDecision> {
+    if (!isFieldLevelSecurityApplicable(object)) return {
+      source: "REPOSITORY", readable: true, field, message: PLATFORM_EVENT_FLS_REASON,
+    };
     if (repositoryRead) return {
       source: "REPOSITORY", readable: true, field,
       message: "Field Read permission established from repository metadata.",

@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import { isFieldLevelSecurityApplicable } from "../config/fieldSecurityPolicy.js";
 
 /**
  * Offline Salesforce EntityParticle.IsPermissionable snapshot.
@@ -66,6 +67,7 @@ function load(): Map<string, boolean> {
 
 export function getFieldPermissionability(objectName: string, fieldName: string): FieldPermissionability {
   if (!objectName.trim() || !fieldName.trim()) return undefined;
+  if (!isFieldLevelSecurityApplicable(objectName)) return false;
   return load().get(`${objectName.trim()}.${fieldName.trim()}`.toLowerCase());
 }
 

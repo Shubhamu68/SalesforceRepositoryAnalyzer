@@ -1,3 +1,4 @@
+import { assertDataAccessAnalysisObject } from "../config/fieldSecurityPolicy.js";
 import { Persona } from "../models/Persona.js";
 import { PersonaAccessService } from "./PersonaAccessService.js";
 import { PersonaFieldAccessService } from "./PersonaFieldAccessService.js";
@@ -12,6 +13,7 @@ export class AccessQueryService {
     persona: Persona,
     objectName: string
   ) {
+    assertDataAccessAnalysisObject(objectName);
     return this.personaAccessService.getObjectAccess(
       persona,
       objectName
@@ -23,6 +25,7 @@ export class AccessQueryService {
     objectName: string,
     fieldName: string
   ) {
+    assertDataAccessAnalysisObject(objectName);
     return this.personaFieldAccessService.getFieldAccess(
       persona,
       objectName,

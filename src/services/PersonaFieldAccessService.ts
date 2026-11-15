@@ -4,6 +4,7 @@ import { PersonaPermissionResolver } from "../analyzer/PersonaPermissionResolver
 import { createPersonaAccessEvaluator } from "../analyzer/personaAccessEvaluator.js";
 import { OrgObjectReadVerificationService } from "./OrgObjectReadVerificationService.js";
 import { OrgPermissionFallbackService } from "./OrgPermissionFallbackService.js";
+import { isFieldLevelSecurityApplicable, PLATFORM_EVENT_FLS_REASON } from "../config/fieldSecurityPolicy.js";
 
 export class PersonaFieldAccessService {
   constructor(
@@ -16,6 +17,15 @@ export class PersonaFieldAccessService {
     const resolved = await this.resolver.resolve(persona);
     const evaluator = createPersonaAccessEvaluator(resolved);
     const field = evaluator.evaluateField(`${objectName}.${fieldName}`);
+    if (!isFieldLevelSecurityApplicable(objectName)) {
+      // No event-field FLS check, including no Salesforce UserFieldAccess.
+      // Publishing and subscribing remain object-level permissions.
+      return {
+        field: field.field, read: false, edit: false,
+        flsApplicable: false, flsReason: PLATFORM_EVENT_FLS_REASON,
+        permissionable: false, readGrantedBy: [], editGrantedBy: [], mutedBy: [],
+      };
+    }
     if (this.permissionFallback) {
       const evaluatedObject = evaluator.evaluateObject(objectName);
       const objectAccess = await this.permissionFallback.resolveObject(persona, objectName, evaluatedObject.access);

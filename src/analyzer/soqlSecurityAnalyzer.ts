@@ -1,3 +1,4 @@
+import { isDataAccessAnalysisObject } from "../config/fieldSecurityPolicy.js";
 import type { SoqlQuery } from "../models/SoqlQuery.js";
 import type { SoqlSecurityFinding, SoqlFindingCriticality, SoqlVerificationSource } from "../models/SoqlSecurityFinding.js";
 import type { Persona } from "../models/Persona.js";
@@ -63,7 +64,9 @@ export class SoqlSecurityAnalyzer {
     private readonly orgRelationshipMetadata?: SalesforceRelationshipMetadataService,
   ) {}
 
-  async analyze(persona: Persona, queries: SoqlQuery[]): Promise<SoqlSecurityFinding[]> {
+  async analyze(persona: Persona, inputQueries: SoqlQuery[]): Promise<SoqlSecurityFinding[]> {
+    // Direct callers may bypass SoqlAnalysisService; skip event queries here too.
+    const queries = inputQueries.filter((query) => isDataAccessAnalysisObject(query.object));
     const resolved = await this.personaPermissionResolver.resolve(persona);
     const evaluator = createPersonaAccessEvaluator(resolved);
     const relationshipMap = await buildRelationshipMap(this.objectsDirectory);

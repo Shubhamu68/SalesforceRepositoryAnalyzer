@@ -12,6 +12,9 @@ export interface FieldAccessCheckResult {
   read: boolean;
   edit: boolean;
   permissionable?: boolean;
+  /** FLS isn't applicable to Platform Event fields; UI displays N/A. */
+  flsApplicable?: boolean;
+  flsReason?: string;
   schemaRequired?: boolean;
 
   readGrantedBy: PermissionSource[];

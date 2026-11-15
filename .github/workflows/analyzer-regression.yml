@@ -7,6 +7,7 @@ on:
       - fix/excel-only-soql-reports
       - feature/repository-setup-and-org-credential-guards
       - feature/org-fallback-all-access-permissions
+      - fix/platform-event-fls-and-managed-ps-warnings
   pull_request:
   workflow_dispatch:
 permissions:

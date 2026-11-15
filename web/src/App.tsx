@@ -1,3 +1,4 @@
+import { isDataAccessAnalysisObject, PLATFORM_EVENT_ANALYSIS_EXCLUSION_REASON } from "./utils/objectSelectionPolicy";
 import { useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
 import ObjectAccessMatrix from "./components/ObjectAccessMatrix";
@@ -10,6 +11,7 @@ import ReportOutputSetupModal from "./components/ReportOutputSetupModal";
 import RepositorySetupModal from "./components/RepositorySetupModal";
 import OrgAnalysisWarningModal, { type AnalysisWarning } from "./components/OrgAnalysisWarningModal";
 import { repositoryConnectionIndicator } from "./utils/repositoryConnectionIndicator";
+import { filterMetadataSuggestions } from "./utils/metadataSuggestions";
 
 type Persona = {
   name: string;
@@ -50,6 +52,8 @@ type FieldAccessResult = {
   read: boolean;
   edit: boolean;
   permissionable?: boolean;
+  flsApplicable?: boolean;
+  flsReason?: string;
   schemaRequired?: boolean;
   readGrantedBy: PermissionSource[];
   editGrantedBy: PermissionSource[];
@@ -363,7 +367,7 @@ function App() {
         const data: string[] =
           await response.json();
 
-        setObjects(data);
+        setObjects(data.filter(isDataAccessAnalysisObject));
       } catch (err) {
         setError(
           err instanceof Error
@@ -420,35 +424,16 @@ function App() {
   loadFields();
 }, [objectName, repoReady, repoRevision]);
 
-  const filteredObjects = useMemo(() => {
-    const search =
-      objectSearch.trim().toLowerCase();
+  // Show every matching metadata entry; the dropdown itself remains scrollable.
+  const filteredObjects = useMemo(
+    () => filterMetadataSuggestions(objects, objectSearch),
+    [objects, objectSearch]
+  );
 
-    if (!search) {
-      return objects.slice(0, 20);
-    }
-
-    return objects
-      .filter((object) =>
-        object.toLowerCase().includes(search)
-      )
-      .slice(0, 20);
-  }, [objects, objectSearch]);
-
-  const filteredFields = useMemo(() => {
-    const search =
-      fieldSearch.trim().toLowerCase();
-
-    if (!search) {
-      return fields.slice(0, 20);
-    }
-
-    return fields
-      .filter((field) =>
-        field.toLowerCase().includes(search)
-      )
-      .slice(0, 20);
-  }, [fields, fieldSearch]);
+  const filteredFields = useMemo(
+    () => filterMetadataSuggestions(fields, fieldSearch),
+    [fields, fieldSearch]
+  );
 
   async function handleCheck(skipReportOutputCheck = false) {
     setError("");
@@ -464,6 +449,11 @@ function App() {
       !objectName.trim()
     ) {
       setError("Please select an object.");
+      return;
+    }
+
+    if (checkType !== "soql" && !isDataAccessAnalysisObject(objectName)) {
+      setError(PLATFORM_EVENT_ANALYSIS_EXCLUSION_REASON);
       return;
     }
 
@@ -663,6 +653,22 @@ function App() {
   function renderFieldResult(
     access: FieldAccessResult
   ) {
+    if (access.flsApplicable === false) {
+      return (
+        <div className="result-card">
+          <div className="result-header"><span className="result-type">FIELD</span><h2>{access.field}</h2></div>
+          <div className="permission-grid">
+            <div className="permission-row"><span>Read FLS</span><strong className="status">N/A</strong></div>
+            <div className="permission-row"><span>Edit FLS</span><strong className="status">N/A</strong></div>
+          </div>
+          <div className="source-section" role="status">
+            <h3>Platform Event — FLS not applicable</h3>
+            <p className="muted">{access.flsReason}</p>
+            <p className="muted">Use Object Access to check publishing and subscription permissions. No individual field-level permission check was performed.</p>
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="result-card">
         <div className="result-header">

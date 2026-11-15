@@ -4,6 +4,7 @@ import type { PermissionSetGrant } from "../models/PermissionSetGrant.js";
 import type { PermissionSource } from "./permissionAggregator.js";
 import type { EffectiveFieldPermission } from "./fieldPermissionAggregator.js";
 import { getFieldPermissionability } from "./fieldPermissionability.js";
+import { isFieldLevelSecurityApplicable } from "../config/fieldSecurityPolicy.js";
 import { isSchemaRequiredField } from "./schemaRequiredFields.js";
 import {
   MATRIX_PERMISSION_KEYS,
@@ -161,6 +162,17 @@ export function createPersonaAccessEvaluator(
     const objectName = dot < 0 ? "" : fullFieldName.slice(0, dot);
     const objectAccess = evaluateObject(objectName);
     const fieldName = dot < 0 ? "" : fullFieldName.slice(dot + 1);
+    // Platform Event FLS is N/A: preserve object Read, never invent field
+    // grants/denials or interpret event field creation as FLS Edit.
+    if (!isFieldLevelSecurityApplicable(objectName)) {
+      const eventField: EffectiveFieldPermission = {
+        field: fullFieldName, readable: objectAccess.access.read, editable: false,
+        permissionable: false, flsApplicable: false,
+        readGrantedBy: [], editGrantedBy: [], mutedBy: [],
+      };
+      fieldCache.set(fieldKey, eventField);
+      return eventField;
+    }
     const permissionable = getFieldPermissionability(objectName, fieldName);
     const schemaRequired = isSchemaRequiredField(resolved.metadataObjectsDirectory, objectName, fieldName);
     const readGrantedBy: PermissionSource[] = [];

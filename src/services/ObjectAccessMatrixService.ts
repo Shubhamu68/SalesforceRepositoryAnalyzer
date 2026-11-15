@@ -1,8 +1,10 @@
+import { assertDataAccessAnalysisObject } from "../config/fieldSecurityPolicy.js";
 import { PersonaConfigLoader } from "../config/PersonaConfigLoader.js";
 import { PersonaPermissionResolver, type ResolvedPersonaPermissions } from "../analyzer/PersonaPermissionResolver.js";
 import { createPersonaAccessEvaluator } from "../analyzer/personaAccessEvaluator.js";
 import { OrgObjectReadVerificationService } from "./OrgObjectReadVerificationService.js";
 import { OrgPermissionFallbackService } from "./OrgPermissionFallbackService.js";
+import { isKnownSalesforcePermissionSet } from "../config/knownSalesforcePermissionSets.js";
 import type { PermissionSet } from "../models/PermissionSet.js";
 import type { ObjectAccessMatrixPersona, ObjectAccessMatrixResult } from "../models/ObjectAccessMatrixResult.js";
 
@@ -32,6 +34,7 @@ export class ObjectAccessMatrixService {
     if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(object) || object.length > 255) {
       throw new Error("Invalid object API name. Enter an object API name such as Account or OrderSummary.");
     }
+    assertDataAccessAnalysisObject(object);
     const personas = await this.personaConfigLoader.getAllPersonas();
     const results: ObjectAccessMatrixPersona[] = [];
 
@@ -46,13 +49,15 @@ export class ObjectAccessMatrixService {
           }
         }
         for (const name of persona.permissionSets) {
-          if (!resolved.directPermissionSets.some((ps) => equal(ps.name, name))) {
+          if (!resolved.directPermissionSets.some((ps) => equal(ps.name, name)) &&
+              !isKnownSalesforcePermissionSet(name)) {
             warnings.push(`Direct Permission Set metadata unavailable: ${name}`);
           }
         }
         for (const group of resolved.permissionSetGroups) {
           for (const name of group.permissionSetNames) {
-            if (!group.permissionSets.some((ps) => equal(ps.name, name))) {
+            if (!group.permissionSets.some((ps) => equal(ps.name, name)) &&
+                !isKnownSalesforcePermissionSet(name)) {
               warnings.push(`Permission Set metadata unavailable: ${name} (PSG: ${group.name})`);
             }
           }
