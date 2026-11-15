@@ -6,13 +6,18 @@ on:
       - fix/configurable-report-output
       - fix/excel-only-soql-reports
       - feature/repository-setup-and-org-credential-guards
+      - feature/org-fallback-all-access-permissions
   pull_request:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
   build-and-test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

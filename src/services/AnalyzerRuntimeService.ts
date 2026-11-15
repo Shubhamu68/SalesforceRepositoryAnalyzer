@@ -11,6 +11,8 @@ import { StackTraceImpactService } from "./StackTraceImpactService.js";
 import { ObjectAccessMatrixService } from "./ObjectAccessMatrixService.js";
 import { OrgObjectReadVerificationService } from "./OrgObjectReadVerificationService.js";
 import { SalesforcePersonaAccessVerifier } from "../salesforce/SalesforcePersonaAccessVerifier.js";
+import { SalesforceEffectivePermissionVerifier } from "../salesforce/SalesforceEffectivePermissionVerifier.js";
+import { OrgPermissionFallbackService } from "./OrgPermissionFallbackService.js";
 import { SalesforceRelationshipMetadataService } from "../salesforce/SalesforceRelationshipMetadataService.js";
 import type { SalesforceOrgConnection } from "../salesforce/SalesforceOrgConnection.js";
 import type { SalesforceMetadataPaths } from "../scanner/repositoryScanner.js";
@@ -61,16 +63,19 @@ export class AnalyzerRuntimeService {
       paths.mutingPermissionSetsPath,
       paths.profilesPath,
     );
+    const personaVerifier = useOrg ? new SalesforcePersonaAccessVerifier(this.connection) : undefined;
     const verification = new OrgObjectReadVerificationService(
-      await this.metadataPolicy,
-      useOrg ? new SalesforcePersonaAccessVerifier(this.connection) : undefined,
+      await this.metadataPolicy, personaVerifier,
+    );
+    const fallback = new OrgPermissionFallbackService(
+      personaVerifier ? new SalesforceEffectivePermissionVerifier(this.connection, personaVerifier) : undefined,
     );
     const relationships = useOrg
       ? new SalesforceRelationshipMetadataService(this.connection)
       : undefined;
     const accessQueryService = new AccessQueryService(
-      new PersonaAccessService(resolver, verification),
-      new PersonaFieldAccessService(resolver, verification),
+      new PersonaAccessService(resolver, verification, fallback),
+      new PersonaFieldAccessService(resolver, verification, fallback),
     );
     const soqlAnalysisService = new SoqlAnalysisService(
       paths.repositoryPath,
@@ -83,7 +88,7 @@ export class AnalyzerRuntimeService {
       ),
       () => this.reportOutput.requireConfiguredDirectory(),
     );
-    const objectAccessMatrixService = new ObjectAccessMatrixService(this.personas, resolver, verification);
+    const objectAccessMatrixService = new ObjectAccessMatrixService(this.personas, resolver, verification, fallback);
     const stackTraceImpactService = new StackTraceImpactService(
       paths.repositoryPath, path.join(paths.defaultPath, "objects"),
       this.personas, resolver, paths.mutingPermissionSetsPath,

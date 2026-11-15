@@ -1,5 +1,6 @@
 import type { PermissionSource } from "../analyzer/permissionAggregator.js";
 import type { ObjectReadDecision } from "../services/OrgObjectReadVerificationService.js";
+import type { ObjectPermissionEvidence } from "../services/OrgPermissionFallbackService.js";
 
 export const MATRIX_PERMISSION_KEYS = [
   "read",
@@ -31,6 +32,7 @@ export interface MatrixPermissionSources {
 
 export interface ObjectAccessMatrixPersona {
   readEvidence?: ObjectReadDecision;
+  permissionEvidence?: ObjectPermissionEvidence;
   personaName: string;
   access: MatrixAccess;
   sources: Record<MatrixPermission, MatrixPermissionSources>;
