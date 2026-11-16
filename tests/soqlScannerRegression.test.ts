@@ -65,3 +65,17 @@ test('Repository walker excludes Apex test classes and includes normal .cls file
     assert.equal(queries[0].object, 'Account');
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+
+test("Apex constructor bind with generic angle brackets stays inside one valid SOQL query", () => {
+  const source = [
+    "List<Shipment__c> pending = [SELECT Id, OrderSummary__c FROM Shipment__c WHERE",
+    "    OrderSummary__c IN :mapOfOrderSummaries.keySet() AND",
+    "    Status__c IN :new Set<String>{'Draft', 'Discrepancy'} WITH USER_MODE];",
+  ].join("\n");
+  const queries = from(source);
+  assert.equal(queries.length, 1);
+  assert.equal(queries[0].object, "Shipment__c");
+  assert.equal(queries[0].lineNumber, 1);
+  assert.equal(queries[0].securityMode, "USER_MODE");
+});
