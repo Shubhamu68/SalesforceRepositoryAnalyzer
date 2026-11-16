@@ -20,7 +20,11 @@ if (existsSync(".env")) process.loadEnvFile(".env");
 
 const app = express();
 app.use(express.json({ limit: "100kb" }));
-const PORT = 3000;
+// The portable Windows launcher selects an available local port. Dev remains on 3000.
+const PORT = Number(process.env.SALESFORCE_ANALYZER_PORT || 3000);
+if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
+  throw new Error("SALESFORCE_ANALYZER_PORT must be a valid TCP port.");
+}
 
 const salesforceOrgConnection = new SalesforceOrgConnection();
 const reportOutputConfiguration = new ReportOutputConfigurationService();
@@ -161,6 +165,26 @@ function handleApiError(error: unknown, res: express.Response): void {
     res.status(404).json({ error: message }); return;
   }
   res.status(500).json({ error: message });
+}
+
+// Serve the production React UI only for the self-contained portable distribution.
+// Dev still runs Vite separately; /api routes and their guards are unchanged.
+const staticDirectory = process.env.SALESFORCE_ANALYZER_STATIC_DIR?.trim();
+if (staticDirectory) {
+  const resolved = path.resolve(staticDirectory);
+  const indexFile = path.join(resolved, "index.html");
+  if (!existsSync(indexFile)) {
+    throw new Error("Packaged React UI is missing: " + indexFile);
+  }
+  app.use(express.static(resolved, { index: false }));
+  app.use((req, res, next) => {
+    if ((req.method !== "GET" && req.method !== "HEAD") ||
+        req.path === "/api" || req.path.startsWith("/api/")) {
+      next();
+      return;
+    }
+    res.sendFile(indexFile);
+  });
 }
 
 app.listen(PORT, "127.0.0.1", () => {
