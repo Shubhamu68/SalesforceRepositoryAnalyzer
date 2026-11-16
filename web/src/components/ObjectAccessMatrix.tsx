@@ -2,6 +2,7 @@ import { isDataAccessAnalysisObject, PLATFORM_EVENT_ANALYSIS_EXCLUSION_REASON } 
 import { useMemo, useState, type FormEvent } from "react";
 import PermissionIndicator from "./PermissionIndicator";
 import type { PermissionEvidence } from "./permissionPresentation";
+import { WORKFLOW_COPY, analysisModeHint, type SalesforceConnectionState } from "../utils/uiMessaging";
 
 const PERMISSIONS = [
   { key: "read", label: "Read", shortLabel: "Read" },
@@ -62,6 +63,7 @@ type Props = {
   objects: string[];
   loadingObjects: boolean;
   beforeAnalysis?: () => Promise<boolean>;
+  connection: SalesforceConnectionState;
 };
 
 function AccessIndicator({ granted, evidence }: { granted: boolean; evidence?: PermissionEvidence }) {
@@ -89,7 +91,7 @@ function PermissionDetail({
       {evidence && <p className="matrix-source-caption" role="status">{evidence.message}</p>}
       {detail.grantedBy.length > 0 ? (
         <div className="matrix-source-stack">
-          <span className="matrix-source-caption">Effective grants from</span>
+          <span className="matrix-source-caption">Repository grants</span>
           {detail.grantedBy.map((source, index) => (
             <div className="matrix-source-line" key={`${source.type}-${source.permissionSetGroup ?? "direct"}-${source.permissionSet}-${index}`}>
               <span className="matrix-source-bullet" aria-hidden="true">●</span>
@@ -106,12 +108,12 @@ function PermissionDetail({
           ))}
         </div>
       ) : (
-        <p className="matrix-empty-grant">No effective grant established in repository metadata</p>
+        <p className="matrix-empty-grant">No repository grant</p>
       )}
 
       {detail.mutedBy.map((mute, index) => (
         <div className="matrix-mute-line" key={`${mute.permissionSetGroup}-${mute.mutingPermissionSet}-${index}`}>
-          <span className="matrix-source-caption">Muted within {mute.permissionSetGroup}</span>
+          <span className="matrix-source-caption">Muted by {mute.permissionSetGroup}</span>
           <strong>{mute.mutingPermissionSet}</strong>
           {mute.affectedPermissionSets.length > 0 && (
             <small>Suppresses: {mute.affectedPermissionSets.join(", ")}</small>
@@ -122,7 +124,7 @@ function PermissionDetail({
   );
 }
 
-export default function ObjectAccessMatrix({ objects, loadingObjects, beforeAnalysis }: Props) {
+export default function ObjectAccessMatrix({ objects, loadingObjects, beforeAnalysis, connection }: Props) {
   const [objectName, setObjectName] = useState("");
   const [data, setData] = useState<MatrixResult | null>(null);
   const [loading, setLoading] = useState(false);
@@ -178,10 +180,10 @@ export default function ObjectAccessMatrix({ objects, loadingObjects, beforeAnal
       <form className="panel matrix-query-panel" onSubmit={runAnalysis}>
         <div className="panel-heading">
           <div>
-            <h2>Analyze object access across personas</h2>
-            <p>Enter one Salesforce object API name to compare all configured personas.</p>
+            <h2>{WORKFLOW_COPY.matrix.heading}</h2>
+            <p>{WORKFLOW_COPY.matrix.description}</p>
           </div>
-          <span className="mini-tag">Repository + Salesforce verification</span>
+          <span className="mini-tag">{analysisModeHint("matrix", connection)}</span>
         </div>
         <div className="matrix-query-row">
           <div className="form-field matrix-object-input">
@@ -208,7 +210,7 @@ export default function ObjectAccessMatrix({ objects, loadingObjects, beforeAnal
             {loading ? "Analyzing all personas…" : "Run Access Matrix"}
           </button>
         </div>
-        <p className="matrix-hint">Objects can also be entered manually when absent from local object metadata.</p>
+        <p className="matrix-hint">You can also enter an object not listed in the repository.</p>
         {error && <div className="error-card" role="alert">{error}</div>}
       </form>
 
@@ -232,7 +234,7 @@ export default function ObjectAccessMatrix({ objects, loadingObjects, beforeAnal
 
           {data.warnings.length > 0 && (
             <details className="matrix-warning-box">
-              <summary>{data.warnings.length} metadata warning(s) — review before relying on the results</summary>
+              <summary>{data.warnings.length} metadata warning(s) · view details</summary>
               <ul>{data.warnings.map((warning, index) => <li key={`${warning}-${index}`}>{warning}</li>)}</ul>
             </details>
           )}
@@ -280,8 +282,8 @@ export default function ObjectAccessMatrix({ objects, loadingObjects, beforeAnal
           {detailed && (
             <div className="matrix-detailed-section">
               <div className="matrix-detailed-heading">
-                <h3>Permission Set breakdown</h3>
-                <p>Effective sources are shown after PSG muting. Open a persona to inspect all seven permissions.</p>
+                <h3>Permission details</h3>
+                <p>Expand a persona to review Profile, Permission Set, PSG, and Salesforce evidence.</p>
               </div>
               {visiblePersonas.map((persona) => (
                 <details className="matrix-persona-detail" key={persona.personaName} open={visiblePersonas.length === 1 ? true : undefined}>
@@ -296,7 +298,7 @@ export default function ObjectAccessMatrix({ objects, loadingObjects, beforeAnal
                         label={permission.label}
                         granted={persona.access[permission.key]}
                         detail={persona.sources[permission.key]}
-                        evidence={permission.key === "read" ? persona.readEvidence : undefined}
+                        evidence={persona.permissionEvidence?.[permission.key] ?? (permission.key === "read" ? persona.readEvidence : undefined)}
                       />
                     ))}
                   </div>
@@ -304,7 +306,7 @@ export default function ObjectAccessMatrix({ objects, loadingObjects, beforeAnal
               ))}
             </div>
           )}
-          <p className="matrix-disclaimer">Profile, Permission Set and PSG metadata are evaluated first. Missing repository grants are verified against matching active Salesforce users. A warning icon indicates an org-only grant; Review indicates failed, incomplete or mixed verification. Record-level sharing is not evaluated.</p>
+          <p className="matrix-disclaimer">Repository grants first; Salesforce checks missing grants when available. ⚠ = org-only grant; Review = incomplete verification. Record sharing is not evaluated.</p>
         </section>
       )}
     </div>

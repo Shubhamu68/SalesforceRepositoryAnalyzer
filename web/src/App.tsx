@@ -12,6 +12,7 @@ import RepositorySetupModal from "./components/RepositorySetupModal";
 import OrgAnalysisWarningModal, { type AnalysisWarning } from "./components/OrgAnalysisWarningModal";
 import { repositoryConnectionIndicator } from "./utils/repositoryConnectionIndicator";
 import { filterMetadataSuggestions } from "./utils/metadataSuggestions";
+import { WORKFLOW_COPY, analysisModeHint, reportOutputHint, repositorySetupMessage, orgPreflightMessage, salesforceConnectionLabel, type SalesforceConnectionState } from "./utils/uiMessaging";
 
 type Persona = {
   name: string;
@@ -128,7 +129,7 @@ function App() {
   const [page, setPage] = useState<Page>("dashboard");
   const [repositoryName, setRepositoryName] = useState<string>("");
   const [apiConnected, setApiConnected] = useState(false);
-  const [salesforceConnection, setSalesforceConnection] = useState<"connected" | "connecting" | "unavailable" | "not-configured">("connecting");
+  const [salesforceConnection, setSalesforceConnection] = useState<SalesforceConnectionState>("connecting");
   const [lastSoql, setLastSoql] = useState<SoqlAnalysisResult | null>(null);
   const [reportFolderModalOpen, setReportFolderModalOpen] = useState(false);
   const [reportFolderExplanation, setReportFolderExplanation] = useState("");
@@ -187,14 +188,14 @@ function App() {
       try {
         const response = await fetch("/api/repository/status", { cache: "no-store" });
         if (!response.ok) throw new Error("Unable to check Salesforce repository configuration.");
-        const status: { configured: boolean; message: string; directory: string | null; repositoryName: string | null } =
+        const status: { configured: boolean; reason?: string; message: string; directory: string | null; repositoryName: string | null } =
           await response.json();
         if (!active) return;
         setRepoReady(status.configured);
         setRepoChecked(true);
         setRepoModalOpen(!status.configured);
         setRepoCurrentPath(status.directory);
-        setRepoError(status.configured ? "" : status.message);
+        setRepoError(status.configured ? "" : repositorySetupMessage(status.reason, status.message));
         setRepositoryName(status.configured ? (status.repositoryName || "") : "");
       } catch (cause) {
         if (!active) return;
@@ -214,13 +215,13 @@ function App() {
     try {
       const response = await fetch("/api/repository/status", { cache: "no-store" });
       if (!response.ok) throw new Error("Cannot check repository configuration.");
-      const status: { configured: boolean; message: string; directory: string | null } = await response.json();
+      const status: { configured: boolean; reason?: string; message: string; directory: string | null } = await response.json();
       if (!status.configured) {
         setRepoReady(false);
         setRepoChecked(true);
         setRepositoryName("");
         setRepoCurrentPath(status.directory);
-        setRepoError(status.message);
+        setRepoError(repositorySetupMessage(status.reason, status.message));
         setRepoModalOpen(true);
         return false;
       }
@@ -277,7 +278,7 @@ function App() {
         await response.json().catch(() => ({}));
       if (!response.ok) {
         setOrgWarning({
-          kind: "ERROR", title: "Invalid Salesforce Credentials",
+          kind: "ERROR", title: "Salesforce connection unavailable",
           message: payload.error || "Salesforce credentials are invalid or the org connection is unavailable. Correct the .env values and retry.",
         });
         return null;
@@ -286,8 +287,8 @@ function App() {
         const confirmed = await new Promise<boolean>(resolve => {
           orgWarningResolver.current = resolve;
           setOrgWarning({
-            kind: "WARNING", title: "Salesforce Credentials Missing",
-            message: payload.warning || "Salesforce Client Credentials are missing. Continue with repository-only checks?",
+            kind: "WARNING", title: "Salesforce verification not configured",
+            message: orgPreflightMessage(payload.missing),
           });
         });
         return confirmed ? { acknowledgeRepoOnly: true } : null;
@@ -295,7 +296,7 @@ function App() {
       return { acknowledgeRepoOnly: false };
     } catch (cause) {
       setOrgWarning({
-        kind: "ERROR", title: "Salesforce Connection Check Failed",
+        kind: "ERROR", title: "Salesforce connection check failed",
         message: cause instanceof Error ? cause.message : "Unable to validate Salesforce connection.",
       });
       return null;
@@ -476,9 +477,9 @@ function App() {
         if (!configurationResponse.ok) {
           throw new Error("Unable to check the report output folder. Ensure the local API is running.");
         }
-        const configuration: { configured: boolean; message: string } = await configurationResponse.json();
+        const configuration: { configured: boolean; reason?: string; message: string } = await configurationResponse.json();
         if (!configuration.configured) {
-          setReportFolderExplanation(configuration.message);
+          setReportFolderExplanation(reportOutputHint(configuration.reason, configuration.message));
           setReportFolderError("");
           setReportFolderModalOpen(true);
           return;
@@ -532,7 +533,7 @@ function App() {
       if (checkType === "soql" && response.status === 409) {
         const body: { code?: string; error?: string } = await response.json().catch(() => ({}));
         if (body.code === "REPORT_OUTPUT_NOT_CONFIGURED") {
-          setReportFolderExplanation(body.error || "Choose a folder for the Excel report.");
+          setReportFolderExplanation(reportOutputHint(undefined, body.error || "Choose a folder to save the Excel report."));
           setReportFolderError("");
           setReportFolderModalOpen(true);
           return;
@@ -637,11 +638,11 @@ function App() {
           ))}
         </div>
         {access.permissionEvidence && Object.keys(access.permissionEvidence).length > 0 && (
-          <div className="source-section">
-            <h3>Salesforce verification and repository differences</h3>
+          <details className="source-section">
+            <summary>Verification details</summary>
             {permissions.filter(({ key }) => access.permissionEvidence?.[key]).map(({ label, key }) =>
               <p key={key} className="muted"><strong>{label}:</strong> {access.permissionEvidence?.[key]?.message}</p>)}
-          </div>
+          </details>
         )}
         {!access.permissionEvidence && access.readEvidence && (
           <p className="muted" role="status">{access.readEvidence.message}</p>
@@ -662,9 +663,8 @@ function App() {
             <div className="permission-row"><span>Edit FLS</span><strong className="status">N/A</strong></div>
           </div>
           <div className="source-section" role="status">
-            <h3>Platform Event — FLS not applicable</h3>
+            <h3>Field FLS not applicable</h3>
             <p className="muted">{access.flsReason}</p>
-            <p className="muted">Use Object Access to check publishing and subscription permissions. No individual field-level permission check was performed.</p>
           </div>
         </div>
       );
@@ -693,27 +693,25 @@ function App() {
           </div>
         </div>
         {(access.permissionEvidence || access.objectReadEvidence || access.fieldReadEvidence) && (
-          <div className="source-section" role="status">
-            <h3>Salesforce verification and repository differences</h3>
+          <details className="source-section">
+            <summary>Verification details</summary>
             {access.permissionEvidence?.read && <p className="muted">Field Read: {access.permissionEvidence.read.message}</p>}
             {access.permissionEvidence?.edit && <p className="muted">Field Edit: {access.permissionEvidence.edit.message}</p>}
             {!access.permissionEvidence && access.objectReadEvidence && <p className="muted">Object Read: {access.objectReadEvidence.message}</p>}
             {!access.permissionEvidence && access.fieldReadEvidence && <p className="muted">Field Read: {access.fieldReadEvidence.message}</p>}
-          </div>
+          </details>
         )}
         <div className="source-section">
           <h3>Read granted by</h3>
 
           {access.schemaRequired && (
             <p className="muted">
-              This field is universally required in Salesforce field metadata.
-              No separate Profile or Permission Set FLS grant is expected; object access is still required.
+              Salesforce requires this field. Individual FLS grants are not needed; object access still applies.
             </p>
           )}
           {access.permissionable === false && !access.schemaRequired && access.read && (
             <p className="muted">
-              Salesforce metadata marks this field as non-permissionable.
-              Its Read access follows object Read; an individual FLS grant is not required.
+              Read follows object access; separate field FLS is not applicable.
             </p>
           )}
           {access.readGrantedBy.length === 0 ? (
@@ -722,7 +720,7 @@ function App() {
                 ? "Read follows object Read (universally required field)."
                 : access.permissionable === false
                 ? "No explicit field Read grant required."
-                : "No direct grant found."}
+                : "No repository grant found."}
             </p>
           ) : (
             access.readGrantedBy.map(
@@ -756,7 +754,7 @@ function App() {
             <p className="muted">
               {access.schemaRequired && access.edit
                 ? "Edit follows object Edit (universally required field)."
-                : "No direct grant found."}
+                : "No repository grant found."}
             </p>
           ) : (
             access.editGrantedBy.map(
@@ -783,26 +781,14 @@ function App() {
           )}
         </div>
 
-        <div className="source-section">
-          <h3>Muted by</h3>
-
-          {access.mutedBy.length === 0 ? (
-            <p className="muted">
-              Not muted.
-            </p>
-          ) : (
-            access.mutedBy.map(
-              (source) => (
-                <div
-                  className="source-item muted-source"
-                  key={source}
-                >
-                  {source}
-                </div>
-              )
-            )
-          )}
-        </div>
+        {access.mutedBy.length > 0 && (
+          <div className="source-section">
+            <h3>Muted by</h3>
+            {access.mutedBy.map((source) => (
+              <div className="source-item muted-source" key={source}>{source}</div>
+            ))}
+          </div>
+        )}
       </div>
     );
   }
@@ -842,9 +828,8 @@ function App() {
         <div className="soql-success-banner" role="status" aria-live="polite">
           <div className="soql-success-icon" aria-hidden="true">✓</div>
           <div className="soql-success-copy">
-            <span className="soql-success-eyebrow">ANALYSIS COMPLETED</span>
-            <h3>Your SOQL Excel report is ready</h3>
-            <p>The Excel report was generated successfully for <strong>{analysis.personaName}</strong>.</p>
+            <span className="soql-success-eyebrow">SOQL ANALYSIS COMPLETE</span>
+            <h3>Excel report saved for {analysis.personaName}</h3>
           </div>
           <div className="soql-success-actions">
             <span className="soql-output-label">Output folder</span>
@@ -861,9 +846,7 @@ function App() {
 
         <div className="result-card">
           <div className="result-header">
-            <span className="result-type">
-              SOQL ANALYSIS SUMMARY
-            </span>
+            <span className="result-type">SUMMARY</span>
 
             <h2>{analysis.personaName}</h2>
           </div>
@@ -903,10 +886,10 @@ function App() {
     <section className="panel analysis-panel">
       <div className="panel-heading">
         <div>
-          <h2>{page === "soql" ? "Run SOQL security analysis" : "Access check configuration"}</h2>
-          <p>Analyze the configured Salesforce repository using persona permissions.</p>
+          <h2>{page === "soql" ? WORKFLOW_COPY.soql.heading : WORKFLOW_COPY.access.heading}</h2>
+          <p>{page === "soql" ? WORKFLOW_COPY.soql.description : WORKFLOW_COPY.access.description}</p>
         </div>
-        <span className="mini-tag">Repository metadata</span>
+        
       </div>
       <div className="analysis-fields">
         <div className="form-field">
@@ -1027,14 +1010,12 @@ function App() {
             )}
           </>
         )}
-        {page === "soql" && (
-          <div className="helper-box">Scans Apex SOQL queries against the selected persona. The backend saves one Excel workbook in the configured output folder.</div>
-        )}
+
       </div>
       <div className="form-footer">
-        <span>Repository-first analysis · Salesforce org verifies missing grants when connected</span>
+        <span>{analysisModeHint(page === "soql" ? "soql" : "access", salesforceConnection)}</span>
         <button className="primary-button" disabled={checking} type="button" onClick={() => { void handleCheck(); }}>
-          {checking ? (page === "soql" ? "Analysing…" : "Checking…") : (page === "soql" ? "▷  Run SOQL Analysis" : "Check Access")}
+          {checking ? (page === "soql" ? "Analyzing…" : "Checking…") : (page === "soql" ? "Run SOQL Analysis" : "Check Access")}
         </button>
       </div>
       {error && <div className="error-card" role="alert">{error}</div>}
@@ -1052,7 +1033,7 @@ function App() {
             title={repoReady ? repositoryName : "Salesforce repository setup status"}>
             <span className="connection-dot" />{repositoryConnectionIndicator(apiConnected, repoChecked, repoReady).label}
           </span>
-          <span className={`connection ${salesforceConnection === "connected" ? "online" : "offline"}`} title="Salesforce authentication status"><span className="connection-dot" />{salesforceConnection === "connected" ? "Salesforce connected" : salesforceConnection === "connecting" ? "Salesforce connecting…" : salesforceConnection === "not-configured" ? "Salesforce not configured" : "Salesforce unavailable"}</span>
+          <span className={`connection ${salesforceConnection === "connected" ? "online" : "offline"}`} title="Salesforce authentication status"><span className="connection-dot" />{salesforceConnectionLabel(salesforceConnection)}</span>
           <span className="avatar">RA</span>
         </div>
       </header>
@@ -1067,31 +1048,27 @@ function App() {
           <button className={page === "reports" ? "active" : ""} onClick={() => navigate("reports")}><span className="nav-symbol">▧</span>Reports</button>
           <button className={page === "salesforce" ? "active" : ""} onClick={() => navigate("salesforce")}><span className="nav-symbol">☁</span>Salesforce Org</button>
         </nav>
-        <div className="sidebar-bottom">
-          <div className="side-info-card"><div className="side-info-title">Output reports folder</div><div className="side-info-text" title={lastSoql?.outputFolder || ""}>{lastSoql?.outputFolder || "Available after SOQL analysis"}</div></div>
-          <div className="sidebar-footnote">Repository access analyzer</div>
-        </div>
       </aside>
       <main className="main-area">
         <div className="page-heading">
           <div>
             <div className="breadcrumb">WORKSPACE / {page.toUpperCase()}</div>
             <h1>{page === "dashboard" ? "Security overview" : page === "access" ? "Access Checker" : page === "soql" ? "SOQL Security Analysis" : page === "matrix" ? "Object Access Matrix" : page === "stack" ? "Stack Trace Impact Analyzer" : page === "salesforce" ? "Salesforce Org Connectivity" : "Generated reports"}</h1>
-            <p>{page === "dashboard" ? "Explore persona access and SOQL security across your Salesforce repository." : page === "access" ? "Inspect effective object and field permissions for a selected persona." : page === "soql" ? "Scan Apex queries for persona-specific security findings." : page === "matrix" ? "Compare effective object permissions across all configured personas." : page === "stack" ? "Trace reachable SOQL queries from an Apex stack trace and compare access across all personas." : page === "salesforce" ? "Automatically connect to Salesforce and verify standard and Tooling API queries." : "Review where the latest generated analysis reports are saved."}</p>
+            <p>{page === "dashboard" ? "Latest SOQL security findings and quick actions." : page === "access" ? "Object and field permissions by persona." : page === "soql" ? "Persona-specific SOQL findings and Excel output." : page === "matrix" ? "Compare object permissions across personas." : page === "stack" ? "Trace SOQL queries and persona access." : page === "salesforce" ? "Connection status and read-only query tests." : "Excel output from this session."}</p>
           </div>
-          {page === "dashboard" && <button className="primary-button" onClick={() => navigate("soql")}>▷  Run SOQL Analysis</button>}
+          {page === "dashboard" && <button className="primary-button" onClick={() => navigate("soql")}>Run SOQL Analysis</button>}
         </div>
 
         {page === "dashboard" && (
           <>
             <div className="metrics-grid">
-              {metricCards.map((metric) => <div className="metric-card" key={metric.label}><div className="metric-label">{metric.label}</div><div className={`metric-icon ${metric.tone}`}>{metric.icon}</div><div className="metric-number">{metric.value ?? "—"}</div><div className="metric-caption">{soqlSummary ? "Latest session" : "Run an analysis to populate"}</div></div>)}
+              {metricCards.map((metric) => <div className="metric-card" key={metric.label}><div className="metric-label">{metric.label}</div><div className={`metric-icon ${metric.tone}`}>{metric.icon}</div><div className="metric-number">{metric.value ?? "—"}</div></div>)}
             </div>
             <div className="dashboard-grid">
               <section className="panel severity-panel"><h2>Finding severity</h2>{soqlSummary ? <><div className="severity-visual" style={{ background: `conic-gradient(#f04452 0 ${soqlSummary.totalFindings ? 100 * soqlSummary.errors / soqlSummary.totalFindings : 0}%, #f5a23c 0 100%)` }}><div><strong>{soqlSummary.totalFindings}</strong><span>Total findings</span></div></div><div className="legend"><span><i className="dot red-dot"/>Errors <strong>{soqlSummary.errors}</strong></span><span><i className="dot orange-dot"/>Reviews <strong>{soqlSummary.reviews}</strong></span></div></> : <div className="empty-visual"><span>◌</span><p>No analysis completed yet</p><small>Run SOQL Security Analysis to populate this chart.</small></div>}</section>
-              <section className="panel summary-panel"><h2>Repository & latest analysis</h2><div className="detail-line"><span>Repository</span><strong title={repositoryName}>{repositoryName || "Not loaded"}</strong></div><div className="detail-line"><span>API status</span><strong className={apiConnected ? "text-success" : "text-danger"}>{apiConnected ? "Connected" : "Unavailable"}</strong></div><div className="detail-line"><span>Salesforce org</span><strong className={salesforceConnection === "connected" ? "text-success" : ""}>{salesforceConnection === "connected" ? "Connected automatically" : salesforceConnection === "connecting" ? "Connecting…" : salesforceConnection === "not-configured" ? "Not configured" : "Connection unavailable"}</strong></div><div className="detail-line"><span>Last analysed</span><strong>{lastRunAt ? lastRunAt.toLocaleString() : "Not yet run"}</strong></div><div className="detail-line"><span>Persona</span><strong>{lastSoql?.personaName || "—"}</strong></div><div className="detail-line"><span>Reports folder</span><strong title={lastSoql?.outputFolder}>{lastSoql?.outputFolder || "—"}</strong></div></section>
+              <section className="panel summary-panel"><h2>Latest analysis</h2><div className="detail-line"><span>Repository</span><strong title={repositoryName}>{repositoryName || "Not loaded"}</strong></div><div className="detail-line"><span>Last analysed</span><strong>{lastRunAt ? lastRunAt.toLocaleString() : "Not yet run"}</strong></div><div className="detail-line"><span>Persona</span><strong>{lastSoql?.personaName || "—"}</strong></div><div className="detail-line"><span>Reports folder</span><strong title={lastSoql?.outputFolder}>{lastSoql?.outputFolder || "—"}</strong></div></section>
             </div>
-            <section className="panel shortcuts-panel"><div className="panel-heading"><div><h2>Quick actions</h2><p>Choose an analysis workflow.</p></div></div><div className="quick-actions"><button onClick={() => navigate("access")}><span className="shortcut-icon">◇</span><strong>Check object or field access</strong><small>Resolve permissions for a persona</small><span className="shortcut-arrow">→</span></button><button onClick={() => navigate("soql")}><span className="shortcut-icon">◎</span><strong>Scan SOQL security</strong><small>Generate findings and reports</small><span className="shortcut-arrow">→</span></button><button onClick={() => navigate("reports")}><span className="shortcut-icon">▧</span><strong>View report location</strong><small>Find generated Excel reports</small><span className="shortcut-arrow">→</span></button></div></section>
+            <section className="panel shortcuts-panel"><div className="panel-heading"><div><h2>Quick actions</h2></div></div><div className="quick-actions"><button onClick={() => navigate("access")}><span className="shortcut-icon">◇</span><strong>Check object or field access</strong><small>Resolve permissions for a persona</small><span className="shortcut-arrow">→</span></button><button onClick={() => navigate("soql")}><span className="shortcut-icon">◎</span><strong>Scan SOQL security</strong><small>Generate an Excel workbook</small><span className="shortcut-arrow">→</span></button><button onClick={() => navigate("reports")}><span className="shortcut-icon">▧</span><strong>View report location</strong><small>Find generated Excel reports</small><span className="shortcut-arrow">→</span></button></div></section>
           </>
         )}
 
@@ -1104,7 +1081,7 @@ function App() {
                   renderSoqlResult(result as SoqlAnalysisResult)
                 ) : (
                   <>
-                    <div className="results-heading"><div><span>ANALYSIS RESULT</span><h2>{selectedPersona}</h2></div><span className="result-complete">✓ Completed</span></div>
+                    <div className="results-heading"><div><span>ACCESS RESULT</span><h2>{selectedPersona}</h2></div></div>
                     {checkType === "object" ? renderObjectResult(result as ObjectAccessResult) : renderFieldResult(result as FieldAccessResult)}
                   </>
                 )}
@@ -1113,16 +1090,16 @@ function App() {
           </>
         )}
 
-        {page === "matrix" && <ObjectAccessMatrix objects={objects} loadingObjects={loadingObjects} beforeAnalysis={ensureRepositoryReady} />}
-        {page === "stack" && <StackTraceImpact beforeAnalysis={async () => {
+        {page === "matrix" && <ObjectAccessMatrix objects={objects} loadingObjects={loadingObjects} connection={salesforceConnection} beforeAnalysis={ensureRepositoryReady} />}
+        {page === "stack" && <StackTraceImpact connection={salesforceConnection} beforeAnalysis={async () => {
           if (!(await ensureRepositoryReady())) return null;
           return preflightOrgVerification();
         }} />}
         {page === "salesforce" && <SalesforceOrgConnection />}
 
-        {showSoqlOverlay && <AnalysisLoadingOverlay title="Analysis in Progress" description="Scanning Apex SOQL queries and preparing your security reports..." hint="This may take 20–30 seconds." />}
+        {showSoqlOverlay && <AnalysisLoadingOverlay title="Analyzing SOQL" description="Scanning Apex queries and generating the Excel workbook…" />}
 
-        {page === "reports" && <section className="panel reports-panel"><div className="panel-heading"><div><h2>Latest SOQL analysis reports</h2><p>Files are written by the backend, not downloaded by the browser.</p></div></div>{lastSoql ? <><div className="detail-line"><span>Persona</span><strong>{lastSoql.personaName}</strong></div><div className="detail-line"><span>Report folder</span><strong className="path-text">{lastSoql.outputFolder}</strong></div><div className="detail-line"><span>Findings</span><strong>{lastSoql.summary.totalFindings}</strong></div><button className="secondary-button" onClick={() => navigator.clipboard.writeText(lastSoql.outputFolder)}>Copy folder path</button></> : <div className="empty-reports"><span>▧</span><h3>No reports from this session</h3><p>Run SOQL Security Analysis to generate an Excel workbook.</p><button className="primary-button" onClick={() => navigate("soql")}>Run SOQL Analysis</button></div>}</section>}
+        {page === "reports" && <section className="panel reports-panel"><div className="panel-heading"><div><h2>Latest Excel report</h2><p>Saved directly to your configured folder.</p></div></div>{lastSoql ? <><div className="detail-line"><span>Persona</span><strong>{lastSoql.personaName}</strong></div><div className="detail-line"><span>Report folder</span><strong className="path-text">{lastSoql.outputFolder}</strong></div><div className="detail-line"><span>Findings</span><strong>{lastSoql.summary.totalFindings}</strong></div><button className="secondary-button" onClick={() => navigator.clipboard.writeText(lastSoql.outputFolder)}>Copy folder path</button></> : <div className="empty-reports"><span>▧</span><h3>No report yet</h3><p>Run SOQL analysis to generate an Excel workbook.</p><button className="primary-button" onClick={() => navigate("soql")}>Run SOQL Analysis</button></div>}</section>}
       </main>
       {repoModalOpen && (
         <RepositorySetupModal

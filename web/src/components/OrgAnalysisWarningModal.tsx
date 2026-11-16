@@ -41,14 +41,12 @@ export default function OrgAnalysisWarningModal({ warning, onContinue, onCancel 
           </div>
         </div>
         <p id="org-preflight-description">{warning.message}</p>
-        {warning.kind === "ERROR" &&
-          <div className="report-folder-error" role="alert">Analysis is blocked until the configured org connection works.</div>}
         <div className="report-folder-actions">
           <button ref={first} type="button" className="secondary-button" onClick={onCancel}>
             {warning.kind === "ERROR" ? "Close" : "Cancel"}
           </button>
           {warning.kind === "WARNING" &&
-            <button type="button" className="primary-button" onClick={onContinue}>Continue with Repository Only</button>}
+            <button type="button" className="primary-button" onClick={onContinue}>Run repository-only</button>}
         </div>
       </div>
     </div>

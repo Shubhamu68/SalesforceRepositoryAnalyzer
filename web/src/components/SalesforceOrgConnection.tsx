@@ -46,7 +46,6 @@ export default function SalesforceOrgConnection() {
   const [busy, setBusy] = useState(false);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState("");
-  const [message, setMessage] = useState("");
   const [api, setApi] = useState<QueryApi>("data");
   const [soql, setSoql] = useState(DATA_SAMPLE);
   const [result, setResult] = useState<QueryResult | null>(null);
@@ -75,13 +74,11 @@ export default function SalesforceOrgConnection() {
 
   async function reconnect() {
     setError("");
-    setMessage("");
     setBusy(true);
     try {
       const response = await fetch("/api/salesforce/reconnect", { method: "POST" });
       const data = await readJson(response);
       setStatus(data as unknown as ConnectionStatus);
-      setMessage("Salesforce authentication completed automatically.");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Salesforce authentication failed.");
       await refreshStatus().catch(() => undefined);
@@ -93,7 +90,6 @@ export default function SalesforceOrgConnection() {
   async function runQuery(query: string, queryApi: QueryApi) {
     setRunning(true);
     setError("");
-    setMessage("");
     setResult(null);
     try {
       const response = await fetch("/api/salesforce/query", {
@@ -111,7 +107,7 @@ export default function SalesforceOrgConnection() {
     }
   }
 
-  const connectionLabel = !status ? "Checking…" : status.connected ? "Connected automatically" :
+  const connectionLabel = !status ? "Checking…" : status.connected ? "Connected" :
     status.connecting ? "Connecting…" : status.configured ? "Connection unavailable" : "Not configured";
 
   return (
@@ -119,14 +115,15 @@ export default function SalesforceOrgConnection() {
       <section className="panel sf-connection-panel">
         <div className="panel-heading">
           <div>
-            <h2>Salesforce org connection</h2>
-            <p>Backend authenticates automatically through Client Credentials. No Salesforce login screen is needed.</p>
+            <h2>Connection</h2>
+            <p>Uses Client Credentials configured in <code>.env</code>.</p>
           </div>
-          <span className={`sf-connection-pill ${status?.connected ? "sf-connection-on" : status?.connecting ? "sf-connection-pending" : "sf-connection-off"}`}>
+          <span role="status" className={`sf-connection-pill ${status?.connected ? "sf-connection-on" : status?.connecting ? "sf-connection-pending" : "sf-connection-off"}`}>
             {connectionLabel}
           </span>
         </div>
         <div className="sf-connection-content">
+          <details className="sf-detail-disclosure"><summary>Connection details</summary>
           <div className="sf-connection-details">
             <div><span>Environment</span><strong>{status?.environment || "—"}</strong></div>
             <div><span>Authentication</span><strong>Client Credentials (server-to-server)</strong></div>
@@ -134,8 +131,7 @@ export default function SalesforceOrgConnection() {
             <div><span>Salesforce org ID</span><strong>{status?.organizationId || "—"}</strong></div>
             <div><span>Run As user ID</span><strong>{status?.userId || "—"}</strong></div>
             <div><span>Instance</span><strong>{status?.instanceUrl || "—"}</strong></div>
-          </div>
-          <p className="sf-description">Connection starts with the backend and is retried automatically when needed. Credentials remain in the backend .env file; access tokens remain in process memory. Repository-based permission analysis is unchanged.</p>
+          </div></details>
           {status?.message && <p className="sf-warning" role="status">{status.message}</p>}
           <div className="sf-actions">
             <button className="secondary-button" type="button" disabled={busy || !status?.configured} onClick={() => void reconnect()}>
@@ -148,10 +144,10 @@ export default function SalesforceOrgConnection() {
       <section className="panel sf-connection-panel">
         <div className="panel-heading">
           <div>
-            <h2>SOQL connection test</h2>
-            <p>Run a read-only query using Salesforce REST API or Tooling API.</p>
+            <h2>Test Salesforce query</h2>
+            <p>Run read-only SOQL through REST or Tooling API.</p>
           </div>
-          <span className="mini-tag">Proof of concept</span>
+          
         </div>
         <div className="sf-connection-content">
           <div className="sf-preset-actions">
@@ -169,19 +165,18 @@ export default function SalesforceOrgConnection() {
           <label htmlFor="sf-soql" className="sf-field-label">SOQL query</label>
           <textarea id="sf-soql" rows={5} spellCheck={false} value={soql} disabled={running} onChange={(event) => setSoql(event.target.value)} placeholder="SELECT Id, Name FROM Account LIMIT 5" />
           <div className="sf-actions">
-            <span className="sf-description">SELECT queries only. At most 50 records are shown from the first response.</span>
+            <span className="sf-description">SELECT only · first 50 records shown</span>
             <button type="button" className="primary-button" disabled={!status?.connected || running || !soql.trim()} onClick={() => void runQuery(soql, api)}>{running ? "Running query…" : "Run SOQL"}</button>
           </div>
           {result && (
             <div className="sf-result" aria-live="polite">
               <div className="sf-result-header"><strong>Query successful</strong><span>{result.totalSize} matched · {result.displayedCount} shown · {result.api === "tooling" ? "Tooling API" : "Standard REST"}</span></div>
-              {result.truncated && <p className="sf-warning">Additional records exist; pagination is deferred to a later milestone.</p>}
+              {result.truncated && <p className="sf-warning">Additional records exist; showing {result.displayedCount}.</p>}
               <pre>{JSON.stringify(result.records, null, 2)}</pre>
             </div>
           )}
         </div>
       </section>
-      {message && <div className="sf-feedback sf-success" role="status">{message}</div>}
       {error && <div className="sf-feedback sf-error" role="alert">{error}</div>}
     </div>
   );

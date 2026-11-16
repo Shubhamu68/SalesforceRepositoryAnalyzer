@@ -28,7 +28,7 @@ test("no-match message requires a structured no-match reason", () => {
 
 test("verified message does not include Salesforce user counts", () => {
   assert.equal(orgVerifiedSummary({ object: "OrderItemSummary", matchedUsers: 2, checkedUsers: 2, sampled: false, message: "Access verified from Salesforce for all 2 matching active users." }),
-    "Verified from Org: OrderItemSummary Read — Access verified from Salesforce");
+    "OrderItemSummary Read verified in Salesforce");
 });
 
 test("SOQL query results are scoped to the selected persona", () => {

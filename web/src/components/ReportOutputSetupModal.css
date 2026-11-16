@@ -14,4 +14,4 @@
 .report-folder-error{font-size:12px;color:#ae2944;background:#fff2f3;border:1px solid #f5bcc6;border-radius:7px;padding:11px 13px;margin-bottom:14px}
 .report-folder-actions{display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap}
 .report-folder-actions button{min-height:43px}
-@media(max-width:540px){.report-folder-dialog{padding:19px}.report-folder-actions{flex-direction:column-reverse}.report-folder-actions button{width:100%;white-space:normal}}
+.report-folder-requirements{margin:14px 0}.report-folder-requirements summary{cursor:pointer;font-size:12px;font-weight:700;color:#355577}.report-folder-current-path{overflow-wrap:anywhere}@media(max-width:540px){.report-folder-dialog{padding:19px}.report-folder-actions{flex-direction:column-reverse}.report-folder-actions button{width:100%;white-space:normal}}
