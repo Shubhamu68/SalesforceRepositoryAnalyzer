@@ -31,7 +31,7 @@ test("repository grants take priority over Salesforce and do not show warning", 
   assert.deepEqual(result.evidence, {});
 });
 
-test("all seven object privileges fall back to org, warning only for verified org-only grants", async () => {
+test("all seven object privileges show neutral provenance for Salesforce-verified grants", async () => {
   const fallback = new OrgPermissionFallbackService({
     verifyObject: async () => objectEvidence("ORG_VERIFIED"),
     verifyField: async () => ({ read: evidence("ORG_VERIFIED"), edit: evidence("ORG_VERIFIED") }),
@@ -42,8 +42,8 @@ test("all seven object privileges fall back to org, warning only for verified or
     assert.equal(result.evidence[permission]?.source, "ORG_VERIFIED", permission);
     const display = permissionPresentation(result.access[permission], result.evidence[permission]);
     assert.equal(display.label, "Yes");
-    assert.equal(display.orgWarning, true);
-    assert.match(display.title, /not found in repository metadata/i);
+    assert.equal(display.orgVerified, true);
+    assert.match(display.title, /verified in Salesforce org|not found in repository metadata/i);
   }
 });
 
@@ -98,7 +98,7 @@ test("mixed matching-user access or incomplete API results require Review, never
   assert.equal(verified.matchedUsers, 2);
 });
 
-test("field Read/Edit combine object CRUD and FLS and show org warnings", async () => {
+test("field Read/Edit combine object CRUD and FLS and show neutral org provenance", async () => {
   const fallback = new OrgPermissionFallbackService({
     verifyObject: async () => objectEvidence("ORG_VERIFIED"),
     verifyField: async () => ({ read: evidence("ORG_VERIFIED"), edit: evidence("ORG_VERIFIED") }),
@@ -106,8 +106,8 @@ test("field Read/Edit combine object CRUD and FLS and show org warnings", async 
   const object = await fallback.resolveObject(persona, "OrderSummary", noAccess());
   const fields = await fallback.resolveField(persona, "OrderSummary", "Total_Pallets__c", object, { read: false, edit: false });
   assert.deepEqual(fields.access, { read: true, edit: true });
-  assert.equal(permissionPresentation(fields.access.read, fields.evidence.read).orgWarning, true);
-  assert.equal(permissionPresentation(fields.access.edit, fields.evidence.edit).orgWarning, true);
+  assert.equal(permissionPresentation(fields.access.read, fields.evidence.read).orgVerified, true);
+  assert.equal(permissionPresentation(fields.access.edit, fields.evidence.edit).orgVerified, true);
 });
 
 test("field Review shows object verification failure even if FLS is already in repo", async () => {
@@ -138,5 +138,121 @@ test("confirmed field Edit denial reports No even if object Edit is granted", as
 
 test("metadata-only negative without org evidence is presented as Review", () => {
   assert.equal(permissionPresentation(false, evidence("UNVERIFIED")).label, "Review");
-  assert.equal(permissionPresentation(true).orgWarning, false);
+  assert.equal(permissionPresentation(true).orgVerified, false);
+});
+
+
+test("mixed provenance identifies the object grant separately from repository FLS", async () => {
+  let fieldCalls = 0;
+  const fallback = new OrgPermissionFallbackService({
+    verifyObject: async () => objectEvidence("ORG_VERIFIED"),
+    verifyField: async () => {
+      fieldCalls++;
+      return { read: evidence("ORG_DENIED"), edit: evidence("ORG_DENIED") };
+    },
+  });
+  const object = await fallback.resolveObject(persona, "ProcessException", noAccess());
+  const f = await fallback.resolveField(persona, "ProcessException", "Additional_Information__c", object,
+    { read: true, edit: true });
+  assert.deepEqual(f.access, { read: true, edit: true });
+  assert.equal(fieldCalls, 0, "existing repository FLS grants must not be re-verified");
+  for (const key of ["read", "edit"] as const) {
+    assert.equal(f.evidence[key]?.source, "ORG_VERIFIED");
+    assert.match(f.evidence[key]!.message, new RegExp("Object " + key + ": Salesforce"));
+    assert.match(f.evidence[key]!.message, new RegExp("Field " + key + ": repository metadata"));
+    const display = permissionPresentation(f.access[key], f.evidence[key]);
+    assert.equal(display.label, "Yes");
+    assert.equal(display.orgVerified, true);
+  }
+});
+
+test("object Read from repository plus field FLS from Salesforce is labeled precisely", async () => {
+  const fallback = new OrgPermissionFallbackService({
+    verifyObject: async () => { throw Error("unexpected object verification"); },
+    verifyField: async () => ({ read: evidence("ORG_VERIFIED"), edit: evidence("ORG_VERIFIED") }),
+  });
+  const o = await fallback.resolveObject(persona, "Account", allAccess());
+  const f = await fallback.resolveField(persona, "Account", "Secret__c", o,
+    { read: false, edit: false });
+  assert.deepEqual(f.access, { read: true, edit: true });
+  assert.match(f.evidence.read!.message, /Object read: repository metadata/);
+  assert.match(f.evidence.read!.message, /Field read: Salesforce/);
+  assert.equal(permissionPresentation(true, f.evidence.read).label, "Yes");
+});
+
+test("missing repository grants without Salesforce must be Review for both Read and Edit", async () => {
+  const fallback = new OrgPermissionFallbackService();
+  const o = await fallback.resolveObject(persona, "ProcessException", noAccess());
+  const f = await fallback.resolveField(persona, "ProcessException", "Additional_Information__c", o,
+    { read: true, edit: true });
+  assert.deepEqual(f.access, { read: false, edit: false });
+  for (const key of ["read", "edit"] as const) {
+    assert.equal(f.evidence[key]?.source, "UNVERIFIED");
+    assert.equal(permissionPresentation(f.access[key], f.evidence[key]).label, "Review");
+    assert.match(f.evidence[key]!.message, /Object/);
+  }
+});
+
+test("object denial makes effective field Read/Edit No despite repository FLS grants", async () => {
+  const fallback = new OrgPermissionFallbackService({
+    verifyObject: async () => objectEvidence("ORG_DENIED"),
+    verifyField: async () => { throw Error("should not check FLS for repo field grants"); },
+  });
+  const o = await fallback.resolveObject(persona, "ProcessException", noAccess());
+  const f = await fallback.resolveField(persona, "ProcessException", "Additional_Information__c", o,
+    { read: true, edit: true });
+  for (const key of ["read", "edit"] as const) {
+    assert.equal(f.evidence[key]?.source, "ORG_DENIED");
+    assert.match(f.evidence[key]!.message, /missing object/);
+    assert.equal(permissionPresentation(f.access[key], f.evidence[key]).label, "No");
+  }
+});
+
+test("field denial is conclusive even when object status is unverified", async () => {
+  const fallback = new OrgPermissionFallbackService({
+    verifyObject: async () => objectEvidence("UNVERIFIED"),
+    verifyField: async () => ({ read: evidence("ORG_DENIED"), edit: evidence("ORG_DENIED") }),
+  });
+  const o = await fallback.resolveObject(persona, "Account", noAccess());
+  const f = await fallback.resolveField(persona, "Account", "Sensitive__c", o,
+    { read: false, edit: false });
+  assert.equal(f.evidence.read?.source, "ORG_DENIED");
+  assert.equal(f.evidence.edit?.source, "ORG_DENIED");
+  assert.equal(permissionPresentation(f.access.read, f.evidence.read).label, "No");
+  assert.equal(permissionPresentation(f.access.edit, f.evidence.edit).label, "No");
+});
+
+test("missing object and field evidence are both explained for Review", async () => {
+  const fallback = new OrgPermissionFallbackService({
+    verifyObject: async () => objectEvidence("UNVERIFIED"),
+    verifyField: async () => ({ read: evidence("UNVERIFIED"), edit: evidence("UNVERIFIED") }),
+  });
+  const o = await fallback.resolveObject(persona, "Account", noAccess());
+  const f = await fallback.resolveField(persona, "Account", "Sensitive__c", o,
+    { read: false, edit: false });
+  for (const key of ["read", "edit"] as const) {
+    assert.equal(f.evidence[key]?.source, "UNVERIFIED");
+    assert.match(f.evidence[key]!.message, /Object/);
+    assert.match(f.evidence[key]!.message, /Field/);
+    assert.equal(permissionPresentation(false, f.evidence[key]).label, "Review");
+  }
+});
+
+test("repository-only missing evidence is Review, not a fabricated confirmed denial", () => {
+  const display = permissionPresentation(false);
+  assert.equal(display.label, "Review");
+  assert.equal(display.orgVerified, false);
+  assert.match(display.title, /not a confirmed denial/i);
+  assert.equal(permissionPresentation(false, { source: "REPOSITORY",
+    message: "No repository grant was found." }).label, "Review");
+  assert.equal(permissionPresentation(true).label, "Yes");
+  assert.equal(permissionPresentation(false, evidence("ORG_DENIED")).label, "No");
+  assert.equal(permissionPresentation(true, evidence("ORG_VERIFIED")).label, "Yes");
+});
+
+test("conflicting Salesforce-verified evidence and denied effective boolean is Review", () => {
+  const display = permissionPresentation(false, evidence("ORG_VERIFIED"));
+  assert.equal(display.label, "Review");
+  assert.equal(display.orgVerified, false);
+  assert.match(display.title, /Conflicting evidence/);
 });

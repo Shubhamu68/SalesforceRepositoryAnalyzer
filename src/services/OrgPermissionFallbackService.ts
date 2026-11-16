@@ -68,21 +68,39 @@ export class OrgPermissionFallbackService {
         };
       const fieldAllowed = repositoryFls[permission] || flsEvidence?.source === "ORG_VERIFIED";
       access[permission] = objectAllowed && fieldAllowed;
-      // A verified denial of either prerequisite is an effective denial.
-      const denied = [objectEvidence, flsEvidence].find((e) => e?.source === "ORG_DENIED");
-      const unresolved = [objectEvidence, flsEvidence].find((e) => e?.source === "UNVERIFIED");
-      if (denied && !objectAllowed || denied && !fieldAllowed) {
-        evidence[permission] = { ...denied, message: `Effective field ${permission} unavailable: ${denied.message}` };
-      } else if (unresolved) {
+      // Each permission requires BOTH object CRUD and field FLS. Denial
+      // of either prerequisite is conclusive; missing metadata is not.
+      const objectDenied = !objectAllowed && objectEvidence?.source === "ORG_DENIED";
+      const fieldDenied = !fieldAllowed && flsEvidence?.source === "ORG_DENIED";
+      const objectUnverified = !objectAllowed && objectEvidence?.source !== "ORG_DENIED";
+      const fieldUnverified = !fieldAllowed && flsEvidence?.source !== "ORG_DENIED";
+      const objectOrgVerified = objectEvidence?.source === "ORG_VERIFIED";
+      const fieldOrgVerified = flsEvidence?.source === "ORG_VERIFIED";
+      if (objectDenied || fieldDenied) {
+        const denied = objectDenied ? objectEvidence! : flsEvidence!;
+        const origin = objectDenied ? "object" : "field";
         evidence[permission] = {
-          ...unresolved,
-          message: `Field ${permission} needs Review. ${objectEvidence?.source === "UNVERIFIED" ? "Object permission: " + objectEvidence.message + " " : ""}${flsEvidence?.source === "UNVERIFIED" ? "Field permission: " + flsEvidence.message : ""}`,
+          ...denied,
+          message: `Effective ${object}.${field} ${permission} denied: Salesforce confirmed missing ${origin} ${permission}. ${denied.message}`,
         };
-      } else if (access[permission] && (objectEvidence?.source === "ORG_VERIFIED" || flsEvidence?.source === "ORG_VERIFIED")) {
-        const verified = objectEvidence?.source === "ORG_VERIFIED" ? objectEvidence : flsEvidence!;
+      } else if (objectUnverified || fieldUnverified) {
+        const unresolved = objectUnverified ? objectEvidence : flsEvidence;
+        evidence[permission] = {
+          ...(unresolved ?? unavailable(`${object}.${field} ${permission}`)),
+          source: "UNVERIFIED", outcome: "UNVERIFIED",
+          message: `Effective ${object}.${field} ${permission} needs Review. ${objectUnverified
+            ? "Object " + permission + " not established: " + (objectEvidence?.message ?? "No repository grant or conclusive Salesforce verification.") + " "
+            : ""}${fieldUnverified
+            ? "Field " + permission + " not established: " + (flsEvidence?.message ?? "No repository grant or conclusive Salesforce verification.")
+            : ""}`.trim(),
+        };
+      } else if (access[permission] && (objectOrgVerified || fieldOrgVerified)) {
+        const verified = objectOrgVerified ? objectEvidence! : flsEvidence!;
+        const objectSource = objectOrgVerified ? "Salesforce" : "repository metadata";
+        const fieldSource = fieldOrgVerified ? "Salesforce" : "repository metadata";
         evidence[permission] = {
           ...verified,
-          message: `Grant not established completely in repository metadata. Effective field ${permission} verified in Salesforce org for matching active users. ${objectEvidence?.source === "ORG_VERIFIED" ? "Object grant verified. " : ""}${flsEvidence?.source === "ORG_VERIFIED" ? "Field grant verified." : ""}`,
+          message: `Effective ${object}.${field} ${permission} established. Object ${permission}: ${objectSource}. Field ${permission}: ${fieldSource}.`,
         };
       }
     }

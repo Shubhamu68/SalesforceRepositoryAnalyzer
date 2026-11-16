@@ -5,26 +5,39 @@ export type PermissionEvidence = {
   checkedUsers?: number;
 };
 
-export function permissionPresentation(granted: boolean, evidence?: PermissionEvidence): {
+export type PermissionDisplay = {
   label: "Yes" | "No" | "Review";
   tone: "allowed" | "denied" | "review";
-  orgWarning: boolean;
+  /** Successful org verification is provenance, not a warning. */
+  orgVerified: boolean;
   title: string;
-} {
+};
+
+/**
+ * Repository grant -> Yes. Salesforce VERIFIED -> Yes, DENIED -> No.
+ * A missing repository grant is not a Salesforce denial; without explicit
+ * negative evidence the only safe label is Review.
+ */
+export function permissionPresentation(granted: boolean, evidence?: PermissionEvidence): PermissionDisplay {
   if (evidence?.source === "UNVERIFIED") return {
-    label: "Review", tone: "review", orgWarning: false, title: evidence.message,
+    label: "Review", tone: "review", orgVerified: false, title: evidence.message,
   };
   if (evidence?.source === "ORG_DENIED") return {
-    label: "No", tone: "denied", orgWarning: false, title: evidence.message,
+    label: "No", tone: "denied", orgVerified: false, title: evidence.message,
   };
-  if (evidence?.source === "ORG_VERIFIED") return {
-    label: "Yes", tone: "allowed", orgWarning: true, title: evidence.message,
+  if (evidence?.source === "ORG_VERIFIED") return granted ? {
+    label: "Yes", tone: "allowed", orgVerified: true, title: evidence.message,
+  } : {
+    label: "Review", tone: "review", orgVerified: false,
+    title: "Conflicting evidence: Salesforce reports a grant but effective access is not established. " + evidence.message,
+  };
+  if (granted) return {
+    label: "Yes", tone: "allowed", orgVerified: false,
+    title: evidence?.message || "Access established from repository metadata.",
   };
   return {
-    label: granted ? "Yes" : "No",
-    tone: granted ? "allowed" : "denied",
-    orgWarning: false,
-    title: granted ? "Access established from repository metadata." :
-      "No repository grant established; Salesforce org verification has not confirmed this permission.",
+    label: "Review", tone: "review", orgVerified: false,
+    title: evidence?.message ||
+      "Repository metadata did not establish this permission. Salesforce verification is unavailable or inconclusive; this is not a confirmed denial.",
   };
 }

@@ -306,7 +306,7 @@ export default function ObjectAccessMatrix({ objects, loadingObjects, beforeAnal
               ))}
             </div>
           )}
-          <p className="matrix-disclaimer">Repository grants first; Salesforce checks missing grants when available. ⚠ = org-only grant; Review = incomplete verification. Record sharing is not evaluated.</p>
+          <p className="matrix-disclaimer">Repository grants first; Salesforce checks missing grants when available. ⓘ = Salesforce-verified grant; Review = insufficient evidence; No = confirmed denial. Record sharing is not evaluated.</p>
         </section>
       )}
     </div>
