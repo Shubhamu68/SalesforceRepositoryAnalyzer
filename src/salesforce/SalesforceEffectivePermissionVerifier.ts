@@ -2,6 +2,7 @@ import type { Persona } from "../models/Persona.js";
 import { MATRIX_PERMISSION_KEYS, type MatrixPermission } from "../models/ObjectAccessMatrixResult.js";
 import type { SalesforceOrgConnection } from "./SalesforceOrgConnection.js";
 import type { SalesforcePersonaAccessVerifier } from "./SalesforcePersonaAccessVerifier.js";
+import { SalesforceUserFieldAccessGateway } from "./SalesforceUserFieldAccessGateway.js";
 
 export type OrgPermissionOutcome = "VERIFIED" | "DENIED" | "UNVERIFIED";
 export interface OrgPermissionEvidence {
@@ -33,10 +34,6 @@ type ObjectGrant = {
   PermissionsViewAllRecords?: boolean;
   PermissionsModifyAllRecords?: boolean;
   PermissionsViewAllFields?: boolean;
-};
-type FieldAccess = {
-  UserId: string; IsAccessible?: boolean; IsUpdatable?: boolean;
-  FieldDefinition?: { QualifiedApiName?: string } | null;
 };
 
 const ID = /^[A-Za-z0-9]{15}(?:[A-Za-z0-9]{3})?$/;
@@ -108,6 +105,7 @@ export class SalesforceEffectivePermissionVerifier {
   constructor(
     private readonly connection: SalesforceOrgConnection,
     private readonly matcher: SalesforcePersonaAccessVerifier,
+    private readonly userFieldAccess = new SalesforceUserFieldAccessGateway(connection),
   ) {}
 
   private cacheKey(persona: Persona, object: string, field = ""): string {
@@ -281,21 +279,24 @@ export class SalesforceEffectivePermissionVerifier {
     } catch (error) {
       return empty(error instanceof Error ? error.message : "Unable to match active Salesforce users.");
     }
-    const result = await concurrently(users, async (user): Promise<{ read: boolean | null; edit: boolean | null }> => {
+    const result = await concurrently(users, async (user) => {
       try {
-        const soql = `SELECT UserId, IsAccessible, IsUpdatable, FieldDefinition.QualifiedApiName FROM UserFieldAccess WHERE User.Id = '${user.id}' AND FieldDefinition.EntityDefinition.QualifiedApiName = '${object}' AND FieldDefinition.QualifiedApiName = '${field}'`;
-        const records = await this.connection.queryAll<FieldAccess>(soql, "tooling", 5);
-        const row = records.length === 1 ? records[0] : null;
-        if (!row || key(row.UserId) !== key(user.id) ||
-            row.FieldDefinition?.QualifiedApiName?.toLowerCase() !== field.toLowerCase()) return { read: null, edit: null };
-        return { read: typeof row.IsAccessible === "boolean" ? row.IsAccessible : null,
-          edit: typeof row.IsUpdatable === "boolean" ? row.IsUpdatable : null };
+        return await this.userFieldAccess.verifyUserField(user.id, object, field);
       } catch {
         return { read: null, edit: null };
       }
     });
+    const read = consensus(result.map((entry) => entry.read), `${object}.${field} field Read`, users.length);
+    const parents = [...new Set(result.map((entry) => entry.readFromCompoundParent).filter(
+      (item): item is string => typeof item === "string"
+    ))];
+    if (read.source === "ORG_VERIFIED" && parents.length === 1) {
+      read.message += ` Component Read confirmed using compound parent ${object}.${parents[0]}; individual UserFieldAccess row was absent.`;
+    }
     return {
-      read: consensus(result.map((entry) => entry.read), `${object}.${field} field Read`, users.length),
+      read,
+      // A compound parent's read-only API field can NEVER establish component
+      // Edit access. Only a direct component row can verify Edit.
       edit: consensus(result.map((entry) => entry.edit), `${object}.${field} field Edit`, users.length),
     };
   }

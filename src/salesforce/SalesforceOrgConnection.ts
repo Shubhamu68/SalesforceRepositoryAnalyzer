@@ -39,6 +39,10 @@ export type SalesforceSObjectDescribe = {
   name: string;
   fields: Array<{
     name: string;
+    /** Compound parent as supplied by Salesforce REST Describe, when present. */
+    compoundFieldName?: string | null;
+    /** Salesforce field type, e.g. address or location. */
+    type?: string;
     relationshipName?: string | null;
     referenceTo?: string[];
     namePointing?: boolean;

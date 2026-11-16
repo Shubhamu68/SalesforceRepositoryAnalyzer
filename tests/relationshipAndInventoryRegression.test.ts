@@ -96,3 +96,33 @@ test('Unsupported relationship or filter does not produce a false clean result',
   const collection = collectQueryFields(q, graph);
   assert.ok(collection.unresolved.length > 0 || collection.limitations.length > 0);
 });
+
+
+test("Explicit root name is not a relationship when resolving a field from that root", () => {
+  const graph = new RelationshipMap();
+  assert.deepEqual(graph.resolveField("OrderSummary", "OrderSummary.Client__c"),
+    { object: "OrderSummary", field: "Client__c", objects: ["OrderSummary"] });
+  assert.deepEqual(graph.resolveField("OrderSummary", "ordersummary.Client__c"),
+    { object: "OrderSummary", field: "Client__c", objects: ["OrderSummary"] });
+  assert.deepEqual(graph.resolveField("Account", "Account.Owner.Email"), undefined,
+    "genuine unknown relationship hops remain unresolved");
+});
+
+test("True relationship edges take precedence over same-name root qualifier", () => {
+  const graph = new RelationshipMap();
+  graph.addParent("OrderSummary", "OrderSummary", ["Alternate__c"], "Alternate__c");
+  graph.addParent("Alternate__c", "Owner__r", ["Account"], "Owner__c");
+  assert.deepEqual(graph.resolveField("OrderSummary", "OrderSummary.Owner__r.Name"), {
+    object: "Account", field: "Name", objects: ["OrderSummary", "Alternate__c", "Account"],
+  });
+});
+
+test("Unqualified multi-hop relationships retain all intermediate object checks", () => {
+  const graph = new RelationshipMap();
+  graph.addParent("OrderItemSummary", "OriginalOrderItem", ["OrderItem"], "OriginalOrderItemId");
+  graph.addParent("OrderItem", "Order", ["Order"], "OrderId");
+  graph.addParent("Order", "Client__r", ["Account"], "Client__c");
+  const field = graph.resolveField("OrderItemSummary", "OriginalOrderItem.Order.Client__r.Name");
+  assert.deepEqual(field?.objects, ["OrderItemSummary", "OrderItem", "Order", "Account"]);
+  assert.equal(field?.field, "Name");
+});

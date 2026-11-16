@@ -114,7 +114,7 @@ export class SoqlSecurityAnalyzer {
     ): SoqlSecurityFinding[] {
       const subject = type === "OBJECT_READ" ? `Object ${object}` : `Field ${object}.${field}`;
       const detail = decision.source === "ORG_VERIFIED"
-        ? `${subject}: Read permission wasn't established in repository metadata, but Salesforce confirmed access.`
+        ? `${subject}: Read permission wasn't established in repository metadata, but Salesforce confirmed access.${decision.message.includes("via compound parent") ? " " + decision.message : ""}`
         : decision.source === "ORG_DENIED"
           ? `${subject}: Repository metadata did not establish Read access; Salesforce confirmed it is missing for the selected user.`
           : `${subject}: Read permission wasn't established in repository metadata, and Salesforce couldn't verify access.`;

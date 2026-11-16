@@ -12,6 +12,7 @@ import { ObjectAccessMatrixService } from "./ObjectAccessMatrixService.js";
 import { OrgObjectReadVerificationService } from "./OrgObjectReadVerificationService.js";
 import { SalesforcePersonaAccessVerifier } from "../salesforce/SalesforcePersonaAccessVerifier.js";
 import { SalesforceEffectivePermissionVerifier } from "../salesforce/SalesforceEffectivePermissionVerifier.js";
+import { SalesforceUserFieldAccessGateway } from "../salesforce/SalesforceUserFieldAccessGateway.js";
 import { OrgPermissionFallbackService } from "./OrgPermissionFallbackService.js";
 import { SalesforceRelationshipMetadataService } from "../salesforce/SalesforceRelationshipMetadataService.js";
 import type { SalesforceOrgConnection } from "../salesforce/SalesforceOrgConnection.js";
@@ -63,12 +64,14 @@ export class AnalyzerRuntimeService {
       paths.mutingPermissionSetsPath,
       paths.profilesPath,
     );
-    const personaVerifier = useOrg ? new SalesforcePersonaAccessVerifier(this.connection) : undefined;
+    // One FLS gateway is shared by all analysis features in this runtime.
+    const userFieldAccess = useOrg ? new SalesforceUserFieldAccessGateway(this.connection) : undefined;
+    const personaVerifier = useOrg ? new SalesforcePersonaAccessVerifier(this.connection, userFieldAccess) : undefined;
     const verification = new OrgObjectReadVerificationService(
       await this.metadataPolicy, personaVerifier,
     );
     const fallback = new OrgPermissionFallbackService(
-      personaVerifier ? new SalesforceEffectivePermissionVerifier(this.connection, personaVerifier) : undefined,
+      personaVerifier ? new SalesforceEffectivePermissionVerifier(this.connection, personaVerifier, userFieldAccess) : undefined,
     );
     const relationships = useOrg
       ? new SalesforceRelationshipMetadataService(this.connection)

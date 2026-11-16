@@ -148,3 +148,64 @@ test("three selected scopes do not inflate static query count", () => {
   assert.equal(q.subqueries.length, 2);
   assert.equal(extractSoqlQueries("List<Account> a=["+q.query+"];", "classes/T.cls").length, 1);
 });
+
+
+test("Apex Set<String> bind is not interpreted as Shipment__c.set/String FLS", () => {
+  const q = parse("SELECT Id, OrderSummary__c FROM Shipment__c WHERE " +
+    "OrderSummary__c IN :mapOfOrderSummaries.keySet() AND\n" +
+    "Status__c IN :new Set<String>{'Draft', 'Discrepancy'} WITH USER_MODE");
+  const collected = collectQueryFields(q, graph());
+  assert.deepEqual(collected.fields.map(f => f.object + "." + f.field),
+    ["Shipment__c.OrderSummary__c", "Shipment__c.Status__c"]);
+  assert.equal(collected.unresolved.length, 0);
+  assert.ok(!collected.references.some(ref => /^(set|string)$/i.test(ref.field)));
+  const inventory = buildSoqlFieldInventory([q], graph());
+  assert.deepEqual([...inventory.get("Shipment__c")!.keys()].sort(),
+    ["ordersummary__c", "status__c"]);
+});
+
+test("Apex generic binds preserve real WHERE fields and following comparison conditions", () => {
+  const cases = [
+    "SELECT Id FROM Shipment__c WHERE Status__c IN :new Set<String>{'Draft', 'Discrepancy'} AND OrderSummary__c != null",
+    "SELECT Id FROM Shipment__c WHERE Status__c IN :new Set<Id>(:ids) AND OrderSummary__c = :summaryId",
+    "SELECT Id FROM Shipment__c WHERE Status__c IN :new Map<String, Set<Id>>{} .keySet() AND OrderSummary__c = :summaryId",
+    "SELECT Id FROM Shipment__c WHERE OrderSummary__c IN :orders.keySet() AND Status__c = :requestedStatus",
+    "SELECT Id FROM Shipment__c WHERE OrderSummary__c != null AND Status__c IN :new Set<String>{'Draft'} ORDER BY Status__c",
+  ];
+  for (const soql of cases) {
+    const c = collectQueryFields(parse(soql), graph());
+    const fields = c.fields.map(f => f.field.toLowerCase());
+    assert.ok(fields.includes("status__c"), soql);
+    assert.ok(fields.includes("ordersummary__c"), soql);
+    assert.ok(!fields.includes("string") && !fields.includes("set") && !fields.includes("id"), soql);
+    assert.deepEqual(c.unresolved, [], soql);
+  }
+});
+
+test("Root-qualified OrderSummary.Client__c resolves without inventing a parent hop", () => {
+  const q = parse("SELECT Client__c FROM OrderSummary WHERE OrderSummary.Client__c = :clientId");
+  const c = collectQueryFields(q, new RelationshipMap());
+  assert.deepEqual(c.unresolved, []);
+  assert.deepEqual(c.fields.map(f => f.object + "." + f.field), ["OrderSummary.Client__c"]);
+  const i = buildSoqlFieldInventory([q], new RelationshipMap());
+  assert.ok(i.get("OrderSummary")!.has("client__c"));
+  assert.ok(!i.get("OrderSummary")!.has("ordersummary.client__c"));
+});
+
+test("Actual parent relationship OrderItemSummary.OrderSummary.Client__c still resolves", () => {
+  const map = new RelationshipMap();
+  map.addParent("OrderItemSummary", "OrderSummary", ["OrderSummary"], "OrderSummaryId");
+  const q = parse("SELECT OrderSummary.Client__c FROM OrderItemSummary WHERE " +
+    "OrderSummary.Client__c = :clientId");
+  const c = collectQueryFields(q, map);
+  assert.equal(c.unresolved.length, 0);
+  assert.ok(c.fields.some(f => f.object === "OrderSummary" && f.field === "Client__c"));
+  assert.ok(c.objects.includes("OrderItemSummary") && c.objects.includes("OrderSummary"));
+});
+
+test("Unresolved genuine relationships remain Review, not silently converted into fields", () => {
+  const q = parse("SELECT Missing_Parent__r.Client__c FROM OrderSummary");
+  const c = collectQueryFields(q, new RelationshipMap());
+  assert.equal(c.unresolvedEntries.length, 1);
+  assert.equal(c.unresolvedEntries[0].fieldPath, "Missing_Parent__r.Client__c");
+});

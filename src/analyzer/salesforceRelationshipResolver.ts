@@ -109,9 +109,26 @@ export class RelationshipMap extends Map<string, Map<string, RelationshipMetadat
     return targets?.length === 1 ? targets[0] : undefined;
   }
 
+  /**
+   * An explicit root object qualifier (OrderSummary.Client__c when already
+   * inside OrderSummary) is not a parent relationship. Strip only that exact
+   * prefix, and only if metadata does not define a real relationship with
+   * that name. Child-to-parent paths such as OrderItemSummary.OrderSummary.Client__c
+   * continue traversing the actual OrderSummary edge.
+   */
+  private fieldParts(baseObject: string, fieldPath: string): string[] {
+    const parts = fieldPath.split(".").map((part) => part.trim());
+    const root = norm(baseObject);
+    if (parts.length > 1 && norm(parts[0]) === root &&
+        !this.parentEdges.get(root)?.has(root)) {
+      return parts.slice(1);
+    }
+    return parts;
+  }
+
   /** Explain the first relationship hop that cannot be established safely. */
   explainUnresolved(baseObject: string, fieldPath: string): string {
-    const parts = fieldPath.split(".").map((part) => part.trim());
+    const parts = this.fieldParts(baseObject, fieldPath);
     let object = this.objectNames.get(norm(baseObject)) ?? baseObject;
     for (const name of parts.slice(0, -1)) {
       const edge = this.parentEdges.get(norm(object))?.get(norm(name));
@@ -125,7 +142,7 @@ export class RelationshipMap extends Map<string, Map<string, RelationshipMetadat
   }
 
   resolveField(baseObject: string, fieldPath: string): ResolvedFieldPath | undefined {
-    const parts = fieldPath.split(".").map((part) => part.trim());
+    const parts = this.fieldParts(baseObject, fieldPath);
     if (!parts.length || parts.some((part) => !/^[A-Za-z_]\w*$/.test(part))) return undefined;
     let object = this.objectNames.get(norm(baseObject)) ?? baseObject;
     const objects = [object];
