@@ -1,5 +1,5 @@
 import { parseQuery } from "@jetstreamapp/soql-parser-js";
-import { maskSoql } from "./soqlMask.js";
+import { normalizeApexBindExpressions } from "./apexBindNormalizer.js";
 
 /** Read-relevant portions of SOQL: callers keep individual usages for security-mode decisions. */
 export type SoqlFieldContext = "SELECT" | "WHERE" | "GROUP_BY" | "HAVING" | "ORDER_BY";
@@ -32,82 +32,11 @@ const asRecord = (value: unknown): Record<string, unknown> | null =>
     ? value as Record<string, unknown> : null;
 
 /**
- * The external SOQL grammar intentionally cannot parse Apex's constructor
- * bind expression :new Set<String>{...}. Replace ONLY the Apex value with a
- * sentinel bind, leaving every genuine SOQL field and clause unchanged.
- * Quoted strings and comments are already masked by maskSoql().
+ * Backwards-compatible export for callers using the previous constructor-only
+ * adapter. All Apex bind forms now use the same normalized parser view.
  */
 export function normalizeApexConstructorBinds(query: string): string {
-  const visible = maskSoql(query);
-  const len = query.length;
-  const whitespace = (i: number) => { while (i < len && /\s/.test(visible[i])) i++; return i; };
-  const identifier = (i: number) => {
-    if (!/[A-Za-z_]/.test(visible[i] ?? "")) return i;
-    i++;
-    while (/[A-Za-z_0-9]/.test(visible[i] ?? "")) i++;
-    return i;
-  };
-  const balanced = (from: number): number => {
-    const opens: Record<string, string> = { "<": ">", "(": ")", "{": "}", "[": "]" };
-    const stack = [opens[visible[from]]];
-    for (let i = from + 1; i < len; i++) {
-      const char = visible[i];
-      if (char in opens) stack.push(opens[char]);
-      else if (char === stack[stack.length - 1]) {
-        stack.pop();
-        if (!stack.length) return i + 1;
-      }
-    }
-    return -1;
-  };
-  const spans: Array<[number, number]> = [];
-  for (let i = 0; i < len; i++) {
-    if (visible[i] !== ":") continue;
-    const start = i;
-    let next = whitespace(i + 1);
-    const afterNew = identifier(next);
-    if (visible.slice(next, afterNew).toLowerCase() !== "new") continue;
-    next = whitespace(afterNew);
-    let end = identifier(next);
-    if (end === next) continue;
-    // Allow namespace-qualified Apex type names.
-    while (visible[end] === ".") {
-      const afterSegment = identifier(end + 1);
-      if (afterSegment === end + 1) break;
-      end = afterSegment;
-    }
-    next = whitespace(end);
-    if (visible[next] === "<") {
-      end = balanced(next);
-      if (end < 0) continue;
-      next = whitespace(end);
-    }
-    if (visible[next] !== "{" && visible[next] !== "(") continue;
-    end = balanced(next);
-    if (end < 0) continue;
-    // Some bind values invoke an Apex method on the constructed collection.
-    next = whitespace(end);
-    while (visible[next] === ".") {
-      const memberEnd = identifier(next + 1);
-      if (memberEnd === next + 1) break;
-      end = memberEnd;
-      next = whitespace(end);
-      if (visible[next] === "(") {
-        end = balanced(next);
-        if (end < 0) break;
-        next = whitespace(end);
-      }
-    }
-    if (end < 0) continue;
-    spans.push([start, end]);
-    i = end - 1;
-  }
-  let output = query;
-  for (const [start, end] of spans.reverse()) {
-    const linebreaks = (query.slice(start, end).match(/\n/g) ?? []).join("");
-    output = output.slice(0, start) + ":analyzerApexBind" + linebreaks + output.slice(end);
-  }
-  return output;
+  return normalizeApexBindExpressions(query).query;
 }
 
 function readableDiagnostic(error: unknown): string {
@@ -122,10 +51,14 @@ function readableDiagnostic(error: unknown): string {
  * An unsupported SOQL expression produces a limitation, never a clean result.
  */
 export function extractSoqlExpressionFields(query: string): SoqlExpressionInventory {
-  const limitations: string[] = [];
+  const normalized = normalizeApexBindExpressions(query);
+  const limitations: string[] = [...normalized.limitations];
+  if (limitations.length) {
+    return { parsed: false, fields: [], limitations };
+  }
   let parsed: Record<string, unknown>;
   try {
-    parsed = parseQuery(normalizeApexConstructorBinds(query), {
+    parsed = parseQuery(normalized.query, {
       allowApexBindVariables: true,
     }) as unknown as Record<string, unknown>;
   } catch (error) {

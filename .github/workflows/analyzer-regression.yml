@@ -10,6 +10,7 @@ on:
       - fix/platform-event-fls-and-managed-ps-warnings
       - feature/ui-messaging-cleanup
       - feature/soql-aggregate-expression-analysis
+      - fix/apex-soql-bind-expression-normalization
       - feature/compound-field-access-verification
   pull_request:
   workflow_dispatch:
