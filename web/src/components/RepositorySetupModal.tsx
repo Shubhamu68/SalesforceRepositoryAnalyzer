@@ -48,7 +48,7 @@ export default function RepositorySetupModal({ busy, error, currentPath, onChoos
             <code>permissionsetgroups</code>, and <code>mutingpermissionsets</code>.
             <code>flows</code> is optional.</p>
         </details>
-        {currentPath && <p className="report-folder-current-path"><strong>Previously selected:</strong> {currentPath}</p>
+        {currentPath && <p className="report-folder-current-path"><strong>Previously selected:</strong> {currentPath}</p>}
         {error && <div className="report-folder-error" role="alert">{error}</div>}
         <div className="report-folder-actions">
           <button ref={select} type="button" className="primary-button" disabled={busy} onClick={onChoose}>
