@@ -119,7 +119,7 @@ test("field Review shows object verification failure even if FLS is already in r
   const fields = await fallback.resolveField(persona, "OrderSummary", "Total_Pallets__c", object, { read: true, edit: true });
   assert.equal(fields.access.read, false);
   assert.equal(fields.evidence.read?.source, "UNVERIFIED");
-  assert.match(fields.evidence.read!.message, /Object permission/);
+  assert.match(fields.evidence.read!.message, /Object read not established/);
   assert.equal(fields.evidence.edit?.source, "UNVERIFIED");
 });
 
