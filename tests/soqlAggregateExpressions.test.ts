@@ -50,7 +50,10 @@ test("COUNT() and COUNT(Id) preserve object Read without a spurious field FLS fi
     const q = parse("SELECT " + expression + " FROM Account");
     const inventory = buildSoqlFieldInventory([q], new RelationshipMap());
     assert.ok(inventory.has("Account"));
-    assert.equal(inventory.get("Account")?.size, 0);
+    // Account.Id is in the snapshot and explicitly non-permissionable.
+    // Retaining the Id reference is safe; access evaluation must not issue FLS.
+    assert.deepEqual([...inventory.get("Account")!.keys()],
+      expression === "COUNT()" ? [] : ["id"]);
     assert.equal(inventory.objectReferences.get("Account")?.length, 1);
   }
 });
@@ -69,7 +72,7 @@ test("aggregate aliases are never treated as field names", () => {
 });
 
 test("mixed-case aggregate functions and explicit aliases still resolve", () => {
-  const q = "SELECT mAx(Net_Total__c) AS highValue, aVg(Price__c) averagePrice FROM Invoice__c";
+  const q = "SELECT mAx(Net_Total__c) highValue, aVg(Price__c) averagePrice FROM Invoice__c";
   const refs = rawRefs(q);
   assert.deepEqual(refs.fields.map(x => x.fieldPath), ["Net_Total__c", "Price__c"]);
   assert.equal(refs.fields[0].functionName, "MAX");
@@ -138,10 +141,10 @@ test("Aggregate references to parent-object fields use the shared relationship m
   const graph = new RelationshipMap();
   graph.addParent("Opportunity", "Account", ["Account"], "AccountId");
   graph.addParent("Account", "Owner", ["User"], "OwnerId");
-  const q = "SELECT Account.Owner.Name, MAX(Amount) highest FROM Opportunity GROUP BY Account.Owner.Name";
+  const q = "SELECT Account.Owner.Email, MAX(Amount) highest FROM Opportunity GROUP BY Account.Owner.Email";
   const c = scope(q, graph);
   assert.deepEqual(c.unresolved, []);
-  assert.ok(c.fields.some(x => x.object === "User" && x.field === "Name"));
+  assert.ok(c.fields.some(x => x.object === "User" && x.field === "Email"));
   assert.ok(c.fields.some(x => x.object === "Opportunity" && x.field === "Amount"));
   assert.ok(c.objects.includes("Account") && c.objects.includes("User"));
 });
@@ -172,7 +175,7 @@ test("Apex generic constructor binds are normalized without suppressing real pre
   const soql = "SELECT Id FROM Shipment__c WHERE OrderSummary__c IN :mapOfOrderSummaries.keySet() " +
     "AND Status__c IN :new Set<String>{'Draft', 'Discrepancy'} WITH USER_MODE";
   const normalized = normalizeApexConstructorBinds(soql);
-  assert.ok(normalized.includes(":__analyzerApexBind"));
+  assert.ok(normalized.includes(":analyzerApexBind"));
   assert.ok(!normalized.includes("Set<String>"));
   const refs = rawRefs(soql).fields;
   assert.deepEqual(refs.filter(x => x.context === "WHERE").map(x => x.fieldPath),

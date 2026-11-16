@@ -105,7 +105,7 @@ export function normalizeApexConstructorBinds(query: string): string {
   let output = query;
   for (const [start, end] of spans.reverse()) {
     const linebreaks = (query.slice(start, end).match(/\n/g) ?? []).join("");
-    output = output.slice(0, start) + ":__analyzerApexBind" + linebreaks + output.slice(end);
+    output = output.slice(0, start) + ":analyzerApexBind" + linebreaks + output.slice(end);
   }
   return output;
 }
