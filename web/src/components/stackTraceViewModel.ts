@@ -5,7 +5,7 @@ export const permissionLabel = (item: { object: string; field?: string }) =>
   `${item.object}${item.field ? `.${item.field}` : ""}`;
 
 export const orgVerifiedSummary = (item: OrgVerified) =>
-  `Verified from Org: ${permissionLabel(item)} Read — Access verified from Salesforce`;
+  `${permissionLabel(item)} Read verified in Salesforce`;
 
 export function partitionFindings(items: Missing[]) {
   const byName = (a: Missing, b: Missing) =>

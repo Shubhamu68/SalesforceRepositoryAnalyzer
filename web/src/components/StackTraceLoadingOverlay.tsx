@@ -36,7 +36,7 @@ export function StackTraceLoadingOverlay() {
         role="dialog"
         aria-modal="true"
         aria-labelledby="stack-ux-loading-title"
-        aria-describedby="stack-ux-loading-description stack-ux-loading-time"
+        aria-describedby="stack-ux-loading-description"
         tabIndex={-1}
       >
         <div className="stack-ux-loading-illustration" aria-hidden="true">
@@ -52,16 +52,13 @@ export function StackTraceLoadingOverlay() {
           </svg>
         </div>
 
-        <h2 id="stack-ux-loading-title">Analysis in Progress</h2>
+        <h2 id="stack-ux-loading-title">Analyzing stack trace</h2>
         <p id="stack-ux-loading-description" className="stack-ux-loading-description">
-          Checking code, resolving fields, and verifying permissions...
+          Resolving Apex methods, SOQL fields, and permissions…
         </p>
         <div className="stack-ux-loading-dots" aria-hidden="true">
           <span /><span /><span />
         </div>
-        <p id="stack-ux-loading-time" className="stack-ux-loading-time">
-          This may take 20–30 seconds or longer for complex traces.
-        </p>
       </div>
     </div>,
     document.body,

@@ -50,20 +50,14 @@ export default function ReportOutputSetupModal({
         <div className="report-folder-heading">
           <span className="report-folder-symbol" aria-hidden="true">▣</span>
           <div>
-            <span className="report-folder-kicker">ONE-TIME SETUP</span>
-            <h2 id="report-folder-title">Choose Report Output Folder</h2>
+            <span className="report-folder-kicker">REPORT SETUP</span>
+            <h2 id="report-folder-title">Choose report folder</h2>
           </div>
         </div>
         <p id="report-folder-description">
-          Choose where the Salesforce Repository Analyzer should save its Excel report.
-          The selected location will be saved in your project's <code>.env</code> file for future runs.
+          Select a writable folder for the Excel workbook. The path is saved in <code>.env</code>.
         </p>
         {explanation && <p className="report-folder-hint">{explanation}</p>}
-        <div className="report-folder-selection">
-          <span className="report-folder-label">Output directory</span>
-          <span className="report-folder-empty">Not configured</span>
-          <p>Click below to open the Windows folder picker. You can select an existing folder or create a new one.</p>
-        </div>
         {error && <div role="alert" className="report-folder-error">{error}</div>}
         <div className="report-folder-actions">
           <button type="button" className="secondary-button" disabled={busy} onClick={onCancel}>
@@ -71,7 +65,7 @@ export default function ReportOutputSetupModal({
           </button>
           <button type="button" className="primary-button" ref={chooseButton}
             disabled={busy} onClick={onChoose}>
-            {busy ? "Opening Windows folder picker..." : "Choose Folder & Run Analysis"}
+            {busy ? "Opening folder picker…" : "Choose folder & run"}
           </button>
         </div>
       </div>
