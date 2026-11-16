@@ -25,6 +25,11 @@ export class SalesforceRelationshipMetadataService {
       try {
         const description = await this.connection.describeSObject(objectName);
         graph.registerObject(objectName);
+        if (objectName.toLowerCase() === "name") {
+          // Salesforce exposes these pseudo-fields through Name Describe,
+          // even though Name cannot be queried as a standalone sObject.
+          graph.registerPolymorphicNameFields(description.fields.map((field) => field.name));
+        }
         for (const field of description.fields) {
           if (!field.relationshipName || !Array.isArray(field.referenceTo) || !field.referenceTo.length) continue;
           graph.addParent(objectName, field.relationshipName, field.referenceTo, field.name, {
@@ -54,7 +59,15 @@ export class SalesforceRelationshipMetadataService {
         const targets = graph.parentTargets(current, parts[i]);
         // Only traverse a relationship when the target is unambiguous.
         // Salesforce's Name pseudo-object handles the final polymorphic .Name.
-        if (!targets || targets.length !== 1) break;
+        if (!targets) break;
+        if (targets.length !== 1) {
+          const terminal = parts[parts.length - 1]?.toLowerCase();
+          if (i === parts.length - 2 &&
+              (terminal === "type" || terminal === "isactive")) {
+            await load("Name");
+          }
+          break;
+        }
         current = targets[0];
       }
     };

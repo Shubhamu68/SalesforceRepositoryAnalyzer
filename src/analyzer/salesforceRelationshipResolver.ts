@@ -27,6 +27,11 @@ export interface ResolvedFieldPath {
   field: string;
   // Include each object along the relationship path for object permission checks.
   objects: string[];
+  /** A validated field on Salesforce's non-queryable polymorphic Name descriptor.
+   * No separate field-level permission is configurable on this descriptor.
+   * Keep the source object's Read check; do not guess a concrete target.
+   */
+  polymorphicNamePseudoField?: boolean;
 }
 
 interface SnapshotParent {
@@ -54,6 +59,17 @@ export class RelationshipMap extends Map<string, Map<string, RelationshipMetadat
   private readonly parentEdges = new Map<string, Map<string, ParentEdge>>();
   private readonly childEdges = new Map<string, Map<string, { targets: string[] }>>();
   private readonly objectNames = new Map<string, string>();
+  // Populated from the current org's REST Describe("Name"), never inferred
+  // from identically named fields on User/Group/Contact/etc.
+  private readonly supportedPolymorphicNameFields = new Set<string>();
+
+  registerPolymorphicNameFields(fields: readonly string[]): void {
+    for (const field of fields) {
+      if (field && /^[A-Za-z_]\w*$/.test(field)) {
+        this.supportedPolymorphicNameFields.add(norm(field));
+      }
+    }
+  }
 
   registerObject(name: string): void {
     if (name.trim()) this.objectNames.set(norm(name), name);
@@ -163,6 +179,20 @@ export class RelationshipMap extends Map<string, Map<string, RelationshipMetadat
           edge.targets.some((target) => norm(target) === "group");
         if (terminalName && (sfNameReference || ownerUserOrGroup)) {
           return { object: "Name", field: "Name", objects };
+        }
+        // Type (polymorphic discriminator) and IsActive are fields on the
+        // non-queryable Salesforce Name pseudo-object. Verify against live
+        // Describe("Name"); do not classify User.Type or Group.IsActive as FLS.
+        // Other Name properties remain unresolved until separately assessed.
+        const terminal = norm(parts[parts.length - 1]);
+        if (hop === parts.length - 2 &&
+            (terminal === "type" || terminal === "isactive") &&
+            (sfNameReference || ownerUserOrGroup) &&
+            this.supportedPolymorphicNameFields.has(terminal)) {
+          return {
+            object: "Name", field: parts[parts.length - 1], objects,
+            polymorphicNamePseudoField: true,
+          };
         }
         return undefined;
       }

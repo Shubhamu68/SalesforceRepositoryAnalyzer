@@ -166,7 +166,8 @@ export class StackTraceImpactService {
         if (inventory.unresolved.length && orgRelationshipHydrator) {
           // Describe metadata is consulted only when local relationship metadata
           // was insufficient. This includes standard polymorphic Owner links.
-          const describeWarnings = await orgRelationshipHydrator.hydrateQuery(query, inventory.unresolved);
+          const describeWarnings = await orgRelationshipHydrator.hydrateQuery(query,
+            inventory.unresolvedEntries.map((item) => `${item.baseObject}.${item.fieldPath}`));
           warnings.push(...describeWarnings);
           inventory = collectQueryFields(query, relationshipMap);
         }

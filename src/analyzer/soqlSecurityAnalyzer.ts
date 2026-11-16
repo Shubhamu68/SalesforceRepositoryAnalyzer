@@ -79,7 +79,8 @@ export class SoqlSecurityAnalyzer {
       await boundedMap(queries, async (query) => {
         const firstPass = collectQueryFields(query, relationshipMap);
         if (firstPass.unresolved.length) {
-          await hydrator.hydrateQuery(query, firstPass.unresolved);
+          await hydrator.hydrateQuery(query,
+            firstPass.unresolvedEntries.map((item) => `${item.baseObject}.${item.fieldPath}`));
         }
       });
     }
