@@ -22,7 +22,7 @@ SOQL scanning, org verification decisions, API payloads, or report file structur
 - **Repository connected:** selected repository root passed metadata validation.
 - **Salesforce connected:** authentication session available, not proof that a particular grant has been verified.
 - **Org-verified:** permission specifically confirmed through Salesforce and distinguished by evidence/warning icon.
-- **No / confirmed denial:** permission missing based on actual verification outcome, not merely a missing metadata file.
+- **No:** permission was not granted in the evaluated context. A source of `ORG_DENIED` confirms the denial in Salesforce; a repository-only `No` does not itself prove live-org denial.
 - **Review / unable to verify:** org verification missing, failed, incomplete, or mixed; not a confirmed denial.
 
 ## Safety and review
