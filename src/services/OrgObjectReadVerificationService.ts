@@ -3,6 +3,7 @@ import type { OrgVerificationStatusPolicy } from "../config/orgVerificationStatu
 import { isStatusNeutralOrgObjectRead } from "../config/orgVerificationStatusPolicy.js";
 import { isFieldLevelSecurityApplicable, PLATFORM_EVENT_FLS_REASON } from "../config/fieldSecurityPolicy.js";
 import type { SalesforcePersonaAccessVerifier, OrgObjectAccessEvidence } from "../salesforce/SalesforcePersonaAccessVerifier.js";
+import type { SalesforceFieldMetadataService } from "../salesforce/SalesforceFieldMetadataService.js";
 
 /**
  * Single org-verification gateway for every analyzer.
@@ -58,6 +59,7 @@ export class OrgObjectReadVerificationService {
   constructor(
     private readonly policy: OrgVerificationStatusPolicy,
     private readonly verifier?: SalesforcePersonaAccessVerifier,
+    private readonly fieldMetadata?: SalesforceFieldMetadataService,
   ) {}
 
   /** Status-neutral reporting is separate from access verification eligibility. */
@@ -144,6 +146,14 @@ export class OrgObjectReadVerificationService {
   async resolveFieldRead(persona: Persona, object: string, field: string, repositoryRead: boolean): Promise<FieldReadDecision> {
     if (!isFieldLevelSecurityApplicable(object)) return {
       source: "REPOSITORY", readable: true, field, message: PLATFORM_EVENT_FLS_REASON,
+    };
+    // Current-org EntityParticle is authoritative for FLS applicability.
+    // Callers have already checked object Read independently.
+    const metadata = await this.fieldMetadata?.getField(object, field);
+    if (metadata?.permissionable === false) return {
+      source: metadata.source === "LIVE" ? "ORG_VERIFIED" : "REPOSITORY",
+      readable: true, field,
+      message: `${object}.${field} is non-permissionable (${metadata.source.toLowerCase()} field metadata); no individual FLS Read grant is needed.`,
     };
     if (repositoryRead) return {
       source: "REPOSITORY", readable: true, field,

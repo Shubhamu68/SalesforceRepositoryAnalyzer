@@ -183,6 +183,12 @@ export function collectQueryFields(query: SoqlQuery, relationships: Relationship
     for (const object of resolved.objects) {
       if (isDataAccessAnalysisObject(object)) objects.add(object);
     }
+    if (resolved.polymorphicNamePseudoField) {
+      // Name is a non-queryable, non-permissionable polymorphic descriptor:
+      // check the originating object Read, never User/Group fields nor a
+      // synthetic Name object Read. Metadata validation happened in resolver.
+      return;
+    }
     if (isIgnoredField(resolved.field, resolved.object)) return;
     const field: ScopedFieldReference = {
       object: resolved.object, field: resolved.field, source,

@@ -5,18 +5,22 @@ import { createPersonaAccessEvaluator } from "../analyzer/personaAccessEvaluator
 import { OrgObjectReadVerificationService } from "./OrgObjectReadVerificationService.js";
 import { OrgPermissionFallbackService } from "./OrgPermissionFallbackService.js";
 import { isFieldLevelSecurityApplicable, PLATFORM_EVENT_FLS_REASON } from "../config/fieldSecurityPolicy.js";
+import type { SalesforceFieldMetadataService } from "../salesforce/SalesforceFieldMetadataService.js";
 
 export class PersonaFieldAccessService {
   constructor(
     private readonly resolver: PersonaPermissionResolver,
     private readonly orgReadVerification?: OrgObjectReadVerificationService,
     private readonly permissionFallback?: OrgPermissionFallbackService,
+    private readonly fieldMetadata?: SalesforceFieldMetadataService,
   ) {}
 
   async getFieldAccess(persona: Persona, objectName: string, fieldName: string): Promise<FieldAccessCheckResult> {
     const resolved = await this.resolver.resolve(persona);
     const evaluator = createPersonaAccessEvaluator(resolved);
     const field = evaluator.evaluateField(`${objectName}.${fieldName}`);
+    const metadata = await this.fieldMetadata?.getField(objectName, fieldName);
+    const permissionable = this.fieldMetadata ? metadata?.permissionable : field.permissionable;
     if (!isFieldLevelSecurityApplicable(objectName)) {
       // No event-field FLS check, including no Salesforce UserFieldAccess.
       // Publishing and subscribing remain object-level permissions.
@@ -30,13 +34,13 @@ export class PersonaFieldAccessService {
       const evaluatedObject = evaluator.evaluateObject(objectName);
       const objectAccess = await this.permissionFallback.resolveObject(persona, objectName, evaluatedObject.access);
       const result = await this.permissionFallback.resolveField(persona, objectName, fieldName, objectAccess, {
-        read: field.schemaRequired === true || field.permissionable === false || field.readGrantedBy.length > 0,
+        read: field.schemaRequired === true || permissionable === false || field.readGrantedBy.length > 0,
         edit: field.schemaRequired === true || field.editGrantedBy.length > 0,
       });
       return {
         field: field.field, ...result.access,
         permissionEvidence: result.evidence,
-        permissionable: field.permissionable, schemaRequired: field.schemaRequired,
+        permissionable, schemaRequired: field.schemaRequired,
         readGrantedBy: field.readGrantedBy, editGrantedBy: field.editGrantedBy,
         mutedBy: field.mutedBy,
       };
@@ -46,7 +50,7 @@ export class PersonaFieldAccessService {
       ? await this.orgReadVerification.resolve(persona, objectName, false)
       : undefined;
     const effectiveObjectRead = objectRead || objectReadEvidence?.readable === true;
-    const independentFls = field.schemaRequired === true || field.permissionable === false ||
+    const independentFls = field.schemaRequired === true || permissionable === false ||
       field.readGrantedBy.length > 0;
     let readable = effectiveObjectRead && independentFls;
     let fieldReadEvidence;
@@ -64,7 +68,7 @@ export class PersonaFieldAccessService {
       ...(objectReadEvidence ? { objectReadEvidence } : {}),
       ...(fieldReadEvidence ? { fieldReadEvidence } : {}),
       edit: field.editable,
-      permissionable: field.permissionable,
+      permissionable,
       schemaRequired: field.schemaRequired,
       readGrantedBy: field.readGrantedBy,
       editGrantedBy: field.editGrantedBy,

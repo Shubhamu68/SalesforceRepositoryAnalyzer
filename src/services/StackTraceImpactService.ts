@@ -18,6 +18,7 @@ import { collectQueryFields } from "../analyzer/soqlQueryFieldResolver.js";
 import { OrgObjectReadVerificationService } from "./OrgObjectReadVerificationService.js";
 import type { OrgObjectAccessEvidence } from "../salesforce/SalesforcePersonaAccessVerifier.js";
 import { SalesforceRelationshipMetadataService } from "../salesforce/SalesforceRelationshipMetadataService.js";
+import type { SalesforceFieldMetadataService } from "../salesforce/SalesforceFieldMetadataService.js";
 import {
   createApexMethodIndex, parseApexStackTrace, resolveMethodCalls, type ApexMethod,
 } from "../scanner/apexMethodScanner.js";
@@ -54,7 +55,8 @@ export class StackTraceImpactService {
     private readonly mutingDirectory: string,
     private readonly orgVerifier?: OrgObjectReadVerificationService,
     private readonly orgRelationshipMetadata?: SalesforceRelationshipMetadataService,
-    private readonly orgVerificationStatusPolicy?: OrgVerificationStatusPolicy
+    private readonly orgVerificationStatusPolicy?: OrgVerificationStatusPolicy,
+    private readonly fieldMetadata?: SalesforceFieldMetadataService,
   ) {}
 
   async analyze(stackTrace: string): Promise<StackTraceImpactResult> {
@@ -164,9 +166,19 @@ export class StackTraceImpactService {
         if (inventory.unresolved.length && orgRelationshipHydrator) {
           // Describe metadata is consulted only when local relationship metadata
           // was insufficient. This includes standard polymorphic Owner links.
-          const describeWarnings = await orgRelationshipHydrator.hydrateQuery(query, inventory.unresolved);
+          const describeWarnings = await orgRelationshipHydrator.hydrateQuery(query,
+            inventory.unresolvedEntries.map((item) => `${item.baseObject}.${item.fieldPath}`));
           warnings.push(...describeWarnings);
           inventory = collectQueryFields(query, relationshipMap);
+        }
+        // Share metadata decisions across every persona for this query.
+        const metadata = new Map<string, boolean | undefined>();
+        if (this.fieldMetadata) {
+          await Promise.all(inventory.fields.map(async (field) => {
+            const key = `${field.object}.${field.field}`.toLowerCase();
+            const info = await this.fieldMetadata!.getField(field.object, field.field);
+            metadata.set(key, info.permissionable);
+          }));
         }
         const impacts: QueryPersonaImpact[] = prepared.map((person) => {
           const missing: MissingReadPermission[] = [];
@@ -193,7 +205,11 @@ export class StackTraceImpactService {
             // evaluateField.readable includes object Read. For related objects,
             // check FLS separately: absence of the object grant must not turn an
             // explicitly granted or schema-required field into a false FLS error.
-            const hasFieldRead = fieldGrant.schemaRequired === true || fieldGrant.permissionable === false || fieldGrant.readGrantedBy.length > 0;
+            const permissionable = this.fieldMetadata
+              ? metadata.get(`${field.object}.${field.field}`.toLowerCase())
+              : fieldGrant.permissionable;
+            const hasFieldRead = fieldGrant.schemaRequired === true ||
+              permissionable === false || fieldGrant.readGrantedBy.length > 0;
             // Keep field security independent of the FROM object's permission.
             // A later org-verified object Read must not turn unchecked FLS green.
             if (!hasFieldRead) {

@@ -32,6 +32,14 @@ function load(): Map<string, boolean> {
   try {
     parsed = JSON.parse(readFileSync(filePath, "utf8"));
   } catch (error) {
+    // The built-in snapshot is an optional repository-only fallback. A
+    // deliberately configured external snapshot must still exist and parse.
+    if (!process.env.FIELD_PERMISSIONABILITY_SNAPSHOT_PATH?.trim() &&
+        (error as NodeJS.ErrnoException)?.code === "ENOENT") {
+      cached = new Map();
+      cachedNamedFields = new Map();
+      return cached;
+    }
     throw new Error(`Unable to load Salesforce field permissionability snapshot at ${filePath}: ${String(error)}`);
   }
   if (

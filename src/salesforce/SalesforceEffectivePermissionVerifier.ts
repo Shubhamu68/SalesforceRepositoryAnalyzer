@@ -290,6 +290,9 @@ export class SalesforceEffectivePermissionVerifier {
     const parents = [...new Set(result.map((entry) => entry.readFromCompoundParent).filter(
       (item): item is string => typeof item === "string"
     ))];
+    if (read.source === "ORG_VERIFIED" && result.some((entry) => entry.nonPermissionableSource)) {
+      read.message += ` Salesforce field metadata identifies ${object}.${field} as non-permissionable; object Read is checked separately.`;
+    }
     if (read.source === "ORG_VERIFIED" && parents.length === 1) {
       read.message += ` Component Read confirmed using compound parent ${object}.${parents[0]}; individual UserFieldAccess row was absent.`;
     }

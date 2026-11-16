@@ -377,6 +377,7 @@ export class SalesforcePersonaAccessVerifier {
       const { users, checkedUserDetails, matchedUsers, eligibleUsers, sampled } = await this.matchingUsers(persona);
       const readable: Array<boolean | null> = [];
       const compoundParents: string[] = [];
+      let nonPermissionable = false;
       for (let i = 0; i < users.length; i += VERIFY_CONCURRENCY) {
         const batch = users.slice(i, i + VERIFY_CONCURRENCY);
         const results = await Promise.all(batch.map(async (userId) => {
@@ -385,12 +386,19 @@ export class SalesforcePersonaAccessVerifier {
           } catch { return { read: null, edit: null }; }
         }));
         readable.push(...results.map((item) => item.read));
+        nonPermissionable ||= results.some((item) => Boolean(item.nonPermissionableSource));
         compoundParents.push(...results.map((item) => item.readFromCompoundParent).filter(
           (item): item is string => typeof item === "string"
         ));
       }
       const decision = this.decide(object, field, matchedUsers, readable.length, sampled, checkedUserDetails,
         readable, `${object}.${field} field Read`, eligibleUsers);
+      if (decision.outcome === "VERIFIED" && nonPermissionable) {
+        return {
+          ...decision,
+          message: `Salesforce field metadata identifies ${object}.${field} as non-permissionable; no individual Read FLS grant is required. Object Read is evaluated separately.`,
+        };
+      }
       if (decision.outcome === "VERIFIED" && compoundParents.length > 0) {
         const unique = [...new Set(compoundParents.map((item) => item.toLowerCase()))];
         if (unique.length === 1) {
