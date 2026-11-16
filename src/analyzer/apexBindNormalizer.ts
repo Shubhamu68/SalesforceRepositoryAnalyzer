@@ -25,7 +25,7 @@ const isIdentBody = (char: string | undefined): boolean =>
 export function normalizeApexBindExpressions(original: string): NormalizedApexBinds {
   const visible = maskSoql(original);
   const n = visible.length;
-  const spans: Array<{ from: number; to: number; inList: boolean }> = [];
+  const spans: Array<{ from: number; to: number; inList: boolean; numeric: boolean }> = [];
   const limitations: string[] = [];
   const listContexts: boolean[] = [];
 
@@ -141,16 +141,19 @@ export function normalizeApexBindExpressions(original: string): NormalizedApexBi
       continue;
     }
     const inList = listContexts[listContexts.length - 1] === true;
-    spans.push({ from: i, to: bind.end, inList });
+    // SOQL parser expects a numeric literal after LIMIT / OFFSET, even
+    // when Apex supplies the value via a bind at execution time.
+    const numeric = /\b(?:LIMIT|OFFSET)\s*$/i.test(visible.slice(Math.max(0, i - 48), i));
+    spans.push({ from: i, to: bind.end, inList, numeric });
     i = bind.end - 1;
   }
 
   let query = original;
-  for (const { from, to, inList } of spans.reverse()) {
+  for (const { from, to, inList, numeric } of spans.reverse()) {
     // Never discard line information: query source line references use the
     // original text, and normalized multiline binds preserve line counts.
     const newlines = (original.slice(from, to).match(/\r\n|\r|\n/g) ?? []).join("");
-    const replacement = inList ? "'analyzerApexBind'" : ":analyzerApexBind";
+    const replacement = numeric ? "1" : inList ? "'analyzerApexBind'" : ":analyzerApexBind";
     query = query.slice(0, from) + replacement + newlines + query.slice(to);
   }
   return { query, limitations, count: spans.length };

@@ -78,7 +78,11 @@ test("two Apex constants in a parenthesized IN list do not become SOQL fields", 
   assert.deepEqual(limits, []);
   assert.deepEqual(c.unresolved, []);
   assert.equal(q.object, "OrderSummary");
-  assert.ok(c.fields.some(x => x.object === "RecordType" && x.field === "Name"));
+  // The syntax tree must retain the relationship; the existing system-field
+  // rule can exclude Name from configurable FLS checks.
+  assert.ok(extractSoqlExpressionFields(constantsInList).fields.some(
+    x => x.fieldPath === "RecordType.Name" && x.context === "WHERE"));
+  assert.ok(c.objects.includes("RecordType"));
   assert.ok(c.fields.some(x => x.object === "OrderSummary" && x.field === "OrderNumber"));
   assert.ok(!c.fields.some(x => x.object === "AdvantageConstants" ||
     x.field === "CORE" || x.field === "OTC"));
@@ -93,7 +97,8 @@ test("IN: variable, =: true, and SECURITY_ENFORCED are handled without parser wa
   assert.equal(q.securityMode, "SECURITY_ENFORCED");
   assert.deepEqual([...new Set(c.fields.map(x => x.field))].sort(),
     ["Basis__c", "Client_Promo_Ref__c", "Delivery_Condition__c",
-      "Is_Active__c", "Rate__c", "UOM__c", "Id"].sort());
+      "Is_Active__c", "Rate__c", "UOM__c"].sort());
+  assert.ok(extractSoqlExpressionFields(spacedBinds).fields.some(x => x.fieldPath === "Id"));
   assert.ok(c.references.some(x => x.field === "Is_Active__c" && x.usageContext === "WHERE"));
   assert.ok(!c.fields.some(x => x.field === "true" || x.field === "setRate"));
 });
