@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import ExcelJS from "exceljs";
+import { writeSoqlReport } from "../src/reporter/soqlReportWriter.js";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -284,4 +286,136 @@ test("SOQL Read enforcement checks the real aggregate operand under USER_MODE", 
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+
+test("all aggregate functions used on one field preserve references but dedupe Salesforce FLS checks", () => {
+  const q = parse("SELECT SUM(Amount) total, AVG(Amount) average, MIN(Amount) minimum, MAX(Amount) maximum FROM Opportunity");
+  const collection = collectQueryFields(q, new RelationshipMap());
+  assert.equal(collection.references.filter(ref => ref.field === "Amount").length, 4);
+  const inventory = buildSoqlFieldInventory([q], new RelationshipMap());
+  assert.deepEqual([...inventory.get("Opportunity")!.keys()], ["amount"]);
+  assert.equal(extractSoqlQueries("List<AggregateResult> a=[SELECT MAX(Amount) FROM Opportunity];", "classes/C.cls").length, 1);
+});
+
+test("FORMULA() in WHERE checks both operand fields and never a synthetic FORMULA field", () => {
+  const q = "SELECT Id FROM Opportunity WHERE FORMULA('Amount - ExpectedRevenue') > 100";
+  const result = extractSoqlExpressionFields(q);
+  assert.equal(result.parsed, true, result.limitations.join("; "));
+  assert.deepEqual(result.fields.filter(ref => ref.context === "WHERE").map(ref => ref.fieldPath),
+    ["Amount", "ExpectedRevenue"]);
+  assert.ok(!result.fields.some(ref => ref.fieldPath === "FORMULA"));
+});
+
+test("dynamic FIELDS() projection produces an explicit review limitation", () => {
+  const result = extractSoqlExpressionFields("SELECT FIELDS(ALL) FROM Account");
+  assert.ok(result.limitations.length > 0,
+    "FIELDS(ALL) must not silently skip field-level access analysis");
+  assert.ok(result.fields.every(ref => ref.fieldPath !== "ALL" && ref.fieldPath !== "FIELDS"));
+});
+
+test("source lines for SELECT aggregate and HAVING-only aggregate remain distinct", () => {
+  const q = parse("SELECT StageName, SUM(Amount) amount\nFROM Opportunity\nGROUP BY StageName\n" +
+    "HAVING MAX(ExpectedRevenue) > 1000\nORDER BY StageName");
+  const c = collectQueryFields(q, new RelationshipMap());
+  const select = c.references.find(ref => ref.field === "Amount" && ref.usageContext === "SELECT");
+  const having = c.references.find(ref => ref.field === "ExpectedRevenue" && ref.usageContext === "HAVING");
+  assert.equal(select?.lineNumber, 1);
+  assert.equal(having?.lineNumber, 4);
+  assert.equal(having?.queryLineNumber, 1);
+});
+
+test("multi-level aggregate references preserve child field and parent source lines", () => {
+  const graph = new RelationshipMap();
+  graph.addChild("Account", "Opportunities", "Opportunity");
+  const query = parse("SELECT Name,\n(SELECT MAX(Amount) peak,\n SUM(ExpectedRevenue) total FROM Opportunities)\nFROM Account");
+  const c = collectQueryFields(query, graph);
+  assert.equal(query.subqueries[0].lineNumber, 2);
+  assert.deepEqual([...new Set(c.fields.map(f => f.object + "." + f.field))],
+    ["Account.Name", "Opportunity.Amount", "Opportunity.ExpectedRevenue"]);
+  assert.ok(c.references.some(f => f.object === "Opportunity" && f.field === "ExpectedRevenue" && f.lineNumber === 3));
+});
+
+test("unsupported function syntax is a parse limitation, not a false field-permission denial", () => {
+  const q = parse("SELECT Name FROM Account");
+  q.query = "SELECT UNKNOWNFUNC(Secret__c) FROM Account";
+  const c = collectQueryFields(q, new RelationshipMap());
+  assert.ok(c.limitations.length > 0);
+  assert.ok(c.unresolvedEntries.every(x => x.fieldPath !== "UNKNOWNFUNC"));
+});
+
+test("SECURITY_ENFORCED does not mark a HAVING-only denied field as High", async () => {
+  const persona: Persona = { name: "Analyst", profile: undefined,
+    permissionSets: [], permissionSetGroups: [], mutingPermissionSets: [] };
+  const ps = { name: "PS", label: "PS", objectPermissions: [
+    { object: "Opportunity", allowRead: true, allowCreate: false, allowEdit: false,
+      allowDelete: false, viewAllRecords: false, modifyAllRecords: false, viewAllFields: false },
+  ], fieldPermissions: [] };
+  const resolver = { resolve: async () => ({ persona, permissionSetGroups: [], directPermissionSets: [ps],
+    permissionSetGrants: [{ permissionSet: ps, type: "directPermissionSet" }], mutingPermissionSets: [],
+    mutesByGroup: new Map() }) } as unknown as PersonaPermissionResolver;
+  const mock = {
+    getVerificationScope: () => "test-org",
+    verifyObjectRead: async () => { throw new Error("Already granted from repository"); },
+    verifyFieldRead: async (_p: Persona, object: string, field: string) => ({
+      object, field, outcome: "DENIED" as const, checkedUsers: 1, matchedUsers: 1,
+      sampled: false, message: "Salesforce denied Read",
+    }),
+  } as unknown as SalesforcePersonaAccessVerifier;
+  const dir = await mkdtemp(path.join(os.tmpdir(), "sf-aggregate-security-"));
+  try {
+    const file = path.join(dir, "Aggregate.cls");
+    await writeFile(file + "-meta.xml", "<ApexClass><apiVersion>66.0</apiVersion></ApexClass>");
+    const soql = "SELECT StageName, COUNT(Id) FROM Opportunity WITH SECURITY_ENFORCED " +
+      "GROUP BY StageName HAVING SUM(Amount) > 100";
+    const result = await new SoqlSecurityAnalyzer(resolver, dir,
+      new OrgObjectReadVerificationService({ statusNeutralObjectRead: new Set() }, mock))
+      .analyze(persona, extractSoqlQueries("List<AggregateResult> r=[" + soql + "];", file));
+    const select = result.find(f => f.field === "StageName");
+    const having = result.find(f => f.field === "Amount");
+    assert.equal(select?.criticality, "High");
+    assert.equal(having?.criticality, "Low");
+    assert.equal(having?.runtimeImpact, "Undetermined");
+    assert.match(having?.reason ?? "", /outside SELECT/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("Excel report records the real MAX operand and never creates an OrderItemSummary.MAX row", async () => {
+  const persona: Persona = { name: "OTC", profile: undefined,
+    permissionSets: [], permissionSetGroups: [], mutingPermissionSets: [] };
+  const ps = { name: "PS", label: "PS", objectPermissions: [{
+    object: "OrderItemSummary", allowRead: true, allowCreate: false, allowEdit: false,
+    allowDelete: false, viewAllRecords: false, modifyAllRecords: false, viewAllFields: false
+  }], fieldPermissions: [] };
+  const resolver = { resolve: async () => ({ persona, permissionSetGroups: [], directPermissionSets: [ps],
+    permissionSetGrants: [{ permissionSet: ps, type: "directPermissionSet" }],
+    mutingPermissionSets: [], mutesByGroup: new Map() }) } as unknown as PersonaPermissionResolver;
+  const mock = { getVerificationScope: () => "test",
+    verifyObjectRead: async () => { throw Error("Object permission was provided in the repository"); },
+    verifyFieldRead: async (_p: Persona, object: string, field: string) => ({
+      object, field, outcome: "DENIED" as const, matchedUsers: 1, checkedUsers: 1,
+      sampled: false, message: "Access denied",
+    }),
+  } as unknown as SalesforcePersonaAccessVerifier;
+  const dir = await mkdtemp(path.join(os.tmpdir(), "sf-aggregate-excel-"));
+  try {
+    const file = path.join(dir, "OMSQueryService.cls");
+    await writeFile(file + "-meta.xml", "<ApexClass><apiVersion>66.0</apiVersion></ApexClass>");
+    const queries = extractSoqlQueries(
+      "List<AggregateResult> result = [SELECT MAX(Net_Extended_Total__c) maximum " +
+      "FROM OrderItemSummary WITH USER_MODE];", file);
+    const findings = await new SoqlSecurityAnalyzer(resolver, dir,
+      new OrgObjectReadVerificationService({ statusNeutralObjectRead: new Set() }, mock)).analyze(persona, queries);
+    assert.deepEqual(findings.filter(f => f.findingType === "FIELD_READ").map(f => f.field),
+      ["Net_Extended_Total__c"]);
+    const saved = await writeSoqlReport(dir, persona.name, queries.length, findings);
+    const book = new ExcelJS.Workbook();
+    await book.xlsx.readFile(saved.summaryReportPath);
+    const sheet = book.getWorksheet("Summary")!;
+    assert.equal(sheet.getCell("B3").value, 1);
+    assert.equal(sheet.getCell("B7").value, "Net_Extended_Total__c");
+    assert.equal(sheet.getCell("E7").value, "High");
+    const json = sheet.getSheetValues().map(row => JSON.stringify(row)).join("\n");
+    assert.doesNotMatch(json, /"MAX"/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });

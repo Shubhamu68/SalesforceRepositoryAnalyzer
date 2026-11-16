@@ -149,6 +149,8 @@ export class SoqlSecurityAnalyzer {
           // Preserve diagnostic details for inconclusive checks without repeating confirmed denials.
           reason: `${detail}${decision.source === "UNVERIFIED" ? ` ${decision.message}` : ""}${advisory}${unenforcedClause
             ? " This field is referenced outside SELECT; legacy SECURITY_ENFORCED does not establish enforcement for this clause."
+            : ""}${ref.functionName
+            ? ` Field is referenced by ${ref.functionName}() in ${ref.usageContext ?? "SELECT"}.`
             : ""}`.trim(),
         };
       });
