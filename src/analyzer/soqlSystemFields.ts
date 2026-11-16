@@ -23,12 +23,10 @@ export function isSystemField(
   );
 }
 
-export function isAggregateExpression(
-  field: string
-): boolean {
-  return /^(COUNT|SUM|AVG|MIN|MAX)\s*\(/i.test(
-    field.trim()
-  );
+/** Compatibility classifier for aggregate expressions; do NOT use this to
+ * skip fields. The syntax-aware extractor must walk their operands. */
+export function isAggregateExpression(value: string): boolean {
+  return /^(?:COUNT|COUNT_DISTINCT|SUM|AVG|MIN|MAX)\s*\(/i.test(value.trim());
 }
 
 export function isIgnoredField(

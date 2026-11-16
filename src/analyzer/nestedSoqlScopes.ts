@@ -1,4 +1,7 @@
 import type { SoqlSubquery } from "../models/SoqlQuery.js";
+import { maskSoql } from "./soqlMask.js";
+import { extractSoqlExpressionFields } from "./soqlExpressionInventory.js";
+export { maskSoql } from "./soqlMask.js";
 
 /**
  * One SOQL scope parser used by repository and stack-trace scanning.
@@ -10,31 +13,6 @@ export interface ParsedSoqlScope {
   fromName: string;
   fields: string[];
   subqueries: SoqlSubquery[];
-}
-
-export function maskSoql(text: string): string {
-  const out = text.split("");
-  let state: "normal" | "single" | "double" | "line" | "block" = "normal";
-  const blank = (i: number) => { if (text[i] !== "\n" && text[i] !== "\r") out[i] = " "; };
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i], next = text[i + 1];
-    if (state === "normal") {
-      if (ch === "'") { state = "single"; blank(i); }
-      else if (ch === '"') { state = "double"; blank(i); }
-      else if ((ch === "/" && next === "/") || (ch === "-" && next === "-")) { state = "line"; blank(i); blank(++i); }
-      else if (ch === "/" && next === "*") { state = "block"; blank(i); blank(++i); }
-    } else if (state === "line") {
-      if (ch === "\n") state = "normal"; else blank(i);
-    } else if (state === "block") {
-      if (ch === "*" && next === "/") { blank(i); blank(++i); state = "normal"; }
-      else blank(i);
-    } else {
-      if (ch === "\\" && next !== undefined) { blank(i); blank(++i); }
-      else if ((state === "single" && ch === "'") || (state === "double" && ch === '"')) { blank(i); state = "normal"; }
-      else blank(i);
-    }
-  }
-  return out.join("");
 }
 
 function wordAt(masked: string, i: number, word: string): boolean {
@@ -77,18 +55,11 @@ function segments(text: string, masked: string, start: number, end: number): Arr
   return result;
 }
 
-function selectedField(raw: string): string | undefined {
-  let value = raw.trim();
-  if (!value) return undefined;
-  const functionMatch = value.match(/^([A-Za-z_]\w*)\s*\(([\s\S]*)\)(?:\s+\w+)?$/);
-  if (functionMatch) {
-    const name = functionMatch[1].toUpperCase();
-    if (["COUNT", "COUNT_DISTINCT", "SUM", "AVG", "MIN", "MAX"].includes(name)) return undefined;
-    if (["FORMAT", "TOLABEL"].includes(name)) value = functionMatch[2].trim();
-    else return undefined;
-  }
-  value = value.replace(/\s+(?:AS\s+)?[A-Za-z_]\w*$/i, "").trim();
-  return value || undefined;
+/** Parser failure is recorded by the shared collector. Only preserve bare
+ * SELECT fields for compatibility here; never invent a function-name field. */
+function fallbackBareField(raw: string): string | undefined {
+  const match = raw.trim().match(/^([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)(?:\s+(?:(?:AS)\s+)?[A-Za-z_]\w*)?$/i);
+  return match?.[1];
 }
 
 export function parseNestedSoql(text: string, rootLine = 1): ParsedSoqlScope | undefined {
@@ -128,8 +99,20 @@ export function parseNestedSoql(text: string, rootLine = 1): ParsedSoqlScope | u
         // An unparseable child SELECT is NOT an FLS field.
         continue;
       }
-      const field = selectedField(candidate);
-      if (field) fields.push(field);
+      // The syntax-aware AST below extracts SELECT field operands, including
+      // nested aggregate and date-function arguments. Child scopes are excluded.
+    }
+    const extracted = extractSoqlExpressionFields(current);
+    if (extracted.parsed) {
+      fields.push(...extracted.fields.filter((entry) => entry.context === "SELECT")
+        .map((entry) => entry.fieldPath));
+    } else {
+      // Keep simple fields if syntax is unsupported. The shared collector
+      // records the parse limitation rather than returning an all-clear.
+      for (const item of segments(current, mask, select + 6, from)) {
+        const bare = fallbackBareField(item.text);
+        if (bare) fields.push(bare);
+      }
     }
     // Semi-joins and anti-joins occur in predicates, not the SELECT list.
     // Skip whole parenthesized subselects so their descendants are found once.

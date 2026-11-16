@@ -82,7 +82,10 @@ export class SoqlSecurityAnalyzer {
       });
     }
     const unresolvedFields: UnresolvedSoqlField[] = [];
-    const inventory = buildSoqlFieldInventory(queries, relationshipMap, (entry) => unresolvedFields.push(entry));
+    const parserLimitations: Array<{ query: SoqlQuery; message: string }> = [];
+    const inventory = buildSoqlFieldInventory(queries, relationshipMap,
+      (entry) => unresolvedFields.push(entry),
+      (query, message) => parserLimitations.push({ query, message }));
     this.executionModeResolver.clearCache();
     // Version lookup is cached per class, so hundreds of queries do not trigger
     // hundreds of metadata reads. The same resolver serves Stack Trace analysis.
@@ -122,7 +125,14 @@ export class SoqlSecurityAnalyzer {
         const parentLine = ref.queryLineNumber ?? ref.lineNumber;
         const queryDetails = queryInfo(ref.filePath, parentLine);
         const execution = queryByLocation.get(`${ref.filePath}|${parentLine}`)?.execution;
-        const outcome = findingOutcome(decision.source, execution);
+        // WITH SECURITY_ENFORCED checks SELECT fields, not automatically
+        // every filtering/grouping/sorting expression. Never fabricate a
+        // High-severity enforced failure for a non-SELECT-only field use.
+        const unenforcedClause = execution?.enforcement === "SELECT_ONLY" &&
+          ref.usageContext !== undefined && ref.usageContext !== "SELECT";
+        const scopedExecution = unenforcedClause
+          ? { ...execution, enforcement: "UNKNOWN" as const } : execution;
+        const outcome = findingOutcome(decision.source, scopedExecution);
         const advisory = decision.source === "ORG_DENIED" && outcome.criticality === "Low"
           ? execution?.enforcement === "NONE"
             ? " This SOQL query runs in system mode, so it does not enforce the user's Read permission. Review potential data exposure in application logic."
@@ -132,12 +142,16 @@ export class SoqlSecurityAnalyzer {
           ...outcome, findingType: type, filePath: ref.filePath, lineNumber: ref.lineNumber,
           object, field, ...queryDetails,
           ...(ref.relationshipPath ? { relationshipPath: ref.relationshipPath, queryLevel: ref.relationshipPath.split(" -> ").length } : {}),
-          runtimeImpact: execution
-            ? runtimeImpactForFinding(execution, decision.source === "ORG_VERIFIED" ? "VERIFIED" :
+          runtimeImpact: scopedExecution
+            ? runtimeImpactForFinding(scopedExecution, decision.source === "ORG_VERIFIED" ? "VERIFIED" :
                 decision.source === "ORG_DENIED" ? "DENIED" : "UNVERIFIED")
             : "Undetermined" as const,
           // Preserve diagnostic details for inconclusive checks without repeating confirmed denials.
-          reason: `${detail}${decision.source === "UNVERIFIED" ? ` ${decision.message}` : ""}${advisory}`.trim(),
+          reason: `${detail}${decision.source === "UNVERIFIED" ? ` ${decision.message}` : ""}${advisory}${unenforcedClause
+            ? " This field is referenced outside SELECT; legacy SECURITY_ENFORCED does not establish enforcement for this clause."
+            : ""}${ref.functionName
+            ? ` Field is referenced by ${ref.functionName}() in ${ref.usageContext ?? "SELECT"}.`
+            : ""}`.trim(),
         };
       });
     }
@@ -221,6 +235,23 @@ export class SoqlSecurityAnalyzer {
         reason: unresolved.kind === "RELATIONSHIP"
           ? `Unable to resolve child relationship ${unresolved.baseObject}.${unresolved.fieldPath}; access was not assessed.`
           : `Could not resolve ${unresolved.baseObject}.${unresolved.fieldPath} from relationship metadata. Field access wasn't assessed.`,
+      });
+    }
+    // A parser/semantic limitation is a review finding, not a missing FLS
+    // permission. Never allow unsupported SOQL expressions to look clean.
+    const parseSeen = new Set<string>();
+    for (const { query, message } of parserLimitations) {
+      const key = `${query.filePath}|${query.lineNumber}|${message}`;
+      if (parseSeen.has(key)) continue;
+      parseSeen.add(key);
+      findings.push({
+        severity: "REVIEW", criticality: "Unable to verify",
+        verificationSource: "UNVERIFIED", findingType: "PARSER",
+        filePath: query.filePath, lineNumber: query.lineNumber,
+        object: query.object, field: "(SOQL syntax review)",
+        ...queryInfo(query.filePath, query.lineNumber),
+        runtimeImpact: "Not assessed",
+        reason: `SOQL field extraction was incomplete: ${message} No access decision was inferred from this expression.`,
       });
     }
     // API 67.0+ rejects WITH SECURITY_ENFORCED at compile time, regardless

@@ -72,11 +72,11 @@ test('Inventory keeps query locations while deduplicating the same field key', (
   assert.equal(inv.get('Account')?.get('industry')?.length, 2);
 });
 
-test('Aggregate expressions are excluded from field permission inventory', () => {
+test('Aggregate operands are retained without treating functions as fields', () => {
   const graph = new RelationshipMap();
   const inv = buildSoqlFieldInventory([query('Account', ['COUNT(Id)', 'Industry'])], graph);
-  assert.equal(inv.get('Account')?.size, 1);
-  assert.ok(inv.get('Account')?.has('industry'));
+  assert.deepEqual([...inv.get('Account')!.keys()].sort(), ['id', 'industry']);
+  assert.ok(!inv.get('Account')?.has('count'));
 });
 
 test('Query field collection tracks WHERE and ORDER BY fields', () => {

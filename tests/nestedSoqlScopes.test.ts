@@ -131,9 +131,10 @@ test("COUNT-only query retains object Read without inventing Id FLS", () => {
   assert.equal(inv.get("Account")!.size, 0);
   assert.equal(inv.objectReferences.get("Account")?.length, 1);
 });
-test("aggregates are not passed as FLS field names", () => {
+test("aggregates check their underlying fields without treating function names as FLS fields", () => {
   const c = collectQueryFields(parse("SELECT COUNT(Id), SUM(Amount) FROM Opportunity"), graph());
-  assert.equal(c.fields.length, 0);
+  assert.deepEqual(c.fields.map(x => x.object + "." + x.field), ["Opportunity.Amount"]);
+  assert.ok(!c.fields.some(x => ["SUM", "COUNT"].includes(x.field)));
 });
 test("TYPEOF is called out as a limitation, not a verified field grant", () => {
   const c = collectQueryFields(parse("SELECT TYPEOF What WHEN Account THEN Name END FROM Task"), graph());

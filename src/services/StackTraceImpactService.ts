@@ -186,7 +186,7 @@ export class StackTraceImpactService {
             }
           }
           for (const field of inventory.fields) {
-            if (securityMode === "SECURITY_ENFORCED" && /^(WHERE|ORDER BY) /i.test(field.source)) continue;
+            if (securityMode === "SECURITY_ENFORCED" && /^(WHERE|ORDER BY|GROUP BY|HAVING) /i.test(field.source)) continue;
             const objectAccess = grants.get(field.object.toLowerCase())?.access;
             if (objectAccess?.viewAllFields) continue;
             const fieldGrant = evaluator.evaluateField(`${field.object}.${field.field}`);
