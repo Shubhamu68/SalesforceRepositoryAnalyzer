@@ -133,3 +133,18 @@ test("Configured OrderItemSummary field FLS remains independently org-verified",
   assert.equal(findings[0].severity, "ERROR");
   assert.deepEqual(checks.map((item) => item.toLowerCase()), ["orderitemsummary.order_quantity_change__c"]);
 });
+
+test("SOQL findings preserve the compound parent used for verified component Read", async () => {
+  const verifier = {
+    verifyFieldRead: async (_persona: Persona, object: string, field: string): Promise<OrgObjectAccessEvidence> => ({
+      object, field, outcome: "VERIFIED", checkedUsers: 1, matchedUsers: 1, sampled: false,
+      compoundParent: "BillingAddress",
+      message: "Read verified via compound parent Account.BillingAddress for Account.BillingCity; direct component row was absent.",
+    }),
+  } as unknown as SalesforcePersonaAccessVerifier;
+  const decision = new OrgObjectReadVerificationService({ statusNeutralObjectRead: new Set() }, verifier);
+  const findings = await run("Account", ["BillingCity"], decision);
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].criticality, "Low");
+  assert.match(findings[0].reason, /compound parent Account\.BillingAddress/);
+});

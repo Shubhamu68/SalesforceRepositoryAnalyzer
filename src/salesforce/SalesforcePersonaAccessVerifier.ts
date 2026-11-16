@@ -2,6 +2,7 @@ import type { Persona } from "../models/Persona.js";
 import type { OrgCheckedUser } from "../models/StackTraceImpact.js";
 import { SalesforceOrgConnection } from "./SalesforceOrgConnection.js";
 import { matchPersonaUsers, selectMostRecentlyLoggedInMatchedUser, type OrgAssignment, type OrgProfile, type OrgUser } from "./OrgPersonaMatcher.js";
+import { SalesforceUserFieldAccessGateway } from "./SalesforceUserFieldAccessGateway.js";
 
 export type OrgAccessOutcome = "VERIFIED" | "DENIED" | "UNVERIFIED";
 export interface OrgObjectAccessEvidence {
@@ -19,6 +20,8 @@ export interface OrgObjectAccessEvidence {
   /** Name and username of each user actually checked in Salesforce. */
   checkedUserDetails?: OrgCheckedUser[];
   verifiedAt?: string;
+  /** When exact UserFieldAccess is absent, verified Read via a metadata-linked compound parent. */
+  compoundParent?: string;
   message: string;
   /** Structured explanation for an inconclusive check (never inferred from message text). */
   unverifiedReason?: "NO_MATCHING_USERS" | "NO_LOGGED_IN_USERS";
@@ -60,7 +63,6 @@ type SfAssignment = {
 };
 type SfPermissionSet = { Id: string; Name: string | null; IsOwnedByProfile?: boolean };
 type SfUserEntityAccess = { UserId: string; IsReadable: boolean };
-type SfUserFieldAccess = { UserId: string; IsAccessible: boolean; FieldDefinition?: { QualifiedApiName?: string } | null };
 
 type Inventory = {
   profiles: OrgProfile[];
@@ -95,12 +97,10 @@ export class SalesforcePersonaAccessVerifier {
   // Reuse persona matching within the same (three-minute) metadata inventory.
   // WeakMap means an expired inventory and its matches can be garbage-collected.
   private readonly matchingCache = new WeakMap<Inventory, Map<string, MatchedUsers | NoMatchingOrgUsersError | NoLoggedInOrgUsersError>>();
-  // Many fields on one object share the same user-level FLS response.
-  // Cache the in-flight request to avoid duplicate Tooling API calls.
-  private fieldAccessCache = new Map<string, { expires: number; promise: Promise<Map<string, boolean>> }>();
-  private singleFieldCache = new Map<string, { expires: number; promise: Promise<boolean | null> }>();
-
-  constructor(private readonly connection: SalesforceOrgConnection) {}
+  constructor(
+    private readonly connection: SalesforceOrgConnection,
+    private readonly userFieldAccess = new SalesforceUserFieldAccessGateway(connection),
+  ) {}
 
   /** Cache isolation across Salesforce orgs and reconnects. */
   getVerificationScope(): string {
@@ -366,60 +366,6 @@ export class SalesforcePersonaAccessVerifier {
     }
   }
 
-  /**
-   * Queries field-level access for a particular User + sObject. The Tooling API
-   * supports filtering UserFieldAccess by User.Id and the field's object.
-   * A missing field row is NOT the same as IsAccessible=false.
-   */
-  private async fieldAccessByUserAndObject(userId: string, object: string): Promise<Map<string, boolean>> {
-    const status = this.connection.status;
-    const cacheKey = `${status.organizationId ?? status.instanceUrl ?? ""}|${idKey(userId)}|${normalized(object)}`;
-    const cached = this.fieldAccessCache.get(cacheKey);
-    if (cached && cached.expires > Date.now()) return cached.promise;
-    const soql = `SELECT UserId, FieldDefinition.QualifiedApiName, IsAccessible FROM UserFieldAccess WHERE User.Id = '${userId}' AND FieldDefinition.EntityDefinition.QualifiedApiName = '${object}'`;
-    const promise = this.connection.queryAll<SfUserFieldAccess>(soql, "tooling", 20000).then((rows) => {
-      const fields = new Map<string, boolean>();
-      for (const row of rows) {
-        const field = row.FieldDefinition?.QualifiedApiName;
-        if (idKey(row.UserId) !== idKey(userId) || !field || typeof row.IsAccessible !== "boolean") continue;
-        const key = normalized(field);
-        // If Salesforce returns conflicting rows, treat the field as unresolved
-        // rather than incorrectly claiming Read is granted.
-        if (fields.has(key) && fields.get(key) !== row.IsAccessible) fields.delete(key);
-        else fields.set(key, row.IsAccessible);
-      }
-      return fields;
-    });
-    this.fieldAccessCache.set(cacheKey, { expires: Date.now() + CACHE_MS, promise });
-    return promise;
-  }
-
-  /** If an object-wide UserFieldAccess response omitted a field (or Salesforce
-   * rejected that broad query), retry using the documented field-specific
-   * filter. Neither a missing row nor an API error is interpreted as denial. */
-  private async fieldAccessForUser(userId: string, object: string, field: string): Promise<boolean | null> {
-    try {
-      const all = await this.fieldAccessByUserAndObject(userId, object);
-      const value = all.get(normalized(field));
-      if (typeof value === "boolean") return value;
-    } catch {
-      // Some orgs may reject broad UserFieldAccess queries. Try a field filter.
-    }
-    const status = this.connection.status;
-    const cacheKey = `${status.organizationId ?? status.instanceUrl ?? ""}|${idKey(userId)}|${normalized(object)}|${normalized(field)}`;
-    const cached = this.singleFieldCache.get(cacheKey);
-    if (cached && cached.expires > Date.now()) return cached.promise;
-    const soql = `SELECT UserId, IsAccessible, FieldDefinition.QualifiedApiName FROM UserFieldAccess WHERE User.Id = '${userId}' AND FieldDefinition.EntityDefinition.QualifiedApiName = '${object}' AND FieldDefinition.QualifiedApiName = '${field}'`;
-    const promise = this.connection.queryAll<SfUserFieldAccess>(soql, "tooling", 5)
-      .then((rows): boolean | null => rows.length === 1 &&
-        idKey(rows[0].UserId) === idKey(userId) &&
-        normalized(rows[0].FieldDefinition?.QualifiedApiName ?? "") === normalized(field) &&
-        typeof rows[0].IsAccessible === "boolean" ? rows[0].IsAccessible : null)
-      .catch(() => null);
-    this.singleFieldCache.set(cacheKey, { expires: Date.now() + CACHE_MS, promise });
-    return promise;
-  }
-
   async verifyFieldRead(persona: Persona, object: string, field: string): Promise<OrgObjectAccessEvidence> {
     const uncertain = (message: string): OrgObjectAccessEvidence => ({
       object, field, outcome: "UNVERIFIED", matchedUsers: 0, checkedUsers: 0, sampled: false, message
@@ -430,16 +376,33 @@ export class SalesforcePersonaAccessVerifier {
     try {
       const { users, checkedUserDetails, matchedUsers, eligibleUsers, sampled } = await this.matchingUsers(persona);
       const readable: Array<boolean | null> = [];
+      const compoundParents: string[] = [];
       for (let i = 0; i < users.length; i += VERIFY_CONCURRENCY) {
         const batch = users.slice(i, i + VERIFY_CONCURRENCY);
-        const results = await Promise.all(batch.map(async (userId): Promise<boolean | null> => {
+        const results = await Promise.all(batch.map(async (userId) => {
           try {
-            return await this.fieldAccessForUser(userId, object, field);
-          } catch { return null; }
+            return await this.userFieldAccess.verifyUserField(userId, object, field);
+          } catch { return { read: null, edit: null }; }
         }));
-        readable.push(...results);
+        readable.push(...results.map((item) => item.read));
+        compoundParents.push(...results.map((item) => item.readFromCompoundParent).filter(
+          (item): item is string => typeof item === "string"
+        ));
       }
-      return this.decide(object, field, matchedUsers, readable.length, sampled, checkedUserDetails, readable, `${object}.${field} field Read`, eligibleUsers);
+      const decision = this.decide(object, field, matchedUsers, readable.length, sampled, checkedUserDetails,
+        readable, `${object}.${field} field Read`, eligibleUsers);
+      if (decision.outcome === "VERIFIED" && compoundParents.length > 0) {
+        const unique = [...new Set(compoundParents.map((item) => item.toLowerCase()))];
+        if (unique.length === 1) {
+          const parent = compoundParents[0];
+          return {
+            ...decision,
+            compoundParent: parent,
+            message: `Read verified via compound parent ${object}.${parent} for ${object}.${field}; direct component row was absent.`,
+          };
+        }
+      }
+      return decision;
     } catch (error) {
       const message = error instanceof Error ? error.message : "Salesforce verification failed.";
       return { ...uncertain(`Unable to verify field Read from Salesforce: ${message}`),

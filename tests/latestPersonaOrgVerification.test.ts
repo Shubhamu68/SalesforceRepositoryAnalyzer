@@ -177,3 +177,33 @@ test("Matching across additional grants remains supported", () => {
   ]);
   assert.equal(matchPersonaUsers(target, profiles, users, assignments).eligibleCount, 2);
 });
+
+test("SOQL/Stack Read verifier uses the shared compound gateway for parent-backed BillingCity", async () => {
+  const { connection: original } = fakeOrg();
+  const observed: string[] = [];
+  const proxy = {
+    status: original.status,
+    connect: () => original.connect(),
+    queryAll: async <T>(soql: string, api: "data" | "tooling" = "data", limit = 1000): Promise<T[]> => {
+      if (soql.includes("FROM UserFieldAccess")) {
+        observed.push(soql);
+        const exact = soql.includes("AND FieldDefinition.QualifiedApiName = '");
+        if (exact && !soql.includes("'BillingAddress'")) return [];
+        return [{ UserId: latest, IsAccessible: true, IsUpdatable: false,
+          FieldDefinition: { QualifiedApiName: "BillingAddress" } }] as T[];
+      }
+      return original.queryAll<T>(soql, api, limit);
+    },
+    describeSObject: async () => ({
+      name: "Account",
+      fields: [{ name: "BillingAddress", type: "address" },
+        { name: "BillingCity", type: "string", compoundFieldName: "BillingAddress" }],
+      childRelationships: [],
+    }),
+  } as unknown as SalesforceOrgConnection;
+  const response = await new SalesforcePersonaAccessVerifier(proxy).verifyFieldRead(target, "Account", "BillingCity");
+  assert.equal(response.outcome, "VERIFIED");
+  assert.equal(response.compoundParent, "BillingAddress");
+  assert.match(response.message, /compound parent Account\.BillingAddress/);
+  assert.ok(observed.some((q) => q.includes("FROM UserFieldAccess")));
+});

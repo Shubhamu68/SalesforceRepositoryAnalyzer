@@ -9,6 +9,7 @@ on:
       - feature/org-fallback-all-access-permissions
       - fix/platform-event-fls-and-managed-ps-warnings
       - feature/ui-messaging-cleanup
+      - feature/compound-field-access-verification
   pull_request:
   workflow_dispatch:
 permissions:
