@@ -11,6 +11,7 @@ on:
       - feature/ui-messaging-cleanup
       - feature/soql-aggregate-expression-analysis
       - fix/apex-soql-bind-expression-normalization
+      - fix/issue-19-field-access-evidence-status
       - feature/compound-field-access-verification
   pull_request:
   workflow_dispatch:

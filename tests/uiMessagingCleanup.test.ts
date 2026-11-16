@@ -61,7 +61,7 @@ test("screens use concise copy and retain Excel-only and access distinctions", a
   assert.match(stack, /analysisModeHint\("stack", connection\)/);
   assert.match(matrix, /persona\.permissionEvidence\?\.\[permission\.key\]/);
   assert.match(matrix, /No repository grant/);
-  assert.match(matrix, /Review = incomplete verification/);
+  assert.match(matrix, /Review = insufficient evidence/);
   assert.match(app, /<details className="source-section">/);
   assert.match(org, /<details className="sf-detail-disclosure">/);
   assert.match(org, /role="status"/);
