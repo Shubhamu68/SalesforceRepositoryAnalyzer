@@ -13,6 +13,7 @@ import { OrgObjectReadVerificationService } from "./OrgObjectReadVerificationSer
 import { SalesforcePersonaAccessVerifier } from "../salesforce/SalesforcePersonaAccessVerifier.js";
 import { SalesforceEffectivePermissionVerifier } from "../salesforce/SalesforceEffectivePermissionVerifier.js";
 import { SalesforceUserFieldAccessGateway } from "../salesforce/SalesforceUserFieldAccessGateway.js";
+import { SalesforceFieldMetadataService } from "../salesforce/SalesforceFieldMetadataService.js";
 import { OrgPermissionFallbackService } from "./OrgPermissionFallbackService.js";
 import { SalesforceRelationshipMetadataService } from "../salesforce/SalesforceRelationshipMetadataService.js";
 import type { SalesforceOrgConnection } from "../salesforce/SalesforceOrgConnection.js";
@@ -65,10 +66,11 @@ export class AnalyzerRuntimeService {
       paths.profilesPath,
     );
     // One FLS gateway is shared by all analysis features in this runtime.
-    const userFieldAccess = useOrg ? new SalesforceUserFieldAccessGateway(this.connection) : undefined;
+    const fieldMetadata = new SalesforceFieldMetadataService(useOrg ? this.connection : undefined);
+    const userFieldAccess = useOrg ? new SalesforceUserFieldAccessGateway(this.connection, fieldMetadata) : undefined;
     const personaVerifier = useOrg ? new SalesforcePersonaAccessVerifier(this.connection, userFieldAccess) : undefined;
     const verification = new OrgObjectReadVerificationService(
-      await this.metadataPolicy, personaVerifier,
+      await this.metadataPolicy, personaVerifier, fieldMetadata,
     );
     const fallback = new OrgPermissionFallbackService(
       personaVerifier ? new SalesforceEffectivePermissionVerifier(this.connection, personaVerifier, userFieldAccess) : undefined,
@@ -78,7 +80,7 @@ export class AnalyzerRuntimeService {
       : undefined;
     const accessQueryService = new AccessQueryService(
       new PersonaAccessService(resolver, verification, fallback),
-      new PersonaFieldAccessService(resolver, verification, fallback),
+      new PersonaFieldAccessService(resolver, verification, fallback, fieldMetadata),
     );
     const soqlAnalysisService = new SoqlAnalysisService(
       paths.repositoryPath,
@@ -88,6 +90,7 @@ export class AnalyzerRuntimeService {
         verification,
         undefined,
         relationships,
+        fieldMetadata,
       ),
       () => this.reportOutput.requireConfiguredDirectory(),
     );
@@ -95,7 +98,7 @@ export class AnalyzerRuntimeService {
     const stackTraceImpactService = new StackTraceImpactService(
       paths.repositoryPath, path.join(paths.defaultPath, "objects"),
       this.personas, resolver, paths.mutingPermissionSetsPath,
-      verification, relationships, await this.metadataPolicy,
+      verification, relationships, await this.metadataPolicy, fieldMetadata,
     );
     const context = {
       paths, accessQueryService, soqlAnalysisService,

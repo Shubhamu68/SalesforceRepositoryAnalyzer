@@ -9,6 +9,7 @@ import { buildRelationshipMap } from "./salesforceRelationshipResolver.js";
 import { buildSoqlFieldInventory, type UnresolvedSoqlField } from "./soqlFieldInventoryBuilder.js";
 import { collectQueryFields } from "./soqlQueryFieldResolver.js";
 import type { SalesforceRelationshipMetadataService } from "../salesforce/SalesforceRelationshipMetadataService.js";
+import type { SalesforceFieldMetadataService } from "../salesforce/SalesforceFieldMetadataService.js";
 import type { SoqlFieldReference } from "../models/SoqlFieldInventory.js";
 import { ApexExecutionSecurityModeResolver } from "../services/ApexExecutionSecurityModeResolver.js";
 import { runtimeImpactForFinding, type SoqlExecutionMode } from "./soqlExecutionMode.js";
@@ -62,6 +63,7 @@ export class SoqlSecurityAnalyzer {
     private readonly readVerification?: OrgObjectReadVerificationService,
     private readonly executionModeResolver = new ApexExecutionSecurityModeResolver(),
     private readonly orgRelationshipMetadata?: SalesforceRelationshipMetadataService,
+    private readonly fieldMetadata?: SalesforceFieldMetadataService,
   ) {}
 
   async analyze(persona: Persona, inputQueries: SoqlQuery[]): Promise<SoqlSecurityFinding[]> {
@@ -196,10 +198,13 @@ export class SoqlSecurityAnalyzer {
       await boundedMap(uniqueFields, async ([fieldKey, references]) => {
         const fieldName = references[0]?.field ?? fieldKey;
         const grant = evaluator.evaluateField(`${object}.${fieldName}`);
-        // FLS is independent of object Read. Non-permissionable or schema-
-        // required fields do not require explicit FLS; neither does ViewAllFields.
+        // Current-org metadata overrides the curated snapshot. Never
+        // infer a grant from an unknown field in a successful live lookup.
+        const metadata = await this.fieldMetadata?.getField(object, fieldName);
+        const permissionable = this.fieldMetadata ? metadata?.permissionable : grant.permissionable;
+        // A non-permissionable component needs object Read, not separate FLS.
         const repositoryFieldRead = grant.schemaRequired === true ||
-          grant.permissionable === false || grant.readGrantedBy.length > 0 ||
+          permissionable === false || grant.readGrantedBy.length > 0 ||
           repositoryObject.viewAllFields;
         if (repositoryFieldRead) return;
 

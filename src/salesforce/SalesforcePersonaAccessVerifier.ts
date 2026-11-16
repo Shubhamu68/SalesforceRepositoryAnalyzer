@@ -391,6 +391,12 @@ export class SalesforcePersonaAccessVerifier {
       }
       const decision = this.decide(object, field, matchedUsers, readable.length, sampled, checkedUserDetails,
         readable, `${object}.${field} field Read`, eligibleUsers);
+      if (decision.outcome === "VERIFIED" && results.some((item) => item.nonPermissionableSource)) {
+        return {
+          ...decision,
+          message: `Salesforce field metadata identifies ${object}.${field} as non-permissionable; no individual Read FLS grant is required. Object Read is evaluated separately.`,
+        };
+      }
       if (decision.outcome === "VERIFIED" && compoundParents.length > 0) {
         const unique = [...new Set(compoundParents.map((item) => item.toLowerCase()))];
         if (unique.length === 1) {

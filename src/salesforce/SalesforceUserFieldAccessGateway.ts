@@ -1,4 +1,5 @@
 import type { SalesforceOrgConnection, SalesforceSObjectDescribe } from "./SalesforceOrgConnection.js";
+import type { SalesforceFieldMetadataService } from "./SalesforceFieldMetadataService.js";
 
 /**
  * Shared, conservative UserFieldAccess gateway for SOQL, Stack Trace,
@@ -31,6 +32,8 @@ export type EffectiveUserFieldAccess = {
   edit: boolean | null;
   /** Non-empty only when a component's Read was inferred from an explicitly verified parent. */
   readFromCompoundParent?: string;
+  /** Evidence came from live/snapshot IsPermissionable=false, not a user grant. */
+  nonPermissionableSource?: "LIVE" | "SNAPSHOT";
 };
 
 const CACHE_MS = 60_000;
@@ -45,7 +48,7 @@ const standardAddressSuffixes = [
 const norm = (value: string): string => value.trim().toLowerCase();
 const userKey = (id: string) => id.slice(0, 15);
 const isCompoundType = (type: string | undefined): boolean =>
-  type?.toLowerCase() === "address" || type?.toLowerCase() === "location";
+  ["address", "location", "name"].includes(type?.toLowerCase() ?? "");
 
 /** Only a recognized compound field in Describe may become an FLS parent. */
 export function compoundParentFromDescribe(
@@ -104,7 +107,10 @@ export class SalesforceUserFieldAccessGateway {
   private readonly exactCache = new Map<string, CacheEntry<DirectAccess>>();
   private readonly parentCache = new Map<string, CacheEntry<Map<string, string>>>();
 
-  constructor(private readonly connection: Connection) {}
+  constructor(
+    private readonly connection: Connection,
+    private readonly metadata?: SalesforceFieldMetadataService,
+  ) {}
 
   private scope(): string {
     const status = this.connection.status;
@@ -191,9 +197,19 @@ export class SalesforceUserFieldAccessGateway {
   async verifyUserField(userId: string, object: string, field: string): Promise<EffectiveUserFieldAccess> {
     const unknown = { read: null, edit: null };
     if (!USER_ID.test(userId) || !FIELD_NAME.test(object) || !FIELD_NAME.test(field)) return unknown;
+    // Non-permissionable field components cannot have independent FLS
+    // grants. Live EntityParticle wins over any stale offline snapshot.
+    const fieldMetadata = await this.metadata?.getField(object, field);
+    if (fieldMetadata?.permissionable === false) {
+      return {
+        read: true, edit: null,
+        nonPermissionableSource: fieldMetadata.source === "LIVE" ? "LIVE" : "SNAPSHOT",
+      };
+    }
     const direct = await this.direct(userId, object, field);
     if (direct.state !== "MISSING") return { read: direct.read, edit: direct.edit };
-    const parent = await this.compoundParent(object, field);
+    const parent = await this.compoundParent(object, field)
+      ?? await this.metadata?.getCompoundNameParent(object, field) ?? null;
     if (!parent) return unknown;
     const parentAccess = await this.direct(userId, object, parent);
     if (parentAccess.state === "PRESENT" && parentAccess.read === true) {
