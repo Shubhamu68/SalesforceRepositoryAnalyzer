@@ -1,7 +1,8 @@
 import { isDataAccessAnalysisObject } from "../config/fieldSecurityPolicy.js";
 import type { SoqlQuery, SoqlSubquery } from "../models/SoqlQuery.js";
 import type { ResolvedQueryField } from "../models/StackTraceImpact.js";
-import { isAggregateExpression, isIgnoredField } from "./soqlSystemFields.js";
+import { isIgnoredField } from "./soqlSystemFields.js";
+import { extractSoqlExpressionFields, type SoqlFieldContext } from "./soqlExpressionInventory.js";
 import type { RelationshipMap } from "./salesforceRelationshipResolver.js";
 import { maskNestedSelects } from "./nestedSoqlScopes.js";
 
@@ -9,6 +10,8 @@ export interface ScopedFieldReference extends ResolvedQueryField {
   lineNumber: number;
   queryLineNumber: number;
   relationshipPath: string;
+  usageContext?: SoqlFieldContext;
+  functionName?: string;
 }
 export interface UnresolvedQueryReference {
   kind: "FIELD" | "RELATIONSHIP";
@@ -120,17 +123,33 @@ function clauseFields(query: string, kind: "WHERE" | "ORDER BY" | "GROUP BY" | "
     for (const match of clause.matchAll(pattern)) names.push(match[1]);
   } else {
     for (const item of clause.split(",")) {
-      const match = item.trim().match(/^([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\b/);
+      const trimmed = item.trim();
+      // A function name is not a fallback field. The parser limitation
+      // explicitly records that it could not analyze the expression.
+      if (/^[A-Za-z_]\w*\s*\(/.test(trimmed)) continue;
+      const match = trimmed.match(/^([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\b/);
       if (match) names.push(match[1]);
     }
   }
   return [...new Set(names)];
 }
 
-function scopeFieldLine(text: string, lineNumber: number, field: string): number {
+function scopeFieldLine(text: string, lineNumber: number, field: string,
+  context?: SoqlFieldContext): number {
+  const visible = maskNestedSelects(text);
   const safe = field.replace(/[^A-Za-z0-9_]/g, "\\$&");
-  const match = new RegExp("\\b" + safe + "\\b", "i").exec(maskNestedSelects(text));
-  return match ? lineNumber + text.slice(0, match.index).split("\n").length - 1 : lineNumber;
+  const pattern = new RegExp("\\b" + safe + "\\b", "i");
+  const clauses: Record<SoqlFieldContext, RegExp> = {
+    SELECT: /\bSELECT\b/i, WHERE: /\bWHERE\b/i,
+    GROUP_BY: /\bGROUP\s+BY\b/i, HAVING: /\bHAVING\b/i,
+    ORDER_BY: /\bORDER\s+BY\b/i,
+  };
+  const beginsAt = context ? clauses[context].exec(visible) : null;
+  const offset = beginsAt ? beginsAt.index + beginsAt[0].length : 0;
+  const match = pattern.exec(visible.slice(offset));
+  const absolute = match ? offset + match.index : pattern.exec(visible)?.index;
+  return absolute === undefined ? lineNumber
+    : lineNumber + text.slice(0, absolute).split("\n").length - 1;
 }
 
 /** Shared recursive scope resolver for SOQL Security and Stack Trace analyzers. */
@@ -150,9 +169,10 @@ export function collectQueryFields(query: SoqlQuery, relationships: Relationship
   };
 
   const add = (baseObject: string, fieldPath: string, source: string,
-    text: string, lineNumber: number, path: string): void => {
+    text: string, lineNumber: number, path: string,
+    usageContext?: SoqlFieldContext, functionName?: string): void => {
     const candidate = fieldPath.trim();
-    if (!candidate || isAggregateExpression(candidate) || !isDataAccessAnalysisObject(baseObject)) return;
+    if (!candidate || !isDataAccessAnalysisObject(baseObject)) return;
     const resolved = relationships.resolveField(baseObject, candidate);
     if (!resolved) {
       unresolved("FIELD", baseObject, candidate, lineNumber, path,
@@ -166,8 +186,10 @@ export function collectQueryFields(query: SoqlQuery, relationships: Relationship
     if (isIgnoredField(resolved.field, resolved.object)) return;
     const field: ScopedFieldReference = {
       object: resolved.object, field: resolved.field, source,
-      lineNumber: scopeFieldLine(text, lineNumber, candidate),
+      lineNumber: scopeFieldLine(text, lineNumber, candidate, usageContext),
       queryLineNumber: query.lineNumber, relationshipPath: path,
+      ...(usageContext ? { usageContext } : {}),
+      ...(functionName ? { functionName } : {}),
     };
     references.push(field);
     const key = (resolved.object + "." + resolved.field).toLowerCase();
@@ -184,11 +206,27 @@ export function collectQueryFields(query: SoqlQuery, relationships: Relationship
       limitations.push("Nested query traversal limit exceeded at " + relationshipPath);
       return;
     }
-    for (const field of fields) add(object, field, field, text, lineNumber, relationshipPath);
-    for (const name of ["WHERE", "ORDER BY", "GROUP BY", "HAVING"] as const) {
-      for (const field of clauseFields(text, name)) add(object, field, name + " " + field, text, lineNumber, relationshipPath);
+    const expressions = extractSoqlExpressionFields(text);
+    limitations.push(...expressions.limitations.map((message) => message + " at " + relationshipPath));
+    if (expressions.parsed) {
+      for (const ref of expressions.fields) {
+        const source = ref.context === "SELECT" ? ref.fieldPath
+          : (ref.context === "GROUP_BY" ? "GROUP BY"
+            : ref.context === "ORDER_BY" ? "ORDER BY" : ref.context) + " " + ref.fieldPath;
+        add(object, ref.fieldPath, source, text, lineNumber, relationshipPath,
+          ref.context, ref.functionName);
+      }
+    } else {
+      // Retain proven bare field references on parser failure, but make the
+      // unparsed syntax a visible Review item (never a clean result).
+      for (const field of fields) add(object, field, field, text, lineNumber, relationshipPath, "SELECT");
+      for (const name of ["WHERE", "ORDER BY", "GROUP BY", "HAVING"] as const) {
+        const usageContext = name.replace(" ", "_") as SoqlFieldContext;
+        for (const field of clauseFields(text, name)) {
+          add(object, field, name + " " + field, text, lineNumber, relationshipPath, usageContext);
+        }
+      }
     }
-    if (/\bTYPEOF\b/i.test(maskNestedSelects(text))) limitations.push("TYPEOF requires manual review at " + relationshipPath);
     for (const childQuery of children) {
       const isJoin = childQuery.kind === "SEMI_JOIN" || childQuery.kind === "ANTI_JOIN";
       const childObject = isJoin ? childQuery.relationshipName : relationships.childObject(object, childQuery.relationshipName);

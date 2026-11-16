@@ -8,6 +8,10 @@ export interface SoqlFieldReference {
   /** Parent SOQL line for execution-mode lookup. */
   queryLineNumber?: number;
   relationshipPath?: string;
+  /** SELECT versus filter/group/order usage matters for legacy SECURITY_ENFORCED. */
+  usageContext?: "SELECT" | "WHERE" | "GROUP_BY" | "HAVING" | "ORDER_BY";
+  /** Function that supplied this field operand, if applicable. */
+  functionName?: string;
 }
 export interface SoqlFieldInventory extends Map<string, Map<string, SoqlFieldReference[]>> {
   /** Object Read references, independent of field/FLS (covers COUNT() too). */

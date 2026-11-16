@@ -6,7 +6,7 @@ export type SoqlFindingSeverity = "ERROR" | "REVIEW" | "INFO";
 /** Excel-facing criticality. Unknown is never presented as a denial. */
 export type SoqlFindingCriticality = "High" | "Low" | "Unable to verify";
 export type SoqlVerificationSource = "ORG_DENIED" | "ORG_VERIFIED" | "UNVERIFIED";
-export type SoqlFindingType = "OBJECT_READ" | "FIELD_READ" | "RELATIONSHIP" | "QUERY_MODE";
+export type SoqlFindingType = "OBJECT_READ" | "FIELD_READ" | "RELATIONSHIP" | "QUERY_MODE" | "PARSER";
 
 export interface SoqlSecurityFinding {
   severity: SoqlFindingSeverity;

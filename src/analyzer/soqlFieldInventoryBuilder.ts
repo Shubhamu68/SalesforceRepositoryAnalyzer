@@ -17,6 +17,7 @@ export function buildSoqlFieldInventory(
   queries: SoqlQuery[],
   relationshipMap: RelationshipMap,
   onUnresolved?: (field: UnresolvedSoqlField) => void,
+  onLimitation?: (query: SoqlQuery, message: string) => void,
 ): SoqlFieldInventory {
   const inventory = new Map() as SoqlFieldInventory;
   inventory.objectReferences = new Map();
@@ -30,6 +31,8 @@ export function buildSoqlFieldInventory(
         object: field.object, field: field.field, queryFieldPath: field.source,
         filePath: query.filePath, lineNumber: field.lineNumber,
         queryLineNumber: field.queryLineNumber, relationshipPath: field.relationshipPath,
+        ...(field.usageContext ? { usageContext: field.usageContext } : {}),
+        ...(field.functionName ? { functionName: field.functionName } : {}),
       });
       fields.set(fieldKey, references);
       inventory.set(field.object, fields);
@@ -48,6 +51,7 @@ export function buildSoqlFieldInventory(
       }
       inventory.objectReferences.set(scoped.object, list);
     }
+    for (const limitation of collection.limitations) onLimitation?.(query, limitation);
     for (const missing of collection.unresolvedEntries) {
       onUnresolved?.({
         baseObject: missing.baseObject, fieldPath: missing.fieldPath, kind: missing.kind,

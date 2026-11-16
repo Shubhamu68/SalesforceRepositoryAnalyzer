@@ -23,14 +23,6 @@ export function isSystemField(
   );
 }
 
-export function isAggregateExpression(
-  field: string
-): boolean {
-  return /^(COUNT|SUM|AVG|MIN|MAX)\s*\(/i.test(
-    field.trim()
-  );
-}
-
 export function isIgnoredField(
   fieldName: string,
   objectName?: string
