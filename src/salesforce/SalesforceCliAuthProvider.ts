@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { cliAuthPhase, timedAuthStep } from "./SalesforceAuthTiming.js";
 
 /**
  * Salesforce CLI is installed by each developer and owns OAuth authorization.
@@ -42,7 +43,8 @@ export function assertCliArguments(args: string[]): void {
 
 export const runSalesforceCli: CliRunner = async (args, timeoutMs) => {
   assertCliArguments(args);
-  return new Promise<string>((resolve, reject) => {
+  // Includes CLI startup, Windows sf.cmd overhead and command execution.
+  return timedAuthStep(cliAuthPhase(args), () => new Promise<string>((resolve, reject) => {
     // sf.cmd is a Windows command shim. All arguments are allowlisted above;
     // never pass user-supplied commands, paths, credentials or shell syntax.
     const child = spawn(process.platform === "win32" ? "sf.cmd" : "sf", args, {
@@ -92,7 +94,7 @@ export const runSalesforceCli: CliRunner = async (args, timeoutMs) => {
           : "Salesforce CLI command failed. Confirm the CLI is installed and the org is accessible."));
       } else finish();
     });
-  });
+  }));
 };
 
 function record(value: unknown): Record<string, unknown> | undefined {
