@@ -52,6 +52,41 @@ jobs:
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
         run: npm run build:win
+      - name: Package unpacked desktop folder as ZIP
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $desktopRoot = "release/electron-desktop/win-unpacked"
+          $expected = @(
+            "Salesforce Repository Analyzer.exe",
+            "resources/app.asar",
+            "resources/analyzer/runtime/node.exe",
+            "resources/analyzer/app/dist/api/server.js",
+            "resources/analyzer/app/web/dist/index.html",
+            "resources/analyzer/app/node_modules/express/package.json",
+            "resources/analyzer/config/personas.json",
+            "resources/analyzer/.env.example"
+          )
+          foreach ($item in $expected) {
+            $file = Join-Path $desktopRoot $item
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
+              throw "Unpacked desktop build is incomplete: $item"
+            }
+          }
+          if (Test-Path -LiteralPath (Join-Path $desktopRoot "resources/analyzer/.env")) {
+            throw "Do not distribute local user settings or secrets."
+          }
+          $archive = "release/electron-desktop/SalesforceRepositoryAnalyzer-Desktop-Unpacked.zip"
+          Compress-Archive -LiteralPath $desktopRoot -DestinationPath $archive -Force -CompressionLevel Optimal
+          if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
+            throw "Unpacked desktop ZIP was not created."
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SalesforceRepositoryAnalyzer-Desktop-Folder-ZIP
+          path: release/electron-desktop/SalesforceRepositoryAnalyzer-Desktop-Unpacked.zip
+          if-no-files-found: error
+          retention-days: 30
       - uses: actions/upload-artifact@v4
         with:
           name: SalesforceRepositoryAnalyzer-Desktop-Portable
