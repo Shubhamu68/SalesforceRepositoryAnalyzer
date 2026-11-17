@@ -51,7 +51,7 @@ export default function SalesforceCliLogin({
     checking: loading, busy: Boolean(busy),
   });
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (force = false) => {
     setLoading(true);
     setError("");
     setDiscoveryWarning("");
@@ -65,7 +65,7 @@ export default function SalesforceCliLogin({
         onComplete(session);
         return;
       }
-      const payload = await requestJson("/api/salesforce/orgs");
+      const payload = await requestJson(force ? "/api/salesforce/orgs?refresh=1" : "/api/salesforce/orgs");
       const list = payload as unknown as OrgList;
       const next = Array.isArray(list.orgs) ? list.orgs : [];
       setOrgs(next);
@@ -154,7 +154,7 @@ export default function SalesforceCliLogin({
         <div className="sf-cli-smallrow">
           <span>{loading ? "Checking CLI…" : cliVersion ? "CLI " + (cliVersion.match(/@salesforce\/cli\/(\d+\.\d+\.\d+)/)?.[1] ?? cliVersion) : detectedVersion ? "CLI " + detectedVersion + " · update required" : "CLI status unavailable"}</span>
           <button type="button" className="sf-cli-link" disabled={loading || Boolean(busy)}
-            onClick={() => void refresh()}>Refresh orgs</button>
+            onClick={() => void refresh(true)}>Refresh orgs</button>
         </div>
 
         <div className="sf-cli-separator"><span>OR SIGN IN</span></div>
