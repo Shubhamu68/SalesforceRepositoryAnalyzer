@@ -2,18 +2,23 @@ import { app, BrowserWindow, dialog, session, shell } from "electron";
 import { spawn } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { createServer } from "node:net";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseEnv } from "node:util";
 import path from "node:path";
 import { isAllowedExternalUrl, resolveDesktopPaths } from "./runtimePaths.mjs";
+import { createDesktopStartupTrace } from "./startupTrace.mjs";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const desktopRoot = app.isPackaged
   ? path.join(process.resourcesPath, "analyzer")
   : path.join(dirname, "staging");
-const localSettings = path.join(app.getPath("userData"), ".env");
+const userData = app.getPath("userData");
+const localSettings = path.join(userData, ".env");
+const startupTrace = createDesktopStartupTrace(userData);
+startupTrace.mark("main-loaded");
 let backend = null;
 let window = null;
+let allowedAppOrigin = null;
 let shuttingDown = false;
 
 const primaryInstance = app.requestSingleInstanceLock();
@@ -47,15 +52,22 @@ function stopBackend() {
   backend = null;
 }
 
-function openWindow(origin) {
+/**
+ * Create the window BEFORE waiting for the API. Showing a local startup
+ * screen makes backend initialization visible instead of a silent 1–2 minute
+ * wait on Windows. The real React UI replaces it once the API is healthy.
+ */
+function openWindow() {
+  const splashFile = path.join(dirname, "splash.html");
+  const splashUrl = pathToFileURL(splashFile).href;
   window = new BrowserWindow({
     title: "Salesforce Repository Analyzer",
     width: 1440,
     height: 900,
     minWidth: 1000,
     minHeight: 680,
-    backgroundColor: "#0d1b2f",
-    show: false,
+    backgroundColor: "#f5f7fb",
+    show: true,
     autoHideMenuBar: true,
     webPreferences: {
       nodeIntegration: false,
@@ -65,19 +77,48 @@ function openWindow(origin) {
       webSecurity: true,
     },
   });
+  startupTrace.mark("window-created");
 
   window.webContents.setWindowOpenHandler(({ url }) => {
     if (isAllowedExternalUrl(url)) void shell.openExternal(url);
     return { action: "deny" };
   });
   window.webContents.on("will-navigate", (event, url) => {
-    // Never navigate the privileged desktop window away from the local UI.
-    if (!url.startsWith(origin + "/") && url !== origin) event.preventDefault();
+    // Only the bundled startup screen or the dynamically assigned local API
+    // may load in the desktop window. External links use the system browser.
+    let allowed = url === splashUrl;
+    if (allowedAppOrigin) {
+      try {
+        allowed ||= new URL(url).origin === allowedAppOrigin;
+      } catch { /* Reject invalid navigation URLs. */ }
+    }
+    if (!allowed) event.preventDefault();
   });
   window.webContents.on("will-attach-webview", event => event.preventDefault());
-  window.once("ready-to-show", () => window?.show());
+  window.webContents.on("did-finish-load", () => {
+    const loaded = window?.webContents.getURL();
+    if (loaded === splashUrl) startupTrace.mark("splash-rendered");
+    else if (loaded && allowedAppOrigin) {
+      try {
+        if (new URL(loaded).origin === allowedAppOrigin) startupTrace.mark("ui-rendered");
+      } catch { /* A malformed navigation is never trusted. */ }
+    }
+  });
   window.on("closed", () => { window = null; app.quit(); });
-  void window.loadURL(origin);
+  void window.loadFile(splashFile).catch(() => {
+    startupTrace.mark("startup-failed");
+    if (!shuttingDown) {
+      dialog.showErrorBox("Unable to show startup screen",
+        "The desktop application resources are incomplete.");
+      app.quit();
+    }
+  });
+}
+
+async function showWorkspace(origin) {
+  if (!window || window.isDestroyed() || shuttingDown) return;
+  allowedAppOrigin = origin;
+  await window.loadURL(origin);
 }
 
 async function startBackend() {
@@ -111,6 +152,7 @@ async function startBackend() {
       SALESFORCE_ANALYZER_STATIC_DIR: paths.frontend,
     },
   });
+  startupTrace.mark("backend-spawned");
   backend.stdout.on("data", chunk => {
     if (!app.isPackaged) process.stdout.write(chunk);
   });
@@ -134,10 +176,15 @@ async function startBackend() {
   for (let attempt = 0; attempt < 100; attempt++) {
     if (backend.exitCode !== null || backend.killed) break;
     try {
-      const response = await fetch(origin + "/api/health", {
+      // Liveness does not rescan the user's Salesforce repository. Detailed
+      // setup status is still returned by the existing /api/health endpoint.
+      const response = await fetch(origin + "/api/health/live", {
         signal: AbortSignal.timeout(800),
       });
-      if (response.ok && (await response.json()).status === "ok") return origin;
+      if (response.ok && (await response.json()).status === "ok") {
+        startupTrace.mark("backend-ready");
+        return origin;
+      }
     } catch { /* Backend is not ready yet. */ }
     await new Promise(resolve => setTimeout(resolve, 150));
   }
@@ -147,15 +194,20 @@ async function startBackend() {
 app.on("before-quit", stopBackend);
 
 if (primaryInstance) app.whenReady().then(async () => {
+  startupTrace.mark("electron-ready");
   // The UI is local, but still sandbox its renderer and deny sensitive privileges.
   session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
   try {
+    openWindow();
     const origin = await startBackend();
-    openWindow(origin);
-  } catch (error) {
-    stopBackend();
-    dialog.showErrorBox("Unable to open Analyzer",
-      error instanceof Error ? error.message : "Desktop application could not start.");
-    app.quit();
+    await showWorkspace(origin);
+  } catch {
+    startupTrace.mark("startup-failed");
+    if (!shuttingDown) {
+      stopBackend();
+      dialog.showErrorBox("Unable to open Analyzer",
+        "The desktop service could not start. See startup-timing.log in the app data folder.");
+      app.quit();
+    }
   }
 }).catch(() => app.quit());
