@@ -168,6 +168,14 @@ export class SalesforceOrgConnection {
 
   async selectOrg(target: string): Promise<void> {
     return timedAuthStep("auth.selectOrg", async () => {
+      // Switching to the already-active org is a no-op. Its token and
+      // Salesforce identity were verified during connect(), and later API
+      // calls still enforce session expiry. Don't spawn another 14s CLI pair.
+      const current = this.selectedOrg;
+      if (this.connection && current && (
+        current.username.toLowerCase() === target.toLowerCase() ||
+        current.alias?.toLowerCase() === target.toLowerCase()
+      )) return;
       // The UI already listed this org. Avoid another expensive CLI process
       // before the secure token and Salesforce identity verification.
       const cached = this.cli.findListedOrg(target);
