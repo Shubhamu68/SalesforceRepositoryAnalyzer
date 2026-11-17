@@ -61,7 +61,8 @@ test("CLI org discovery lists sandbox and production, preserving stale authoriza
   assert.equal(orgs.find(o=>o.alias==="unifiedQA")?.environment,"sandbox");
   assert.equal(orgs.find(o=>o.alias==="production")?.environment,"production");
   assert.equal(orgs.find(o=>o.alias==="expiredQA")?.status,"expired");
-  assert.ok(calls.includes("org list --json"));
+  assert.ok(calls.includes("org list --skip-connection-status --json"));
+  assert.ok(!calls.includes("org list --json"), "Never scan all orgs with live token refresh");
   assert.doesNotMatch(JSON.stringify(orgs), /sensitive-oauth-token/);
 });
 
@@ -240,23 +241,33 @@ test("Salesforce CLI real status distinguishes connected and expired authorizati
   const orgs = await cli.listOrgs();
   assert.equal(orgs.find(org => org.alias === "unifiedQA")?.status, "saved");
   assert.equal(orgs.find(org => org.alias === "expiredQA")?.status, "expired");
-  assert.ok(calls.includes("org list --json"));
+  assert.ok(calls.includes("org list --skip-connection-status --json"));
+  assert.ok(!calls.includes("org list --json"), "Never scan all orgs with live token refresh");
 });
 
-test("CLI org listing retains saved orgs when live connection checks fail", async () => {
+test("local auth list fallback works when offline org list fails", async () => {
   const calls: string[] = [];
-  const runner = fakeRunner(calls);
-  const cli = new SalesforceCliAuthProvider(async (args, timeout) => {
-    if (args.join(" ") === "org list --json") {
-      calls.push(args.join(" "));
-      throw new Error("Network refresh unavailable");
+  const cli = new SalesforceCliAuthProvider(async args => {
+    calls.push(args.join(" "));
+    if (args[0] === "--version") return "@salesforce/cli/2.158.7";
+    if (args.join(" ") === "org list --skip-connection-status --json") {
+      throw new Error("CLI timeout reading saved metadata");
     }
-    return runner(args, timeout);
+    if (args.join(" ") === "org list auth --json") {
+      return success([
+        { username: "admin@example.com", alias: "unifiedQA",
+          instanceUrl: "https://qa--dev.sandbox.my.salesforce.com", isSandbox: true },
+      ]);
+    }
+    throw new Error("Unexpected CLI command");
   });
   const orgs = await cli.listOrgs();
-  assert.equal(orgs.length, 3);
-  assert.ok(calls.includes("org list --json"));
-  assert.ok(calls.includes("org list --skip-connection-status --json"));
+  assert.equal(orgs.length, 1);
+  assert.equal(orgs[0].alias, "unifiedQA");
+  assert.deepEqual(calls.slice(1), [
+    "org list --skip-connection-status --json",
+    "org list auth --json",
+  ]);
 });
 
 test("failed switch restores the previously connected Salesforce org", async () => {
