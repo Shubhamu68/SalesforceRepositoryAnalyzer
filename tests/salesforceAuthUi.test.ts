@@ -43,7 +43,7 @@ test("login shows visibly disabled browser buttons until no active CLI authoriza
   const css = readFileSync("web/src/components/SalesforceCliLogin.css", "utf8");
   assert.equal((login.match(/disabled=\{!canLogInWithBrowser\}/g) ?? []).length, 2);
   assert.match(login, /orgs\.some\(org => org\.status === "saved"\)/);
-  assert.match(login, /Connected Salesforce CLI authorizations are available above/);
+  assert.match(login, /Saved Salesforce CLI authorizations are listed above/);
   assert.match(css, /\.sf-cli-login-actions button:disabled/);
 });
 
