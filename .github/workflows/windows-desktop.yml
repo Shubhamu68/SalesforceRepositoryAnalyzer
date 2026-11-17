@@ -1,0 +1,60 @@
+name: Build Windows Desktop EXE
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'desktop/electron/**'
+      - 'src/api/server.ts'
+      - 'src/services/RepositoryConfigurationService.ts'
+      - 'src/services/ReportOutputConfigurationService.ts'
+      - '.github/workflows/windows-desktop.yml'
+      - 'tests/electronDesktopIntegration.test.ts'
+
+permissions:
+  contents: read
+
+jobs:
+  desktop:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Install Analyzer dependencies
+        run: npm ci
+      - name: Build backend
+        run: npm run build
+      - name: Run regression tests
+        run: npm run test:all
+      - name: Install UI dependencies
+        working-directory: web
+        run: npm ci
+      - name: Build React UI
+        working-directory: web
+        run: npm run build
+      - name: Stage portable desktop resources
+        run: node desktop/electron/stage.mjs
+      - name: Check desktop JavaScript
+        run: |
+          node --check desktop/electron/main.mjs
+          node --check desktop/electron/stage.mjs
+          node --check desktop/electron/runtimePaths.mjs
+      - name: Smoke-test staged API and frontend
+        run: node desktop/electron/smoke.mjs
+      - name: Install Electron build tools
+        working-directory: desktop/electron
+        run: npm install --no-audit --no-fund
+      - name: Build portable Windows EXE
+        working-directory: desktop/electron
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npm run build:win
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SalesforceRepositoryAnalyzer-Desktop-Portable
+          path: release/electron-desktop/*.exe
+          if-no-files-found: error
+          retention-days: 30
