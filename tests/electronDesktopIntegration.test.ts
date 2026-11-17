@@ -65,8 +65,8 @@ test("desktop displays a startup screen without waiting for the Analyzer API", (
   const api = readFileSync("src/api/server.ts", "utf8");
   assert.match(main, /show: true/);
   assert.match(main, /window\.loadFile\(splashFile\)/);
-  assert.match(main, /openWindow\(\);\s*const origin = await startBackend\(\)/);
-  assert.match(main, /await showWorkspace\(origin\)/);
+  assert.match(main, /const splashReady = openWindow\(\);\s*const origin = await startBackend\(\)/);
+  assert.match(main, /if \(await splashReady\) await showWorkspace\(origin\)/);
   assert.match(main, /fetch\(origin \+ "\/api\/health\/live"/);
   assert.match(api, /app\.get\("\/api\/health\/live"/);
   assert.match(splash, /Starting your local workspace/);
