@@ -1,11 +1,14 @@
 import { useEffect, useState } from "react";
 import "./SalesforceOrgConnection.css";
+import SalesforceOrgLogin from "./SalesforceOrgLogin";
 
 type ConnectionStatus = {
   configured: boolean;
   connecting: boolean;
   connected: boolean;
-  authMode: "client_credentials";
+  authMode: "salesforce_cli";
+  username?: string;
+  alias?: string;
   environment: "sandbox" | "production" | "custom";
   loginHost: string;
   organizationId?: string;
@@ -43,7 +46,6 @@ async function readJson(response: Response): Promise<Record<string, unknown>> {
 
 export default function SalesforceOrgConnection() {
   const [status, setStatus] = useState<ConnectionStatus | null>(null);
-  const [busy, setBusy] = useState(false);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState("");
   const [api, setApi] = useState<QueryApi>("data");
@@ -72,21 +74,6 @@ export default function SalesforceOrgConnection() {
     return () => { active = false; window.clearInterval(interval); };
   }, []);
 
-  async function reconnect() {
-    setError("");
-    setBusy(true);
-    try {
-      const response = await fetch("/api/salesforce/reconnect", { method: "POST" });
-      const data = await readJson(response);
-      setStatus(data as unknown as ConnectionStatus);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Salesforce authentication failed.");
-      await refreshStatus().catch(() => undefined);
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function runQuery(query: string, queryApi: QueryApi) {
     setRunning(true);
     setError("");
@@ -112,33 +99,31 @@ export default function SalesforceOrgConnection() {
 
   return (
     <div className="sf-page">
+      <SalesforceOrgLogin onChanged={() => { setResult(null); void refreshStatus(); }} />
       <section className="panel sf-connection-panel">
         <div className="panel-heading">
           <div>
-            <h2>Connection</h2>
-            <p>Uses Client Credentials configured in <code>.env</code>.</p>
+            <h2>Active Salesforce connection</h2>
+            <p>Shared Salesforce CLI session for REST, Tooling, Describe and all live permission checks.</p>
           </div>
-          <span role="status" className={`sf-connection-pill ${status?.connected ? "sf-connection-on" : status?.connecting ? "sf-connection-pending" : "sf-connection-off"}`}>
+          <span role="status" className={`sf-connection-pill ${status?.connected ? "sf-connection-on" : "sf-connection-off"}`}>
             {connectionLabel}
           </span>
         </div>
-        <div className="sf-connection-content">
-          <details className="sf-detail-disclosure"><summary>Connection details</summary>
+        <details className="sf-detail-disclosure">
+          <summary>Connection details</summary>
           <div className="sf-connection-details">
             <div><span>Environment</span><strong>{status?.environment || "—"}</strong></div>
-            <div><span>Authentication</span><strong>Client Credentials (server-to-server)</strong></div>
+            <div><span>Authentication</span><strong>Local Salesforce CLI</strong></div>
+            <div><span>Username</span><strong>{status?.username || "—"}</strong></div>
+            <div><span>Alias</span><strong>{status?.alias || "—"}</strong></div>
             <div><span>Login domain</span><strong>{status?.loginHost || "—"}</strong></div>
             <div><span>Salesforce org ID</span><strong>{status?.organizationId || "—"}</strong></div>
-            <div><span>Run As user ID</span><strong>{status?.userId || "—"}</strong></div>
+            <div><span>Authorized user ID</span><strong>{status?.userId || "—"}</strong></div>
             <div><span>Instance</span><strong>{status?.instanceUrl || "—"}</strong></div>
-          </div></details>
-          {status?.message && <p className="sf-warning" role="status">{status.message}</p>}
-          <div className="sf-actions">
-            <button className="secondary-button" type="button" disabled={busy || !status?.configured} onClick={() => void reconnect()}>
-              {busy ? "Authenticating…" : "Retry connection"}
-            </button>
           </div>
-        </div>
+        </details>
+        {status?.message && <p className="sf-warning" role="status">{status.message}</p>}
       </section>
 
       <section className="panel sf-connection-panel">
