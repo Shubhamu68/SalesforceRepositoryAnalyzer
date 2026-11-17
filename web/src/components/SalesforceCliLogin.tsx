@@ -126,7 +126,7 @@ export default function SalesforceCliLogin({
           <select id="sf-cli-org" className="sf-cli-select" value={selected}
             onChange={event => setSelected(event.target.value)}
             disabled={loading || Boolean(busy) || orgs.length === 0}>
-            {orgs.length === 0 && <option value="">No saved orgs found</option>}
+            {orgs.length === 0 && <option value="">{cliOutdated ? "Update Salesforce CLI to load saved orgs" : error ? "Cannot load CLI orgs" : "No saved orgs found"}</option>}
             {orgs.map(org => (
               <option key={org.username} value={org.username}>
                 {org.alias ? org.alias + " — " : ""}{org.username} ({org.environment})
