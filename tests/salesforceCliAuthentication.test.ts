@@ -152,3 +152,50 @@ test("login UI, .env and API never ask for passwords or client secrets", () => {
   assert.match(readFileSync("web/src/App.tsx","utf8"),/if \(!authDismissed\)/);
   assert.match(readFileSync("src/api/salesforceRoutes.ts","utf8"),/onConnectionChange/);
 });
+
+
+test("first-run org selection and browser login both work without prompting for application credentials", async () => {
+  const calls: string[] = [];
+  const cli = new SalesforceCliAuthProvider(fakeRunner(calls));
+  const connection = new SalesforceOrgConnection(cli);
+  const fetchOriginal = globalThis.fetch;
+  globalThis.fetch = async (request, init) => {
+    const url=String(request);
+    if (url.endsWith("/services/oauth2/userinfo")) {
+      const prod=url.includes("corp");
+      return new Response(JSON.stringify({user_id:USER,organization_id:prod?ORG_B:ORG_A}),{status:200});
+    }
+    return fetchOriginal(request,init);
+  };
+  try {
+    await connection.loginWeb("sandbox");
+    assert.equal(connection.status.environment,"sandbox");
+    assert.equal(connection.status.username,"admin@example.com");
+    await connection.loginWeb("production");
+    assert.equal(connection.status.environment,"production");
+    assert.equal(connection.status.organizationId,ORG_B);
+    assert.ok(calls.every(c=>!c.includes("--client-id")));
+    connection.disconnect();
+  } finally { globalThis.fetch = fetchOriginal; }
+});
+
+test("disconnection during pending CLI authentication cannot revive stale session", async () => {
+  let release!: (data: string) => void;
+  const calls: string[]=[];
+  const originalRunner=fakeRunner(calls);
+  const paused: CliRunner=async (args,timeout) => {
+    if (args.includes("show-access-token")) return new Promise<string>(resolve => { release=resolve; });
+    return originalRunner(args,timeout);
+  };
+  const conn=new SalesforceOrgConnection(new SalesforceCliAuthProvider(paused));
+  const pending=conn.selectOrg("unifiedQA");
+  for(let attempt=0; attempt<30 && !release;attempt++) {
+    await new Promise(resolve=>setTimeout(resolve,5));
+  }
+  assert.equal(typeof release,"function");
+  conn.disconnect();
+  release(success({accessToken:token}));
+  await assert.rejects(pending,/changed during authentication/);
+  assert.equal(conn.status.connected,false);
+  assert.equal(conn.status.configured,false);
+});

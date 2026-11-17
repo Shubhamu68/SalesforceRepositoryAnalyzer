@@ -124,10 +124,20 @@ export class SalesforceCliAuthProvider {
   constructor(private readonly run: CliRunner = runSalesforceCli) {}
 
   async version(): Promise<string> {
-    return (await this.run(["--version"], 10000)).trim().slice(0, 120);
+    const output = (await this.run(["--version"], 10000)).trim().slice(0, 120);
+    const match = output.match(/@salesforce\/cli\/(\d+)\.(\d+)\.(\d+)/);
+    if (!match) throw new Error("Cannot determine Salesforce CLI version. Update Salesforce CLI with 'sf update'.");
+    const major = Number(match[1]);
+    const minor = Number(match[2]);
+    if (major < 2 || (major === 2 && minor < 136)) {
+      throw new Error("Salesforce CLI " + match[0].split("/")[1] +
+        " is too old for secure token retrieval. Run 'sf update' to install version 2.136 or newer.");
+    }
+    return output;
   }
 
   async listOrgs(): Promise<CliOrg[]> {
+    await this.version();
     const rows = parseCliResult(await this.run(
       ["org", "list", "--skip-connection-status", "--json"], CLI_TIMEOUT));
     const all = ["nonScratchOrgs", "scratchOrgs", "devHubs", "other", "orgs"]
@@ -162,6 +172,7 @@ export class SalesforceCliAuthProvider {
   }
 
   async loginWeb(environment: "sandbox" | "production"): Promise<string> {
+    await this.version();
     if (environment !== "sandbox" && environment !== "production") {
       throw new Error("Choose Sandbox or Production.");
     }

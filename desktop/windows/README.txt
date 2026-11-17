@@ -17,6 +17,8 @@ START (Windows 10/11)
 AUTHENTICATION AND CONFIGURATION
 - Salesforce CLI (sf) must be installed and available in PATH on each user's
   Windows machine; Node/npm and VS Code remain unnecessary for the portable app.
+- Minimum CLI version: 2.136.0 for dedicated access-token commands.
+  Run `sf update` to upgrade an older installation before opening the Analyzer.
 - On the first screen choose an authorized CLI org, or choose "Log in to
   Sandbox" / "Log in to Production" to open Salesforce's regular browser login.
 - Enter your Salesforce username/password only on Salesforce's official login

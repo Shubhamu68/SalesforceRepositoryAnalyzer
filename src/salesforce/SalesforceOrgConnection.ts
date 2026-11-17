@@ -252,6 +252,7 @@ export class SalesforceOrgConnection {
       throw new SalesforceConnectionError("Enter one read-only SELECT SOQL query (maximum 10,000 characters).", 400);
     }
     await this.connect();
+    const originEpoch = this.epoch;
     let response = await this.sendQuery(trimmed, api);
     let payload: unknown = await response.json().catch(() => null);
     const errors = Array.isArray(payload) ? payload : [payload];
@@ -262,6 +263,9 @@ export class SalesforceOrgConnection {
       await this.connect(true);
       response = await this.sendQuery(trimmed, api);
       payload = await response.json().catch(() => null);
+    }
+    if (this.epoch !== originEpoch) {
+      throw new SalesforceConnectionError("Salesforce org changed during this query. Retry analysis.", 409);
     }
     if (!response.ok) {
       const apiErrors = Array.isArray(payload) ? payload : [payload];
@@ -299,6 +303,7 @@ export class SalesforceOrgConnection {
       throw new SalesforceConnectionError("Only a single read-only SELECT SOQL query is supported.", 400);
     }
     await this.connect();
+    const originEpoch = this.epoch;
     const all: T[] = [];
     let nextPath: string | null = null;
     let retried = false;
@@ -310,6 +315,8 @@ export class SalesforceOrgConnection {
       ? minimumVersion : requested;
     const apiBase = `/services/data/${effectiveVersion}/${api === "tooling" ? "tooling/" : ""}query/`;
     for (;;) {
+      if (this.epoch !== originEpoch) throw new SalesforceConnectionError(
+        "Salesforce org changed during this analysis. Rerun against the selected org.", 409);
       const conn = this.connection;
       if (!conn) throw new SalesforceConnectionError("Salesforce connection unavailable.", 503);
       const url: URL = new URL(nextPath ?? apiBase, conn.instanceUrl);
@@ -328,6 +335,8 @@ export class SalesforceOrgConnection {
         throw new SalesforceConnectionError("Unable to retrieve Salesforce permission data.", 502);
       }
       const payload: unknown = await response.json().catch(() => null);
+      if (this.epoch !== originEpoch) throw new SalesforceConnectionError(
+        "Salesforce org changed during this analysis. Rerun against the selected org.", 409);
       if (response.status === 401 && !retried) {
         retried = true;
         all.length = 0;
@@ -373,6 +382,7 @@ export class SalesforceOrgConnection {
 
     const promise = (async () => {
       await this.connect();
+      const originEpoch = this.epoch;
       const request = async (): Promise<Response> => {
         const session = this.connection;
         if (!session) throw new SalesforceConnectionError("Salesforce connection unavailable.", 503);
@@ -394,6 +404,8 @@ export class SalesforceOrgConnection {
         throw new SalesforceConnectionError("Unable to retrieve Salesforce relationship metadata.", 502);
       }
       const payload: unknown = await response.json().catch(() => null);
+      if (this.epoch !== originEpoch) throw new SalesforceConnectionError(
+        "Salesforce org changed during Describe. Rerun analysis.", 409);
       if (!response.ok) {
         const errors = Array.isArray(payload) ? payload : [payload];
         throw new SalesforceConnectionError(errors.map(apiErrorMessage).join(" | ").slice(0, 500), response.status);

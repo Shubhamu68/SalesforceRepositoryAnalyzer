@@ -93,8 +93,9 @@ export default function SalesforceCliLogin({
       setCurrent(status as AuthStatus);
       onComplete(status as AuthStatus);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Salesforce browser login failed.");
-      void refresh();
+      const message = cause instanceof Error ? cause.message : "Salesforce browser login failed.";
+      await refresh();
+      setError(message);
     } finally { setBusy(""); }
   }
 
