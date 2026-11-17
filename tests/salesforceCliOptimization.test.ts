@@ -164,3 +164,91 @@ test("the UI Refresh orgs action explicitly bypasses the server cache", () => {
   assert.match(ui, /\/api\/salesforce\/orgs\?refresh=1/);
   assert.match(routes, /req\.query\.refresh === "1"/);
 });
+
+test("reselecting the currently connected org is instant without new CLI or identity calls", async () => {
+  const calls: string[] = [];
+  let userInfoCalls = 0;
+  const runner: CliRunner = async args => {
+    calls.push(args.join(" "));
+    if (args[0] === "--version") return "@salesforce/cli/2.158.7";
+    if (args[1] === "list") return success({ nonScratchOrgs: [org] });
+    if (args.includes("show-access-token")) return success({ accessToken: SECRET });
+    if (args[1] === "display") return success({
+      orgId: ORG_ID, username: USERNAME, instanceUrl: INSTANCE,
+    });
+    throw new Error("Unexpected CLI command");
+  };
+  const conn = new SalesforceOrgConnection(new SalesforceCliAuthProvider(runner));
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    userInfoCalls++;
+    return new Response(JSON.stringify({ organization_id: ORG_ID, user_id: USER_ID }), { status: 200 });
+  };
+  try {
+    await conn.selectOrg("unifiedQA");
+    assert.equal(conn.status.connected, true);
+    assert.equal(userInfoCalls, 1);
+    const firstConnectedAt = conn.status.connectedAt;
+    const initialCommands = calls.length;
+    // Both alias and username refer to the same verified session.
+    await conn.selectOrg("UNIFIEDqa");
+    await conn.selectOrg(USERNAME.toUpperCase());
+    assert.equal(calls.length, initialCommands, "no extra sf processes for the connected org");
+    assert.equal(userInfoCalls, 1, "no redundant user identity call");
+    assert.equal(conn.status.connectedAt, firstConnectedAt);
+    assert.equal(conn.status.username, USERNAME);
+    // Disconnect must NOT cause the next selection to skip verification.
+    conn.disconnect();
+    await conn.selectOrg("unifiedQA");
+    assert.equal(conn.status.connected, true);
+    assert.ok(calls.length > initialCommands);
+    assert.equal(userInfoCalls, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("switching away from the active org still fetches a fresh token and checks its identity", async () => {
+  const secondOrg = {
+    username: "new@example.com", alias: "otherQA", orgId: "00D000000000002",
+    instanceUrl: "https://qa2--dev.sandbox.my.salesforce.com", isSandbox: true,
+  };
+  let tokenCalls = 0;
+  let userInfoCalls = 0;
+  const cli = new SalesforceCliAuthProvider(async args => {
+    if (args[0] === "--version") return "@salesforce/cli/2.158.7";
+    if (args[1] === "list") return success({ nonScratchOrgs: [org, secondOrg] });
+    if (args.includes("show-access-token")) { tokenCalls++; return success({ accessToken: SECRET }); }
+    if (args[1] === "display") {
+      const other = args.includes(secondOrg.username);
+      return success({
+        orgId: other ? secondOrg.orgId : ORG_ID,
+        username: other ? secondOrg.username : USERNAME,
+        instanceUrl: other ? secondOrg.instanceUrl : INSTANCE,
+      });
+    }
+    throw new Error("Unexpected CLI command");
+  });
+  const conn = new SalesforceOrgConnection(cli);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async request => {
+    userInfoCalls++;
+    const other = String(request).includes("qa2--dev");
+    return new Response(JSON.stringify({
+      organization_id: other ? secondOrg.orgId : ORG_ID,
+      user_id: USER_ID,
+    }), { status: 200 });
+  };
+  try {
+    await conn.listAuthorizedOrgs();
+    await conn.selectOrg("unifiedQA");
+    assert.equal(conn.status.organizationId, ORG_ID);
+    await conn.selectOrg("otherQA");
+    assert.equal(conn.status.organizationId, secondOrg.orgId);
+    assert.equal(conn.status.username, secondOrg.username);
+    assert.equal(tokenCalls, 2, "different orgs still require fresh CLI tokens");
+    assert.equal(userInfoCalls, 2, "different orgs still require Salesforce identity checks");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
