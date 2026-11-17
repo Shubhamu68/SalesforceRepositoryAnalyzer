@@ -86,7 +86,7 @@ test("dedicated CLI token command is used and returned only to the server-side c
 });
 
 test("invalid CLI JSON and command failures cannot expose bearer tokens", async () => {
-  const invalid = new SalesforceCliAuthProvider(async()=>"{not-json}");
+  const invalid = new SalesforceCliAuthProvider(async args => args[0] === "--version" ? "@salesforce/cli/2.157.8" : "{not-json}");
   await assert.rejects(invalid.listOrgs(), /invalid JSON/);
   const rejected = new SalesforceCliAuthProvider(async()=>success({bad:"secret"}));
   await assert.rejects(rejected.showToken("admin@example.com"),/valid session/);
