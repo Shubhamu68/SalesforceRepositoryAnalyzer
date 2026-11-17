@@ -259,7 +259,7 @@ export class SalesforceOrgConnection {
     const sessionExpired = response.status === 401 || (response.status === 403 && errors.some((error) =>
       error && typeof error === "object" && (error as Record<string, unknown>).errorCode === "INVALID_SESSION_ID"));
     if (sessionExpired) {
-      // Salesforce CLI has no refresh token; issue a fresh credentials grant.
+      // CLI owns refresh tokens; request a renewed CLI access session.
       await this.connect(true);
       response = await this.sendQuery(trimmed, api);
       payload = await response.json().catch(() => null);
