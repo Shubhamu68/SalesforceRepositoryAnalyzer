@@ -44,6 +44,13 @@ app.use("/api/repository", createRepositoryRouter(repositoryConfiguration, () =>
 app.use("/api/report-output", createReportOutputRouter(reportOutputConfiguration));
 app.use("/api/salesforce", createSalesforceRouter(salesforceOrgConnection, () => runtime.invalidate()));
 
+// Fast liveness probe for desktop startup. Unlike the existing health endpoint,
+// this never scans the user's Salesforce repository on every readiness poll.
+app.get("/api/health/live", (_req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.json({ status: "ok" });
+});
+
 app.get("/api/health", async (_req, res) => {
   const status = await repositoryConfiguration.status();
   res.setHeader("Cache-Control", "no-store");
