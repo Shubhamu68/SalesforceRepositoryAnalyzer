@@ -20,6 +20,8 @@ const ARG_SAFE = /^[a-zA-Z0-9_@.+:/-]+$/;
 const ORG_NAME_SAFE = /^[a-zA-Z0-9_.@+-]{1,255}$/;
 const MAX_JSON_BYTES = 2 * 1024 * 1024;
 const CLI_TIMEOUT = 60000;
+// Local-only org discovery must not wait for a refresh from every sandbox.
+const LOCAL_DISCOVERY_TIMEOUT = 15000;
 const WEB_LOGIN_TIMEOUT = 300000;
 
 /** Arguments are shell-safe because Windows needs its sf.cmd wrapper. */
@@ -30,7 +32,8 @@ export function assertCliArguments(args: string[]): void {
   const joined = args.join(" ");
   const permitted =
     /^--version$/.test(joined) ||
-    (joined === "org list --json" || joined === "org list --skip-connection-status --json") ||
+    (joined === "org list --json" || joined === "org list --skip-connection-status --json" ||
+      joined === "org list auth --json") ||
     /^org display --target-org [a-zA-Z0-9_.@+-]+ --json$/.test(joined) ||
     /^org auth show-access-token --target-org [a-zA-Z0-9_.@+-]+ --json$/.test(joined) ||
     /^org login web --instance-url https:\/\/(test|login)\.salesforce\.com --json$/.test(joined);
@@ -51,8 +54,17 @@ export const runSalesforceCli: CliRunner = async (args, timeoutMs) => {
     let stderrSeen = false;
     let finished = false;
     const timer = setTimeout(() => {
-      child.kill();
-      finish(new Error("Salesforce CLI timed out. Complete browser sign-in and try again."));
+      // Windows sf.cmd wraps another process; kill its tree, not just the shell.
+      if (process.platform === "win32" && child.pid) {
+        const killer = spawn("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
+          shell: false, windowsHide: true, stdio: "ignore",
+        });
+        killer.on("error", () => { child.kill(); });
+      } else child.kill();
+      const action = args[0] === "org" && args[1] === "login" ? "Salesforce browser login"
+        : args[0] === "org" && args[1] === "list" ? "Reading saved Salesforce CLI orgs"
+        : "Salesforce CLI command";
+      finish(new Error(action + " timed out. Retry or check CLI availability."));
     }, timeoutMs);
     function finish(error?: Error) {
       if (finished) return;
@@ -90,15 +102,20 @@ function record(value: unknown): Record<string, unknown> | undefined {
 function text(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
-function parseCliResult(raw: string): Record<string, unknown> {
+function parseCliPayload(raw: string): unknown {
   let parsed: unknown;
   try { parsed = JSON.parse(raw); }
   catch { throw new Error("Salesforce CLI returned invalid JSON. Update Salesforce CLI and try again."); }
   const root = record(parsed);
-  if (!root || root.status !== 0 || !record(root.result)) {
-    throw new Error("Salesforce CLI could not authorize this org. Reauthenticate using the browser.");
+  if (!root || root.status !== 0 || root.result === undefined || root.result === null) {
+    throw new Error("Salesforce CLI could not complete the command. Retry or reauthenticate.");
   }
-  return root.result as Record<string, unknown>;
+  return root.result;
+}
+function parseCliResult(raw: string): Record<string, unknown> {
+  const result = record(parseCliPayload(raw));
+  if (!result) throw new Error("Salesforce CLI returned an unexpected response.");
+  return result;
 }
 function normalizeOrg(raw: unknown): CliOrg | undefined {
   const row = record(raw);
@@ -141,17 +158,27 @@ export class SalesforceCliAuthProvider {
 
   async listOrgs(): Promise<CliOrg[]> {
     await this.version();
-    // Query real CLI connection status so expired authorizations are visible,
-    // falling back to saved entries if a status check cannot complete.
-    let rows: Record<string, unknown>;
+    // Fast local-first discovery. The original sf org list --json checks every
+    // saved org over the network; one expired/slow refresh blocks the UI.
+    // A saved CLI authorization does NOT prove the org is currently connected.
+    let all: unknown[];
     try {
-      rows = parseCliResult(await this.run(["org", "list", "--json"], CLI_TIMEOUT));
+      const rows = parseCliResult(await this.run(
+        ["org", "list", "--skip-connection-status", "--json"], LOCAL_DISCOVERY_TIMEOUT));
+      all = ["nonScratchOrgs", "scratchOrgs", "devHubs", "other", "orgs"]
+        .flatMap(key => Array.isArray(rows[key]) ? rows[key] as unknown[] : []);
     } catch {
-      rows = parseCliResult(await this.run(
-        ["org", "list", "--skip-connection-status", "--json"], CLI_TIMEOUT));
+      // Second independent local-only command (JSON result is often an array).
+      const payload = parseCliPayload(await this.run(
+        ["org", "list", "auth", "--json"], LOCAL_DISCOVERY_TIMEOUT));
+      if (Array.isArray(payload)) all = payload;
+      else {
+        const rows = record(payload);
+        if (!rows) throw new Error("Salesforce CLI returned invalid saved-org metadata.");
+        all = ["nonScratchOrgs", "scratchOrgs", "devHubs", "other", "orgs"]
+          .flatMap(key => Array.isArray(rows[key]) ? rows[key] as unknown[] : []);
+      }
     }
-    const all = ["nonScratchOrgs", "scratchOrgs", "devHubs", "other", "orgs"]
-      .flatMap(key => Array.isArray(rows[key]) ? rows[key] as unknown[] : []);
     const unique = new Map<string, CliOrg>();
     for (const raw of all) {
       const org = normalizeOrg(raw);
