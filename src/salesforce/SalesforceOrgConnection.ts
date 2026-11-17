@@ -136,14 +136,14 @@ export class SalesforceOrgConnection {
     };
   }
 
-  async listAuthorizedOrgs(): Promise<{
+  async listAuthorizedOrgs(refresh = false): Promise<{
     cliVersion: string;
     orgs: CliOrg[];
     warning?: string;
   }> {
     const cliVersion = await this.cli.version();
     try {
-      return { cliVersion, orgs: await this.cli.listOrgs() };
+      return { cliVersion, orgs: await this.cli.listOrgs(refresh) };
     } catch {
       // A local org-discovery failure isn't an authentication failure.
       // Don't trap the user with an empty list AND disabled browser buttons.
@@ -168,7 +168,10 @@ export class SalesforceOrgConnection {
 
   async selectOrg(target: string): Promise<void> {
     return timedAuthStep("auth.selectOrg", async () => {
-      const orgs = await this.cli.listOrgs();
+      // The UI already listed this org. Avoid another expensive CLI process
+      // before the secure token and Salesforce identity verification.
+      const cached = this.cli.findListedOrg(target);
+      const orgs = cached ? [cached] : await this.cli.listOrgs();
       const selected = orgs.find(org =>
         org.username.toLowerCase() === target.toLowerCase() ||
         org.alias?.toLowerCase() === target.toLowerCase());
