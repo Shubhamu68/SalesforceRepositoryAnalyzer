@@ -21,7 +21,7 @@ export class RepositoryConfigurationService {
   private choosing = false;
 
   constructor(
-    private readonly envFilePath = path.resolve(process.cwd(), ".env"),
+    private readonly envFilePath = path.resolve(process.env.SALESFORCE_ANALYZER_ENV_PATH?.trim() || path.join(process.cwd(), ".env")),
     private readonly picker: () => Promise<string | null> = chooseWindowsRepositoryFolder,
     private readonly environment: NodeJS.ProcessEnv = process.env,
   ) {}
