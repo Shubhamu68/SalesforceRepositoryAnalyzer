@@ -49,6 +49,8 @@ try {
     await new Promise(resolve => setTimeout(resolve, 150));
   }
   assert.equal(ready, true, "Desktop API startup failed: " + output);
+  const live = await (await fetch(origin + "/api/health/live")).json();
+  assert.deepEqual(live, { status: "ok" }, "Startup liveness must not require repository setup");
   const health = await (await fetch(origin + "/api/health")).json();
   assert.equal(health.status, "ok");
   assert.equal(health.repositoryConfigured, false);
