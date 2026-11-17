@@ -3,6 +3,14 @@ import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { isAllowedExternalUrl, resolveDesktopPaths } from "../desktop/electron/runtimePaths.mjs";
 
+test("React page title matches the Electron desktop application name", () => {
+  const html = readFileSync("web/index.html", "utf8");
+  const electron = readFileSync("desktop/electron/main.mjs", "utf8");
+  assert.match(html, /<title>Salesforce Repository Analyzer<\/title>/);
+  assert.match(electron, /title: "Salesforce Repository Analyzer"/);
+  assert.doesNotMatch(html, /<title>web<\/title>/);
+});
+
 test("Electron desktop reuses existing compiled Analyzer API and UI", () => {
   const paths = resolveDesktopPaths("C:/DesktopBundle");
   assert.match(paths.backend.replaceAll("\\", "/"), /app\/dist\/api\/server\.js$/);
