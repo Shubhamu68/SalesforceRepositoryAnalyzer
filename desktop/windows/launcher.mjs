@@ -20,11 +20,11 @@ for (const file of [node, backend, path.join(frontend, "index.html"), exampleEnv
 }
 
 // The checked-in release contains .env.example only. Never overwrite a user's
-// existing credential or path configuration.
+// existing local settings or configured paths.
 if (!existsSync(localEnv)) {
   try {
     copyFileSync(exampleEnv, localEnv, 0);
-    console.log("Created .env from the safe template. Add your own Salesforce credentials if needed.");
+    console.log("Created .env from the safe template. Salesforce login uses your local sf CLI.");
   } catch (error) {
     console.error("Cannot create .env. Extract the ZIP to a writable folder before launching.");
     process.exit(1);
@@ -33,9 +33,12 @@ if (!existsSync(localEnv)) {
 
 const loadedEnv = parseEnv(readFileSync(localEnv, "utf8"));
 const environment = { ...process.env };
+// Avoid forwarding old OAuth secrets to the packaged backend at all.
+const obsoleteAuthKeys = ["SALESFORCE_CLIENT_ID", "SALESFORCE_CLIENT_SECRET", "SALESFORCE_LOGIN_URL"];
+for (const key of obsoleteAuthKeys) delete environment[key];
 for (const [key, value] of Object.entries(loadedEnv)) {
   // Local .env wins over stale inherited PowerShell or Windows variables.
-  if (key.startsWith("SALESFORCE_")) environment[key] = value;
+  if (key.startsWith("SALESFORCE_") && !obsoleteAuthKeys.includes(key)) environment[key] = value;
 }
 
 async function freeLocalPort() {

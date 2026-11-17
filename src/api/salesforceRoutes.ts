@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { isLocalConfigurationRequest } from "./reportOutputRoutes.js";
 import { SalesforceConnectionError, SalesforceOrgConnection } from "../salesforce/SalesforceOrgConnection.js";
 
 /**
@@ -12,6 +13,10 @@ export function createSalesforceRouter(
   const router = Router();
 
   router.use((req, res, next) => {
+    if (!isLocalConfigurationRequest(req.get("host"), req.get("origin"))) {
+      res.status(403).json({ error: "Salesforce org access is available on localhost only." });
+      return;
+    }
     if (req.method !== "GET" && req.method !== "HEAD") {
       const origin = req.header("Origin");
       if (origin) {

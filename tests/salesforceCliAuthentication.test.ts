@@ -61,7 +61,7 @@ test("CLI org discovery lists sandbox and production, preserving stale authoriza
   assert.equal(orgs.find(o=>o.alias==="unifiedQA")?.environment,"sandbox");
   assert.equal(orgs.find(o=>o.alias==="production")?.environment,"production");
   assert.equal(orgs.find(o=>o.alias==="expiredQA")?.status,"expired");
-  assert.ok(calls.includes("org list --skip-connection-status --json"));
+  assert.ok(calls.includes("org list --json"));
   assert.doesNotMatch(JSON.stringify(orgs), /sensitive-oauth-token/);
 });
 
@@ -232,4 +232,53 @@ test("CLI version detection is cached during repeated org discovery", async () =
   assert.equal(first.orgs.length,3);
   assert.equal(second.orgs.length,3);
   assert.equal(calls.filter(cmd=>cmd==="--version").length,1);
+});
+
+test("Salesforce CLI real status distinguishes connected and expired authorizations", async () => {
+  const calls: string[] = [];
+  const cli = new SalesforceCliAuthProvider(fakeRunner(calls));
+  const orgs = await cli.listOrgs();
+  assert.equal(orgs.find(org => org.alias === "unifiedQA")?.status, "saved");
+  assert.equal(orgs.find(org => org.alias === "expiredQA")?.status, "expired");
+  assert.ok(calls.includes("org list --json"));
+});
+
+test("CLI org listing retains saved orgs when live connection checks fail", async () => {
+  const calls: string[] = [];
+  const runner = fakeRunner(calls);
+  const cli = new SalesforceCliAuthProvider(async (args, timeout) => {
+    if (args.join(" ") === "org list --json") {
+      calls.push(args.join(" "));
+      throw new Error("Network refresh unavailable");
+    }
+    return runner(args, timeout);
+  });
+  const orgs = await cli.listOrgs();
+  assert.equal(orgs.length, 3);
+  assert.ok(calls.includes("org list --json"));
+  assert.ok(calls.includes("org list --skip-connection-status --json"));
+});
+
+test("failed switch restores the previously connected Salesforce org", async () => {
+  const conn = new SalesforceOrgConnection(new SalesforceCliAuthProvider(fakeRunner([])));
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const address = String(url);
+    if (address.includes("corp.my.salesforce.com")) {
+      return new Response("{}", { status: 401 });
+    }
+    return new Response(JSON.stringify({ organization_id: ORG_A, user_id: USER }), { status: 200 });
+  };
+  try {
+    await conn.selectOrg("unifiedQA");
+    assert.equal(conn.status.connected, true);
+    const instance = conn.status.instanceUrl;
+    await assert.rejects(conn.selectOrg("production"), /session expired/);
+    assert.equal(conn.status.connected, true);
+    assert.equal(conn.status.username, "admin@example.com");
+    assert.equal(conn.status.organizationId, ORG_A);
+    assert.equal(conn.status.instanceUrl, instance);
+  } finally {
+    globalThis.fetch = original;
+  }
 });

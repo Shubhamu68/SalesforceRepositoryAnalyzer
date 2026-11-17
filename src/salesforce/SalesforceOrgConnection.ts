@@ -152,14 +152,33 @@ export class SalesforceOrgConnection {
       org.alias?.toLowerCase() === target.toLowerCase());
     if (!selected) throw new SalesforceConnectionError(
       "The selected Salesforce org is not authorized in CLI. Sign in through the browser.", 400);
-    this.epoch++;
+    const previousOrg = this.selectedOrg;
+    const previousConnection = this.connection;
+    const previousError = this.lastError;
+    const previousAttempt = this.lastAttemptAt;
+    const transition = ++this.epoch;
     this.selectedOrg = selected;
     this.connection = null;
     this.lastError = null;
     this.lastAttemptAt = 0;
     this.describeCache.clear();
     this.pendingDescribes.clear();
-    await this.connect(true);
+    try {
+      await this.connect(true);
+    } catch (error) {
+      // A failed switch must not discard a previously working org.
+      // Never restore it if another switch/disconnect superseded this request.
+      if (this.epoch === transition && previousOrg && previousConnection) {
+        this.epoch++;
+        this.selectedOrg = previousOrg;
+        this.connection = previousConnection;
+        this.lastError = previousError;
+        this.lastAttemptAt = previousAttempt;
+        this.describeCache.clear();
+        this.pendingDescribes.clear();
+      }
+      throw error;
+    }
   }
 
   disconnect(): void {

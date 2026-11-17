@@ -13,10 +13,17 @@ import { RepositoryConfigurationService } from "../services/RepositoryConfigurat
 import { AnalyzerRuntimeService } from "../services/AnalyzerRuntimeService.js";
 import { OrgAnalysisPreflightService, OrgAnalysisGuardError } from "../services/OrgAnalysisPreflightService.js";
 import { RepositorySetupError } from "../services/SalesforceRepositoryValidator.js";
+import { removeLegacySalesforceOauthEnvironment, removeLegacySalesforceOauthSettings } from "../services/LocalEnvFileService.js";
 
 // Backend can start without any repository configured. Existing shell values
 // still take precedence over .env at startup, as before.
-if (existsSync(".env")) process.loadEnvFile(".env");
+if (existsSync(".env")) {
+  // Migrate an existing local settings file without retaining obsolete OAuth secrets.
+  await removeLegacySalesforceOauthSettings(".env");
+  process.loadEnvFile(".env");
+}
+// The Salesforce CLI owns OAuth. Ignore stale user/system shell variables, too.
+removeLegacySalesforceOauthEnvironment();
 
 const app = express();
 app.use(express.json({ limit: "100kb" }));

@@ -30,7 +30,7 @@ export function assertCliArguments(args: string[]): void {
   const joined = args.join(" ");
   const permitted =
     /^--version$/.test(joined) ||
-    joined === "org list --skip-connection-status --json" ||
+    (joined === "org list --json" || joined === "org list --skip-connection-status --json") ||
     /^org display --target-org [a-zA-Z0-9_.@+-]+ --json$/.test(joined) ||
     /^org auth show-access-token --target-org [a-zA-Z0-9_.@+-]+ --json$/.test(joined) ||
     /^org login web --instance-url https:\/\/(test|login)\.salesforce\.com --json$/.test(joined);
@@ -141,8 +141,15 @@ export class SalesforceCliAuthProvider {
 
   async listOrgs(): Promise<CliOrg[]> {
     await this.version();
-    const rows = parseCliResult(await this.run(
-      ["org", "list", "--skip-connection-status", "--json"], CLI_TIMEOUT));
+    // Query real CLI connection status so expired authorizations are visible,
+    // falling back to saved entries if a status check cannot complete.
+    let rows: Record<string, unknown>;
+    try {
+      rows = parseCliResult(await this.run(["org", "list", "--json"], CLI_TIMEOUT));
+    } catch {
+      rows = parseCliResult(await this.run(
+        ["org", "list", "--skip-connection-status", "--json"], CLI_TIMEOUT));
+    }
     const all = ["nonScratchOrgs", "scratchOrgs", "devHubs", "other", "orgs"]
       .flatMap(key => Array.isArray(rows[key]) ? rows[key] as unknown[] : []);
     const unique = new Map<string, CliOrg>();

@@ -46,3 +46,54 @@ export async function saveLocalEnvEntry(filePath: string, key: string, value: st
     await rm(temporary, { force: true }).catch(() => undefined);
   }
 }
+
+// Migration only: these obsolete app-owned OAuth settings are no longer read.
+// Keep the identifiers here solely to remove existing values from local files
+// and inherited process environment, not to authenticate to Salesforce.
+export const LEGACY_SALESFORCE_OAUTH_KEYS = [
+  "SALESFORCE_CLIENT_ID",
+  "SALESFORCE_CLIENT_SECRET",
+  "SALESFORCE_LOGIN_URL",
+] as const;
+
+/** Atomically remove obsolete settings, preserving other entries and CRLF/LF. */
+export async function removeLocalEnvEntries(
+  filePath: string, keys: readonly string[]
+): Promise<boolean> {
+  if (keys.some(key => !/^[A-Z_][A-Z0-9_]*$/.test(key))) {
+    throw new Error("Invalid environment key.");
+  }
+  let previous: string;
+  try {
+    previous = await readFile(filePath, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+  const targets = new Set(keys);
+  // Retain each line's own newline, so original formatting is unchanged.
+  const updated = previous.split(/(?<=\n)/).filter(line => {
+    const match = line.match(/^[ \t]*(?:export[ \t]+)?([A-Z_][A-Z0-9_]*)[ \t]*=/);
+    return !match || !targets.has(match[1]);
+  }).join("");
+  if (updated === previous) return false;
+  const mode = (await stat(filePath)).mode & 0o777;
+  const temporary = filePath + ".tmp-" + randomUUID();
+  try {
+    await writeFile(temporary, updated, { flag: "wx", mode });
+    await rename(temporary, filePath);
+  } finally {
+    await rm(temporary, { force: true }).catch(() => undefined);
+  }
+  return true;
+}
+
+export function removeLegacySalesforceOauthEnvironment(
+  environment: NodeJS.ProcessEnv = process.env
+): void {
+  for (const key of LEGACY_SALESFORCE_OAUTH_KEYS) delete environment[key];
+}
+
+export async function removeLegacySalesforceOauthSettings(filePath: string): Promise<boolean> {
+  return removeLocalEnvEntries(filePath, LEGACY_SALESFORCE_OAUTH_KEYS);
+}
