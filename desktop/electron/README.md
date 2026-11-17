@@ -1,0 +1,30 @@
+# Salesforce Repository Analyzer — desktop
+
+This is an **Electron portable Windows .exe** wrapping the same local React UI and Express API as the existing browser launcher. The original Windows ZIP, development UI and analyzer modules remain available.
+
+## Run / build (Windows)
+
+From the repository root:
+
+```powershell
+npm ci
+npm run build
+cd web
+npm ci
+npm run build
+cd ..
+node desktop/electron/stage.mjs
+cd desktop/electron
+npm install --no-audit --no-fund
+npm start
+```
+
+To build a portable executable, run `npm run build:win` from `desktop/electron`, or use the separate **Build Windows Desktop EXE** GitHub Actions workflow.
+
+**Requirements for users:** Windows 10/11 and Salesforce CLI 2.136+ on PATH for optional org login. Users do not need Node.js, npm, Git or VS Code.
+
+**Settings:** The desktop app saves repository/report paths under Electron's per-user application data folder. It packages only `.env.example`; never a developer's `.env`, CLI authentication files or Salesforce tokens.
+
+**Security:** React runs in a sandboxed Electron window without Node integration. The API stays on a random loopback port, and Salesforce CLI OAuth opens in the system browser. Org checks and permission analysis use the existing backend unchanged.
+
+This first build retains the current Windows PowerShell folder pickers. Electron-native folder dialogs and an installer can be added later after a successful Windows end-to-end smoke test. Portable EXEs may trigger Windows SmartScreen until the app is signed and approved by the organization's IT/security team.
