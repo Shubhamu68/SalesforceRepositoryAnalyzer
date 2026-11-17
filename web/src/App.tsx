@@ -1045,7 +1045,9 @@ function App() {
         setResult(null);
         setLastSoql(null);
       }}
-      onSkip={() => {
+      onSkip={orgChooserMode === "startup" ? () => {
+        // Repository-only is an explicit first-run decision. The manual
+        // Change org screen uses Back instead, preserving the current session.
         void fetch("/api/salesforce/disconnect", {
           method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
         }).catch(() => undefined).finally(() => {
@@ -1054,7 +1056,7 @@ function App() {
           setResult(null);
           setLastSoql(null);
         });
-      }}
+      } : undefined}
     />;
   }
 
