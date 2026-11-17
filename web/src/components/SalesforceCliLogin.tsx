@@ -42,18 +42,13 @@ export default function SalesforceCliLogin({
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [discoveryWarning, setDiscoveryWarning] = useState("");
-  const [failedSavedSelection, setFailedSavedSelection] = useState(false);
   const [current, setCurrent] = useState<AuthStatus | null>(null);
-  // A failed CLI version check must not make Sandbox/Production buttons
-  // silently inert. The backend remains authoritative about compatibility.
+  // Discovery, not the presence of another org, controls button availability.
+  // The backend remains responsible for CLI version and OAuth validation.
   const cliOutdated = /Salesforce CLI [\d.]+ is too old for secure token retrieval/i.test(error);
   const detectedVersion = error.match(/Salesforce CLI (\d+\.\d+\.\d+) is too old/i)?.[1];
-  const hasActiveCliOrgs = orgs.some(org => org.status === "saved");
   const canLogInWithBrowser = canStartBrowserLogin({
     checking: loading, busy: Boolean(busy),
-    hasError: Boolean(error) && !failedSavedSelection,
-    connected: Boolean(current?.connected),
-    hasActiveCliOrgs: hasActiveCliOrgs && !failedSavedSelection,
   });
 
   const refresh = useCallback(async () => {
@@ -101,7 +96,6 @@ export default function SalesforceCliLogin({
       setCurrent(status as AuthStatus);
       onComplete(status as AuthStatus);
     } catch (cause) {
-      setFailedSavedSelection(true);
       setError(cause instanceof Error ? cause.message : "Could not connect this Salesforce org.");
     } finally { setBusy(""); }
   }
@@ -130,20 +124,16 @@ export default function SalesforceCliLogin({
     <div className={compact ? "sf-cli-compact" : "sf-cli-gate"}>
       <section className="sf-cli-card" aria-labelledby="sf-cli-heading">
         <div className="sf-cli-eyebrow">SALESFORCE REPOSITORY ANALYZER</div>
-        <h1 id="sf-cli-heading">Connect your Salesforce account</h1>
-        <p className="sf-cli-intro">
-          Use an org already authorized with Salesforce CLI, or sign in to a Sandbox or
-          Production org using Salesforce's normal browser login and SSO/MFA.
-        </p>
+        <h1 id="sf-cli-heading">{onBack ? "Change Salesforce org" : "Connect Salesforce org"}</h1>
+        <p className="sf-cli-intro">Choose a saved org or sign in through Salesforce.</p>
 
         {current?.connected && (
           <div className="sf-cli-connected" role="status">
-            Connected to {current.alias || current.username || "Salesforce"}
-            {current.organizationId ? " · " + current.organizationId : ""}
+            Current org: {current.alias || current.username || "Salesforce"}
           </div>
         )}
 
-        <label className="sf-cli-label" htmlFor="sf-cli-org">CLI-authorized Salesforce org</label>
+        <label className="sf-cli-label" htmlFor="sf-cli-org">Saved CLI orgs</label>
         <div className="sf-cli-row">
           <select id="sf-cli-org" className="sf-cli-select" value={selected}
             onChange={event => setSelected(event.target.value)}
@@ -151,7 +141,7 @@ export default function SalesforceCliLogin({
             {orgs.length === 0 && <option value="">{cliOutdated ? "Update Salesforce CLI to load saved orgs" : discoveryWarning ? "Saved CLI orgs unavailable" : error ? "Cannot load CLI orgs" : "No saved orgs found"}</option>}
             {orgs.map(org => (
               <option key={org.username} value={org.username}>
-                {org.alias ? org.alias + " — " : ""}{org.username} ({org.environment})
+                {org.alias || org.username} ({org.environment})
                 {org.status === "expired" ? " · Re-login required" : ""}
               </option>
             ))}
@@ -162,12 +152,12 @@ export default function SalesforceCliLogin({
           </button>
         </div>
         <div className="sf-cli-smallrow">
-          <span>{loading ? "Checking Salesforce CLI…" : cliVersion ? "Installed: " + cliVersion : detectedVersion ? "Installed: " + detectedVersion + " · update required" : "Salesforce CLI status unavailable"}</span>
+          <span>{loading ? "Checking CLI…" : cliVersion ? "CLI " + (cliVersion.match(/@salesforce\/cli\/(\d+\.\d+\.\d+)/)?.[1] ?? cliVersion) : detectedVersion ? "CLI " + detectedVersion + " · update required" : "CLI status unavailable"}</span>
           <button type="button" className="sf-cli-link" disabled={loading || Boolean(busy)}
             onClick={() => void refresh()}>Refresh orgs</button>
         </div>
 
-        <div className="sf-cli-separator"><span>OR LOG IN THROUGH SALESFORCE</span></div>
+        <div className="sf-cli-separator"><span>OR SIGN IN</span></div>
         <div className="sf-cli-row sf-cli-login-actions" aria-label="Sandbox or Production browser login">
           <button type="button" className="secondary-button" disabled={!canLogInWithBrowser}
             onClick={() => void browserLogin("sandbox")}>
@@ -178,45 +168,25 @@ export default function SalesforceCliLogin({
             {busy === "production" ? "Waiting for Production login…" : "Log in to Production"}
           </button>
         </div>
-        {!loading && !error && hasActiveCliOrgs && !failedSavedSelection && (
-          <p className="sf-cli-login-hint" role="status">
-            Saved Salesforce CLI authorizations are listed above. Select an org and click Connect to verify its session.
-            If a saved login has expired, browser reauthorization becomes available after the connection attempt fails.
-          </p>
-        )}
         {busy === "sandbox" || busy === "production"
           ? <p className="sf-cli-pending" role="status">
-              Complete sign-in in the Salesforce browser window. The Analyzer will connect automatically afterward.
+              Complete sign-in in your browser.
             </p> : null}
         {discoveryWarning && <p className="sf-cli-discovery-warning" role="status">{discoveryWarning}</p>}
-        {failedSavedSelection && !current?.connected && (
-          <p className="sf-cli-discovery-warning" role="status">
-            The selected saved org could not connect. You can reauthorize using the Sandbox or Production browser login below.
-          </p>
-        )}
         {cliOutdated ? (
           <div className="sf-cli-upgrade" role="alert">
             <strong>Salesforce CLI update required</strong>
-            <p>
-              {detectedVersion ? `Version ${detectedVersion} is installed. ` : ""}
-              The Analyzer needs Salesforce CLI 2.136.0 or newer to retrieve an access token securely.
-              Update the CLI before connecting to either Sandbox or Production.
-            </p>
-            <div className="sf-cli-command"><code>sf update</code></div>
-            <p>Run this command in Command Prompt or PowerShell, check the version with <code>sf --version</code>,
-              then click <strong>Refresh orgs</strong> above. If the old version is still detected,
-              restart the Analyzer API or desktop launcher.</p>
-            <p className="sf-cli-upgrade-error">CLI response: {error}</p>
+            <p>{detectedVersion ? `Installed: ${detectedVersion}. ` : ""}
+              Run <code>sf update</code> (requires 2.136+), verify with <code>sf --version</code>,
+              restart the Analyzer, and select Refresh orgs.</p>
           </div>
         ) : error && <p className="sf-cli-error" role="alert">{error}</p>}
         <p className="sf-cli-note">
-          Your password never enters the Analyzer. CLI maintains OAuth authorization;
-          the Analyzer retains only the chosen org's access token in local backend memory.
-          Expired CLI logins must be reauthorized through Salesforce.
+          Salesforce handles sign-in. Your password is not stored in the Analyzer.
         </p>
         {onSkip && (
           <button type="button" className="sf-cli-skip" disabled={loading || Boolean(busy) || Boolean(current?.connected)} onClick={onSkip}>
-            Continue with repository-only analysis
+            Use repository-only analysis
           </button>
         )}
         {onBack && (
