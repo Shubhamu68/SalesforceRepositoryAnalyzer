@@ -31,6 +31,7 @@ test("main app auto-enters on connected startup, but keeps explicit Change org o
   assert.match(app, /setOrgChooserMode\("manual"\)/);
   assert.match(app, /autoContinueConnected=\{orgChooserMode === "startup"\}/);
   assert.match(app, /onBack=\{orgChooserMode === "manual"/);
+  assert.match(app, /onSkip=\{orgChooserMode === "startup"/);
   assert.match(login, /if \(autoContinueConnected && session.connected\) onComplete\(session\)/);
   assert.match(login, /next\.some\(org => org\.username === session\.username\)/);
   assert.match(login, /Back to workspace/);
