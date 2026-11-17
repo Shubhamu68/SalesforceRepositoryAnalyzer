@@ -6,6 +6,7 @@ import PermissionIndicator from "./components/PermissionIndicator";
 import type { PermissionEvidence } from "./components/permissionPresentation";
 import StackTraceImpact from "./components/StackTraceImpact";
 import SalesforceOrgConnection from "./components/SalesforceOrgConnection";
+import SalesforceOrgLogin from "./components/SalesforceOrgLogin";
 import AnalysisLoadingOverlay from "./components/AnalysisLoadingOverlay";
 import ReportOutputSetupModal from "./components/ReportOutputSetupModal";
 import RepositorySetupModal from "./components/RepositorySetupModal";
@@ -130,6 +131,8 @@ function App() {
   const [repositoryName, setRepositoryName] = useState<string>("");
   const [apiConnected, setApiConnected] = useState(false);
   const [salesforceConnection, setSalesforceConnection] = useState<SalesforceConnectionState>("connecting");
+  const [orgStatusChecked, setOrgStatusChecked] = useState(false);
+  const [orgGateDismissed, setOrgGateDismissed] = useState(false);
   const [lastSoql, setLastSoql] = useState<SoqlAnalysisResult | null>(null);
   const [reportFolderModalOpen, setReportFolderModalOpen] = useState(false);
   const [reportFolderExplanation, setReportFolderExplanation] = useState("");
@@ -170,9 +173,12 @@ function App() {
         const response = await fetch("/api/salesforce/status", { cache: "no-store" });
         if (!response.ok) throw new Error("Salesforce status unavailable");
         const data: { connected?: boolean; connecting?: boolean; configured?: boolean } = await response.json();
-        if (active) setSalesforceConnection(data.connected ? "connected" : data.connecting ? "connecting" : data.configured ? "unavailable" : "not-configured");
+        if (active) {
+          setSalesforceConnection(data.connected ? "connected" : data.connecting ? "connecting" : data.configured ? "unavailable" : "not-configured");
+          setOrgStatusChecked(true);
+        }
       } catch {
-        if (active) setSalesforceConnection("unavailable");
+        if (active) { setSalesforceConnection("unavailable"); setOrgStatusChecked(true); }
       }
     }
     void refreshSalesforceConnection();
@@ -279,7 +285,7 @@ function App() {
       if (!response.ok) {
         setOrgWarning({
           kind: "ERROR", title: "Salesforce connection unavailable",
-          message: payload.error || "Salesforce credentials are invalid or the org connection is unavailable. Correct the .env values and retry.",
+          message: payload.error || "Selected Salesforce CLI session is unavailable. Reauthorize from the Salesforce Org page and retry.",
         });
         return null;
       }
@@ -1101,12 +1107,19 @@ function App() {
 
         {page === "reports" && <section className="panel reports-panel"><div className="panel-heading"><div><h2>Latest Excel report</h2><p>Saved directly to your configured folder.</p></div></div>{lastSoql ? <><div className="detail-line"><span>Persona</span><strong>{lastSoql.personaName}</strong></div><div className="detail-line"><span>Report folder</span><strong className="path-text">{lastSoql.outputFolder}</strong></div><div className="detail-line"><span>Findings</span><strong>{lastSoql.summary.totalFindings}</strong></div><button className="secondary-button" onClick={() => navigator.clipboard.writeText(lastSoql.outputFolder)}>Copy folder path</button></> : <div className="empty-reports"><span>▧</span><h3>No report yet</h3><p>Run SOQL analysis to generate an Excel workbook.</p><button className="primary-button" onClick={() => navigate("soql")}>Run SOQL Analysis</button></div>}</section>}
       </main>
-      {repoModalOpen && (
+      {repoModalOpen && (orgGateDismissed || salesforceConnection === "connected") && (
         <RepositorySetupModal
           busy={choosingRepo}
           error={repoError}
           currentPath={repoCurrentPath}
           onChoose={() => { void chooseRepository(); }}
+        />
+      )}
+      {orgStatusChecked && !orgGateDismissed && salesforceConnection !== "connected" && (
+        <SalesforceOrgLogin
+          firstLaunch
+          onConnected={() => { setSalesforceConnection("connected"); setOrgGateDismissed(true); }}
+          onContinueRepositoryOnly={() => setOrgGateDismissed(true)}
         />
       )}
       {orgWarning && (
