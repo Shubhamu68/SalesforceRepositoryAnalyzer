@@ -46,3 +46,30 @@ export async function saveLocalEnvEntry(filePath: string, key: string, value: st
     await rm(temporary, { force: true }).catch(() => undefined);
   }
 }
+
+// One-time migration: remove obsolete OAuth secrets from the Analyzer's local
+// .env. Preserve every unrelated setting, comment, newline and file permission.
+export async function removeLocalEnvEntries(filePath: string, keys: readonly string[]): Promise<boolean> {
+  if (keys.some(key => !/^[A-Z_][A-Z0-9_]*$/.test(key))) throw new Error("Invalid environment key.");
+  let original: string;
+  try { original = await readFile(filePath, "utf8"); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+  const target = new Set(keys);
+  const updated = original.split(/(?<=\n)/).filter(line => {
+    const match = line.match(/^\s*(?:export\s+)?([A-Z_][A-Z0-9_]*)\s*=/);
+    return !match || !target.has(match[1]);
+  }).join("");
+  if (updated === original) return false;
+  const mode = (await stat(filePath)).mode & 0o777;
+  const temporary = filePath + ".tmp-" + randomUUID();
+  try {
+    await writeFile(temporary, updated, { flag: "wx", mode });
+    await rename(temporary, filePath);
+  } finally {
+    await rm(temporary, { force: true }).catch(() => undefined);
+  }
+  return true;
+}
