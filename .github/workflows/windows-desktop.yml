@@ -42,6 +42,7 @@ jobs:
           node --check desktop/electron/main.mjs
           node --check desktop/electron/stage.mjs
           node --check desktop/electron/runtimePaths.mjs
+          node --check desktop/electron/startupTrace.mjs
       - name: Smoke-test staged API and frontend
         run: node desktop/electron/smoke.mjs
       - name: Install Electron build tools
