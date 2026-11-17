@@ -40,7 +40,7 @@ test("login UI does not silently disable sandbox and production buttons after CL
   assert.match(ui, /Refresh orgs/);
   assert.match(ui, /Update Salesforce CLI to load saved orgs/);
   assert.match(ui, /Cannot load CLI orgs/);
-  assert.match(ui, /Installed: " \+ detectedVersion \+ " · update required"/);
+  assert.match(ui, /CLI " \+ detectedVersion \+ " · update required"/);
   assert.match(ui, /setError\(message\)/);
   assert.match(styles, /\.sf-cli-upgrade\{/);
 });
