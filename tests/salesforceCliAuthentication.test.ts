@@ -149,7 +149,7 @@ test("login UI, .env and API never ask for passwords or client secrets", () => {
   assert.match(login,/Log in to Production/);
   assert.match(login,/repository-only analysis/);
   assert.match(login,/\/api\/salesforce\/select/);
-  assert.match(readFileSync("web/src/App.tsx","utf8"),/if \(!authDismissed\)/);
+  assert.match(readFileSync("web/src/App.tsx","utf8"),/shouldShowOrgChooser\(authDismissed, orgChooserMode, salesforceConnection === "connected"\)/);
   assert.match(readFileSync("src/api/salesforceRoutes.ts","utf8"),/onConnectionChange/);
 });
 
