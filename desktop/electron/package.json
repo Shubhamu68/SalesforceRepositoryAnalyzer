@@ -1,0 +1,39 @@
+{
+  "name": "salesforce-repository-analyzer-desktop",
+  "productName": "Salesforce Repository Analyzer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "main.mjs",
+  "scripts": {
+    "start": "electron .",
+    "build:win": "electron-builder --win portable --x64 --publish never"
+  },
+  "devDependencies": {
+    "electron": "45.3.4",
+    "electron-builder": "26.18.0"
+  },
+  "build": {
+    "appId": "com.salesforcerepositoryanalyzer.desktop",
+    "productName": "Salesforce Repository Analyzer",
+    "asar": true,
+    "npmRebuild": false,
+    "directories": {
+      "output": "../../release/electron-desktop"
+    },
+    "files": [
+      "main.mjs",
+      "runtimePaths.mjs",
+      "package.json"
+    ],
+    "extraResources": [
+      { "from": "staging", "to": "analyzer" }
+    ],
+    "win": {
+      "target": [
+        { "target": "portable", "arch": ["x64"] }
+      ],
+      "artifactName": "SalesforceRepositoryAnalyzer-Desktop-${version}-${arch}.${ext}"
+    }
+  }
+}
