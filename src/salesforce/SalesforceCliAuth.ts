@@ -186,7 +186,22 @@ export class SalesforceCliAuth {
       throw new SalesforceCliError("Salesforce CLI did not provide a usable access token. Reauthorize this org.");
     }
     const orgId = valueOf(display, "orgId") || valueOf(display, "id");
-    const userId = valueOf(display, "userId");
+    // sf org display does not reliably expose the Salesforce User record ID.
+    // Keep the existing UserEntityAccess test query working by reading the
+    // documented `sf org display user` result.id (no token reaches the UI).
+    let userId = valueOf(display, "userId");
+    if (!userId) {
+      try {
+        const user = cliResult(await this.run([
+          "org", "display", "user", "--target-org", target, "--json",
+        ]));
+        const candidate = valueOf(user, "id") || valueOf(user, "userId");
+        if (candidate && /^005[A-Za-z0-9]{12,15}$/.test(candidate)) userId = candidate;
+      } catch {
+        // Profile/User lookup can be blocked for an otherwise valid CLI user.
+        // The connection and all normal org queries remain usable.
+      }
+    }
     return { accessToken, instanceUrl, ...(orgId ? { orgId } : {}), ...(userId ? { userId } : {}) };
   }
 }
