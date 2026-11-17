@@ -30,6 +30,8 @@ Both distributions still run an **unsigned .exe**. A ZIP does **not** bypass Sma
 
 **Settings:** The desktop app saves repository/report paths under Electron's per-user application data folder. It packages only `.env.example`; never a developer's `.env`, CLI authentication files or Salesforce tokens.
 
+**Startup diagnostics:** A small startup screen now appears before the local API is ready. The same user-data folder contains `startup-timing.log`, which records only timestamps, fixed startup phases and durations. Compare `main-loaded`, `electron-ready`, `backend-ready`, and `ui-rendered` after launching the updated build. If the window itself takes a long time to appear before `main-loaded`, Windows scanning or Electron process startup may be involved; the log cannot measure time before Electron main code begins.
+
 **Security:** React runs in a sandboxed Electron window without Node integration. The API stays on a random loopback port, and Salesforce CLI OAuth opens in the system browser. Org checks and permission analysis use the existing backend unchanged.
 
 This first build retains the current Windows PowerShell folder pickers. Electron-native folder dialogs and an installer can be added later after a successful Windows end-to-end smoke test. Portable EXEs may trigger Windows SmartScreen until the app is signed and approved by the organization's IT/security team.
