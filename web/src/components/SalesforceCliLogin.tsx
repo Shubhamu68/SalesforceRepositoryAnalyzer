@@ -180,8 +180,8 @@ export default function SalesforceCliLogin({
         </div>
         {!loading && !error && hasActiveCliOrgs && !failedSavedSelection && (
           <p className="sf-cli-login-hint" role="status">
-            Connected Salesforce CLI authorizations are available above. Select an org and click Connect.
-            Sandbox and Production browser login is enabled only when no active CLI org is found.
+            Saved Salesforce CLI authorizations are listed above. Select an org and click Connect to verify its session.
+            If a saved login has expired, browser reauthorization becomes available after the connection attempt fails.
           </p>
         )}
         {busy === "sandbox" || busy === "production"
