@@ -86,7 +86,10 @@ test("a failed subsequent org list does not clear an already established session
     await conn.selectOrg(saved.username);
     assert.equal(conn.status.connected, true);
     offlineAvailable = false;
-    const list = await conn.listAuthorizedOrgs();
+    // Ordinary discovery is deliberately served from local cache. Only an
+    // explicit Refresh orgs should attempt the failed CLI commands again.
+    assert.equal((await conn.listAuthorizedOrgs()).orgs.length, 1);
+    const list = await conn.listAuthorizedOrgs(true);
     assert.match(list.warning ?? "", /Saved CLI orgs could not be loaded/);
     assert.equal(conn.status.connected, true);
     assert.equal(conn.status.organizationId, ORG);
