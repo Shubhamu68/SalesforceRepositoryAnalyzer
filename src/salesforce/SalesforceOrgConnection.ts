@@ -202,16 +202,26 @@ export class SalesforceOrgConnection {
             headers: { Authorization: "Bearer " + session.accessToken, Accept: "application/json" },
             signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
           });
+          if (response.status === 401) {
+            throw new SalesforceConnectionError("Salesforce CLI session expired. Sign in through the Salesforce browser again.", 401);
+          }
           if (response.ok) {
             const identity = await response.json() as Record<string, unknown>;
             if (typeof identity.organization_id === "string" && /^00D[A-Za-z0-9]{12,15}$/.test(identity.organization_id)) {
+              if (organizationId && identity.organization_id.slice(0, 15) !== organizationId.slice(0, 15)) {
+                throw new SalesforceConnectionError("Salesforce CLI returned a session from a different org. Reauthenticate the selected org.", 409);
+              }
               organizationId = identity.organization_id;
             }
             if (typeof identity.user_id === "string" && /^005[A-Za-z0-9]{12,15}$/.test(identity.user_id)) {
               userId = identity.user_id;
             }
           }
-        } catch { /* identity lookup is optional */ }
+        } catch (cause) {
+          // UserInfo may be unavailable for some org policies, but explicit
+          // invalid-session and org-identity mismatches must never be ignored.
+          if (cause instanceof SalesforceConnectionError) throw cause;
+        }
         if (epoch !== this.epoch) throw new SalesforceConnectionError(
           "Salesforce org changed during authentication. Retry.", 409);
         this.connection = {

@@ -199,3 +199,26 @@ test("disconnection during pending CLI authentication cannot revive stale sessio
   assert.equal(conn.status.connected,false);
   assert.equal(conn.status.configured,false);
 });
+
+
+test("CLI token with expired Salesforce API session cannot be reported as connected", async () => {
+  const conn = new SalesforceOrgConnection(new SalesforceCliAuthProvider(fakeRunner([])));
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => new Response("{}",{status:401});
+  try {
+    await assert.rejects(conn.selectOrg("unifiedQA"),/session expired/);
+    assert.equal(conn.status.connected,false);
+    assert.equal(conn.status.configured,true);
+  } finally { globalThis.fetch=original; }
+});
+
+test("org identity must agree with selected CLI org, preventing cross-org access confusion", async () => {
+  const conn = new SalesforceOrgConnection(new SalesforceCliAuthProvider(fakeRunner([])));
+  const original = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({organization_id:ORG_B,user_id:USER}),{status:200});
+  try {
+    await assert.rejects(conn.selectOrg("unifiedQA"),/different org/);
+    assert.equal(conn.status.connected,false);
+  } finally { globalThis.fetch=original; }
+});
