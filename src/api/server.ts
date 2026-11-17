@@ -13,10 +13,17 @@ import { RepositoryConfigurationService } from "../services/RepositoryConfigurat
 import { AnalyzerRuntimeService } from "../services/AnalyzerRuntimeService.js";
 import { OrgAnalysisPreflightService, OrgAnalysisGuardError } from "../services/OrgAnalysisPreflightService.js";
 import { RepositorySetupError } from "../services/SalesforceRepositoryValidator.js";
+import { removeLocalEnvEntries } from "../services/LocalEnvFileService.js";
 
 // Backend can start without any repository configured. Existing shell values
 // still take precedence over .env at startup, as before.
-if (existsSync(".env")) process.loadEnvFile(".env");
+const obsoleteAuthKeys = ["SALESFORCE_CLIENT_ID", "SALESFORCE_CLIENT_SECRET", "SALESFORCE_LOGIN_URL"] as const;
+if (existsSync(".env")) {
+  await removeLocalEnvEntries(".env", obsoleteAuthKeys);
+  process.loadEnvFile(".env");
+}
+// Drop inherited old OAuth values too; there is no credentials fallback.
+for (const key of obsoleteAuthKeys) delete process.env[key];
 
 const app = express();
 app.use(express.json({ limit: "100kb" }));
