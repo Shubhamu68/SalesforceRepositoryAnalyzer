@@ -101,7 +101,8 @@ test("login UI shows recovery instructions for list failure instead of trapping 
   const cli = readFileSync("src/salesforce/SalesforceCliAuthProvider.ts", "utf8");
   assert.match(component, /setDiscoveryWarning\(typeof list\.warning/);
   assert.match(component, /Saved CLI orgs unavailable/);
-  assert.match(component, /setFailedSavedSelection\(true\)/);
+  assert.match(component, /canStartBrowserLogin\(\{/);
+  assert.doesNotMatch(component, /setFailedSavedSelection|hasActiveCliOrgs/);
   assert.match(component, /checking: loading, busy: Boolean\(busy\)/);
   assert.match(component, /setCurrent\(session\)/);
   assert.match(component, /if \(autoContinueConnected && session\.connected\)/);
