@@ -1,29 +1,26 @@
 /**
- * Local, server-side Salesforce connection using OAuth client credentials.
- * A single Run As user is configured on the Salesforce External Client App.
- * Tokens are held only in process memory; no browser OAuth flow is involved.
+ * Single, local Salesforce session selected from Salesforce CLI authorizations.
+ * The browser never receives access or refresh tokens. All analyzer features
+ * share this connection and retain their existing REST/Tooling/Describe calls.
  */
+import { SalesforceCliAuth, SalesforceCliError, type CliOrg } from "./SalesforceCliAuth.js";
+
 export type SalesforceQueryApi = "data" | "tooling";
 
 export type SalesforceConnectionStatus = {
   configured: boolean;
   connecting: boolean;
   connected: boolean;
-  authMode: "client_credentials";
+  authMode: "salesforce_cli";
   environment: "sandbox" | "production" | "custom";
   loginHost: string;
+  username?: string;
+  alias?: string;
   organizationId?: string;
   userId?: string;
   instanceUrl?: string;
   connectedAt?: string;
   message?: string;
-};
-
-type SalesforceOAuthToken = {
-  access_token?: string;
-  instance_url?: string;
-  id?: string;
-  token_type?: string;
 };
 
 type SalesforceOAuthConnection = {
@@ -97,35 +94,12 @@ function getApiVersion(): string {
   return version;
 }
 
-// Do not reflect arbitrary Salesforce responses into public error messages.
-function oauthErrorMessage(value: unknown): string {
-  if (!value || typeof value !== "object") return "Salesforce returned an unexpected OAuth response.";
-  const data = value as Record<string, unknown>;
-  const error = typeof data.error === "string" ? data.error : "oauth_error";
-  const detail = typeof data.error_description === "string" ? data.error_description : "";
-  return `${error}${detail ? `: ${detail}` : ""}`.slice(0, 300);
-}
-
 function apiErrorMessage(value: unknown): string {
   if (!value || typeof value !== "object") return "Salesforce returned an unexpected error.";
   const data = value as Record<string, unknown>;
   const code = typeof data.errorCode === "string" ? data.errorCode : "api_error";
   const detail = typeof data.message === "string" ? data.message : "";
   return `${code}${detail ? `: ${detail}` : ""}`.slice(0, 300);
-}
-
-function extractIdentity(identityUrl?: string): { organizationId?: string; userId?: string } {
-  if (!identityUrl) return {};
-  let identity: URL;
-  try {
-    identity = new URL(identityUrl);
-  } catch {
-    return {};
-  }
-  // Identity URL may be on login.salesforce.com or the org My Domain.
-  if (identity.protocol !== "https:" || !isSalesforceHostname(identity.hostname)) return {};
-  const match = identity.pathname.match(/^\/id\/(00D[A-Za-z0-9]{12,15})\/(005[A-Za-z0-9]{12,15})\/?$/);
-  return match ? { organizationId: match[1], userId: match[2] } : {};
 }
 
 /** This connector is intentionally accessible only from the local backend. */
@@ -137,109 +111,131 @@ export class SalesforceOrgConnection {
   private readonly describeCache = new Map<string, { expires: number; value: SalesforceSObjectDescribe }>();
   private readonly pendingDescribes = new Map<string, Promise<SalesforceSObjectDescribe>>();
 
-  private get loginUrl(): URL {
-    return validateSalesforceUrl(
-      process.env.SALESFORCE_LOGIN_URL || "https://test.salesforce.com",
-      "SALESFORCE_LOGIN_URL"
-    );
+  private selectedOrg: CliOrg | null = null;
+  private readonly cli: SalesforceCliAuth;
+
+  constructor(cli: SalesforceCliAuth = new SalesforceCliAuth()) {
+    this.cli = cli;
   }
 
-  private get clientId(): string {
-    const value = process.env.SALESFORCE_CLIENT_ID?.trim();
-    if (!value) throw new SalesforceConnectionError("SALESFORCE_CLIENT_ID is missing in the backend .env file.", 400);
-    return value;
-  }
-
-  private get clientSecret(): string {
-    const value = process.env.SALESFORCE_CLIENT_SECRET?.trim();
-    if (!value) throw new SalesforceConnectionError("SALESFORCE_CLIENT_SECRET is missing in the backend .env file.", 400);
-    return value;
+  /** Stable scope for org-specific runtime and permission caches. */
+  get cacheScope(): string {
+    return this.selectedOrg
+      ? (this.selectedOrg.orgId || this.selectedOrg.username) + "|" + this.selectedOrg.username
+      : "disconnected";
   }
 
   get status(): SalesforceConnectionStatus {
-    const loginUrl = this.loginUrl;
-    const configured = Boolean(process.env.SALESFORCE_CLIENT_ID?.trim() && process.env.SALESFORCE_CLIENT_SECRET?.trim());
-    const environment = loginUrl.hostname === "test.salesforce.com" || loginUrl.hostname.includes(".sandbox.")
-      ? "sandbox" : loginUrl.hostname === "login.salesforce.com" ? "production" : "custom";
+    const active = this.selectedOrg;
+    const loginHost = this.connection?.instanceUrl
+      ? new URL(this.connection.instanceUrl).hostname
+      : active?.instanceUrl ? new URL(active.instanceUrl).hostname : "";
     return {
-      configured,
+      configured: Boolean(active),
       connecting: Boolean(this.connecting),
-      connected: Boolean(this.connection),
-      authMode: "client_credentials",
-      environment,
-      loginHost: loginUrl.hostname,
+      connected: Boolean(active && this.connection),
+      authMode: "salesforce_cli",
+      environment: active?.environment || "custom",
+      loginHost,
+      ...(active ? { username: active.username, ...(active.alias ? { alias: active.alias } : {}) } : {}),
       ...(this.connection ? {
         organizationId: this.connection.organizationId,
         userId: this.connection.userId,
         instanceUrl: this.connection.instanceUrl,
         connectedAt: this.connection.connectedAt
       } : {}),
-      ...(!configured ? { message: "Add SALESFORCE_CLIENT_ID and SALESFORCE_CLIENT_SECRET to the backend .env file." }
+      ...(!active ? { message: "Choose an existing CLI org or sign in through Salesforce." }
         : this.lastError ? { message: this.lastError } : {})
     };
   }
 
+  async listOrgs(): Promise<{ orgs: Array<CliOrg & { selected: boolean }> }> {
+    const orgs = await this.cli.listOrgs();
+    return { orgs: orgs.map(org => ({
+      ...org, selected: org.username === this.selectedOrg?.username
+    })) };
+  }
+
+  async login(environment: "sandbox" | "production"): Promise<SalesforceConnectionStatus> {
+    const username = await this.cli.login(environment);
+    await this.selectOrg(username);
+    return this.status;
+  }
+
+  async selectOrg(username: string): Promise<SalesforceConnectionStatus> {
+    if (this.connecting) await this.connecting.catch(() => undefined);
+    const orgs = await this.cli.listOrgs();
+    const target = orgs.find(org => org.username === username);
+    if (!target) throw new SalesforceConnectionError("Choose an org listed by Salesforce CLI.", 400);
+    if (target.status !== "connected") {
+      throw new SalesforceConnectionError("This org's CLI authorization has expired. Reauthorize it with browser login.", 401);
+    }
+    const previousOrg = this.selectedOrg;
+    const previousConnection = this.connection;
+    this.selectedOrg = target;
+    this.connection = null;
+    this.lastError = null;
+    try {
+      await this.connect(true);
+    } catch (error) {
+      this.selectedOrg = previousOrg;
+      this.connection = previousConnection;
+      throw error;
+    }
+    this.clearMetadataCaches();
+    return this.status;
+  }
+
+  disconnect(): SalesforceConnectionStatus {
+    this.selectedOrg = null;
+    this.connection = null;
+    this.lastError = null;
+    this.clearMetadataCaches();
+    // Detaches the Analyzer only; user's Salesforce CLI auth remains intact.
+    return this.status;
+  }
+
+  private clearMetadataCaches(): void {
+    this.describeCache.clear();
+    this.pendingDescribes.clear();
+  }
+
   /**
-   * Safe to call from backend startup, the status route, and a query.
-   * Concurrent calls share one token request. Failed attempts are throttled,
-   * but a manual reconnect can bypass the cooldown.
+   * No client credentials grant. Every retry asks Salesforce CLI to supply
+   * its currently valid token (refreshing it through CLI when necessary).
    */
   async connect(force = false): Promise<void> {
     if (this.connecting) return this.connecting;
+    if (!this.selectedOrg) {
+      throw new SalesforceConnectionError("Select or sign in to a Salesforce org first.", 409);
+    }
     if (this.connection && !force) return;
     if (!force && this.lastError && Date.now() - this.lastAttemptAt < RECONNECT_COOLDOWN_MS) {
       throw new SalesforceConnectionError(this.lastError, 503);
     }
+    const target = this.selectedOrg.username;
     this.lastAttemptAt = Date.now();
     this.lastError = null;
-    this.connecting = this.acquireToken().then((connection) => {
-      this.connection = connection;
+    this.connecting = this.cli.session(target).then(session => {
+      if (this.selectedOrg?.username !== target) {
+        throw new SalesforceConnectionError("The selected Salesforce org changed during authentication.", 409);
+      }
+      const instanceUrl = validateSalesforceUrl(session.instanceUrl, "Salesforce instance URL").origin;
+      this.connection = {
+        accessToken: session.accessToken,
+        instanceUrl,
+        ...(session.orgId ? { organizationId: session.orgId } : {}),
+        ...(session.userId ? { userId: session.userId } : {}),
+        connectedAt: new Date().toISOString()
+      };
       this.lastError = null;
-    }).catch((err: unknown) => {
+    }).catch((error: unknown) => {
       this.connection = null;
-      this.lastError = err instanceof Error ? err.message : "Salesforce authentication failed.";
-      throw err;
-    }).finally(() => {
-      this.connecting = null;
-    });
+      this.lastError = error instanceof SalesforceCliError || error instanceof SalesforceConnectionError
+        ? error.message : "Salesforce CLI session could not be established.";
+      throw new SalesforceConnectionError(this.lastError, 503);
+    }).finally(() => { this.connecting = null; });
     return this.connecting;
-  }
-
-  private async acquireToken(): Promise<SalesforceOAuthConnection> {
-    const endpoint = new URL("/services/oauth2/token", this.loginUrl);
-    const form = new URLSearchParams({
-      grant_type: "client_credentials",
-      client_id: this.clientId,
-      client_secret: this.clientSecret
-    });
-    let response: Response;
-    try {
-      response = await fetch(endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
-        body: form,
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
-      });
-    } catch {
-      throw new SalesforceConnectionError("Unable to reach the Salesforce OAuth endpoint. Check VPN/network and login URL.", 502);
-    }
-    const payload: unknown = await response.json().catch(() => null);
-    if (!response.ok) {
-      throw new SalesforceConnectionError(`Salesforce authentication failed: ${oauthErrorMessage(payload)}`, 502);
-    }
-    const token = payload as SalesforceOAuthToken | null;
-    if (!token?.access_token || !token.instance_url ||
-        (token.token_type && token.token_type.toLowerCase() !== "bearer")) {
-      throw new SalesforceConnectionError("Salesforce OAuth response was missing a bearer token or instance URL.", 502);
-    }
-    // Never send bearer tokens to an untrusted host received in a response.
-    const instanceUrl = validateSalesforceUrl(token.instance_url, "Salesforce instance URL").origin;
-    return {
-      accessToken: token.access_token,
-      instanceUrl,
-      ...extractIdentity(token.id),
-      connectedAt: new Date().toISOString()
-    };
   }
 
   async query(soql: string, api: SalesforceQueryApi): Promise<{
@@ -265,7 +261,7 @@ export class SalesforceOrgConnection {
     const sessionExpired = response.status === 401 || (response.status === 403 && errors.some((error) =>
       error && typeof error === "object" && (error as Record<string, unknown>).errorCode === "INVALID_SESSION_ID"));
     if (sessionExpired) {
-      // Client Credentials has no refresh token; issue a fresh credentials grant.
+      // Ask Salesforce CLI to refresh its existing org authorization.
       await this.connect(true);
       response = await this.sendQuery(trimmed, api);
       payload = await response.json().catch(() => null);
@@ -364,8 +360,8 @@ export class SalesforceOrgConnection {
   }
 
   /**
-   * Read relationship metadata in the current org, using the existing
-   * Client Credentials session. No token or Describe response is sent to the UI.
+   * Read relationship metadata in the current org, using the selected
+   * Salesforce CLI session. No token or Describe response is sent to the UI.
    * Describe results are cached briefly; failures are not cached.
    */
   async describeSObject(objectName: string): Promise<SalesforceSObjectDescribe> {
