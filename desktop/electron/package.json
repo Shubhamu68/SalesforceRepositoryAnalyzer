@@ -24,6 +24,8 @@
     "files": [
       "main.mjs",
       "runtimePaths.mjs",
+      "startupTrace.mjs",
+      "splash.html",
       "package.json"
     ],
     "extraResources": [
