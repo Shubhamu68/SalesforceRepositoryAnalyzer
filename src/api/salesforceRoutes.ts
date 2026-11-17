@@ -40,10 +40,11 @@ export function createSalesforceRouter(
     res.json(connection.status);
   });
 
-  router.get("/orgs", async (_req, res) => {
+  router.get("/orgs", async (req, res) => {
     try {
       res.setHeader("Cache-Control", "no-store");
-      res.json(await connection.listAuthorizedOrgs());
+      // Explicit Refresh orgs bypasses the temporary local discovery cache.
+      res.json(await connection.listAuthorizedOrgs(req.query.refresh === "1"));
     } catch (error) { sendError(error, res); }
   });
 
