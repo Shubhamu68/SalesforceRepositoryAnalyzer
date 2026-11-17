@@ -33,3 +33,5 @@
    an authorized CLI org is available; do not imply that clicks are accepted. */
 .sf-cli-login-actions button:disabled{opacity:.45;color:#798aa1;background:#e8eef7;border-color:#cfd9e7;cursor:not-allowed;box-shadow:none}
 .sf-cli-login-hint{font-size:11px;color:#647b97;background:#f3f7fc;border:1px solid #dfe8f6;padding:9px 12px;border-radius:6px;line-height:1.6;margin:0}
+
+.sf-cli-discovery-warning{font-size:12px;line-height:1.6;background:#fff8eb;border:1px solid #efdaa8;border-radius:7px;padding:11px 13px;color:#87621e;margin:0}
