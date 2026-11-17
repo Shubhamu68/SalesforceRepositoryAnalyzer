@@ -135,3 +135,36 @@ test("expired CLI org is rejected and current selected org is preserved", async 
   assert.equal(connection.status.username, production.username);
   assert.equal(connection.status.connected, true);
 });
+
+test("derives current Salesforce User ID via org display user when org display omits it", async () => {
+  const calls: string[][] = [];
+  const auth = new SalesforceCliAuth(async args => {
+    calls.push(args);
+    if (args[1] === "display" && args[2] === "user") {
+      return result({ id: "005000000000007AAA", username: production.username });
+    }
+    return result({
+      instanceUrl: production.instanceUrl,
+      orgId: production.orgId,
+      accessToken: "legacy-token",
+    });
+  });
+  const session = await auth.session(production.username);
+  assert.equal(session.userId, "005000000000007AAA");
+  assert.equal(calls[1].join(" "),
+    "org display user --target-org developer@example.com --json");
+});
+
+test("missing user metadata does not block a valid CLI org session", async () => {
+  const auth = new SalesforceCliAuth(async args => {
+    if (args[2] === "user") throw new SalesforceCliError("User lookup not allowed");
+    return result({
+      instanceUrl: sandbox.instanceUrl,
+      accessToken: "legacy-token",
+      orgId: sandbox.orgId,
+    });
+  });
+  const session = await auth.session(sandbox.username);
+  assert.equal(session.accessToken, "legacy-token");
+  assert.equal(session.userId, undefined);
+});
