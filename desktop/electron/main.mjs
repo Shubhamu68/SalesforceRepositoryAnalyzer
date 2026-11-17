@@ -16,7 +16,8 @@ let backend = null;
 let window = null;
 let shuttingDown = false;
 
-if (!app.requestSingleInstanceLock()) app.quit();
+const primaryInstance = app.requestSingleInstanceLock();
+if (!primaryInstance) app.quit();
 else app.on("second-instance", () => {
   if (!window) return;
   if (window.isMinimized()) window.restore();
@@ -145,7 +146,7 @@ async function startBackend() {
 
 app.on("before-quit", stopBackend);
 
-app.whenReady().then(async () => {
+if (primaryInstance) app.whenReady().then(async () => {
   // The UI is local, but still sandbox its renderer and deny sensitive privileges.
   session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
   try {
