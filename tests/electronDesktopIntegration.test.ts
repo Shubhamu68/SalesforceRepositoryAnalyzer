@@ -49,6 +49,11 @@ test("Desktop build is isolated from the current Windows browser portable workfl
   assert.match(workflow, /desktop\/electron\/stage\.mjs/);
   assert.match(workflow, /desktop\/electron\/smoke\.mjs/);
   assert.match(workflow, /build:win/);
+  assert.match(workflow, /SalesforceRepositoryAnalyzer-Desktop-Folder-ZIP/);
+  assert.match(workflow, /Compress-Archive -LiteralPath \$desktopRoot/);
+  assert.match(workflow, /resources\/analyzer\/app\/dist\/api\/server\.js/);
+  assert.match(workflow, /resources\/analyzer\/runtime\/node\.exe/);
+  assert.match(workflow, /SalesforceRepositoryAnalyzer-Desktop-Portable/);
   assert.match(workflow, /upload-artifact@v4/);
   assert.match(legacy, /SalesforceRepositoryAnalyzer-Windows-Portable/);
 });
