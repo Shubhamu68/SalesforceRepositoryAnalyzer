@@ -11,17 +11,14 @@ test("startup auto-enters workspace when an existing backend CLI org is connecte
   assert.equal(shouldShowOrgChooser(true, "manual", true), false);
 });
 
-test("browser sign-in stays disabled while checking CLI or any CLI org is active", () => {
-  const ready = {
-    checking: false, busy: false, hasError: false,
-    connected: false, hasActiveCliOrgs: false,
-  };
+test("Sandbox and Production sign-in are enabled after CLI discovery, even with an active org", () => {
+  const ready = { checking: false, busy: false };
   assert.equal(canStartBrowserLogin(ready), true);
-  assert.equal(canStartBrowserLogin({ ...ready, checking: true }), false);
-  assert.equal(canStartBrowserLogin({ ...ready, hasActiveCliOrgs: true }), false);
-  assert.equal(canStartBrowserLogin({ ...ready, connected: true }), false);
-  assert.equal(canStartBrowserLogin({ ...ready, hasError: true }), false);
-  assert.equal(canStartBrowserLogin({ ...ready, busy: true }), false);
+  assert.equal(canStartBrowserLogin({ checking: true, busy: false }), false);
+  assert.equal(canStartBrowserLogin({ checking: false, busy: true }), false);
+  // Neither active nor saved orgs are inputs to the browser-login policy.
+  // Change org must offer a fresh browser authorization without disconnecting.
+  assert.deepEqual(Object.keys(ready).sort(), ["busy", "checking"]);
 });
 
 test("main app auto-enters on connected startup, but keeps explicit Change org open", () => {
@@ -38,12 +35,16 @@ test("main app auto-enters on connected startup, but keeps explicit Change org o
   assert.match(login, /Back to workspace/);
 });
 
-test("login shows visibly disabled browser buttons until no active CLI authorizations remain", () => {
+test("Change org always offers Sandbox and Production login after CLI discovery", () => {
   const login = readFileSync("web/src/components/SalesforceCliLogin.tsx", "utf8");
+  const policy = readFileSync("web/src/utils/salesforceAuthUi.ts", "utf8");
   const css = readFileSync("web/src/components/SalesforceCliLogin.css", "utf8");
   assert.equal((login.match(/disabled=\{!canLogInWithBrowser\}/g) ?? []).length, 2);
-  assert.match(login, /orgs\.some\(org => org\.status === "saved"\)/);
-  assert.match(login, /Saved Salesforce CLI authorizations are listed above/);
+  assert.match(login, /checking: loading, busy: Boolean\(busy\)/);
+  assert.doesNotMatch(login, /hasActiveCliOrgs|hasError: Boolean\(error\)|connected: Boolean\(current\?\.connected\)/);
+  assert.doesNotMatch(policy, /!state\.connected|!state\.hasActiveCliOrgs/);
+  assert.match(login, /Change Salesforce org/);
+  assert.match(login, /Current org:/);
   assert.match(css, /\.sf-cli-login-actions button:disabled/);
 });
 
