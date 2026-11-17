@@ -108,6 +108,7 @@ export class SalesforceOrgConnection {
   private connecting: Promise<void> | null = null;
   private lastAttemptAt = 0;
   private lastError: string | null = null;
+  private sessionGeneration = 0;
   private readonly describeCache = new Map<string, { expires: number; value: SalesforceSObjectDescribe }>();
   private readonly pendingDescribes = new Map<string, Promise<SalesforceSObjectDescribe>>();
 
@@ -196,6 +197,7 @@ export class SalesforceOrgConnection {
   }
 
   private clearMetadataCaches(): void {
+    this.sessionGeneration++;
     this.describeCache.clear();
     this.pendingDescribes.clear();
   }
@@ -255,6 +257,7 @@ export class SalesforceOrgConnection {
       throw new SalesforceConnectionError("Enter one read-only SELECT SOQL query (maximum 10,000 characters).", 400);
     }
     await this.connect();
+    const sessionGeneration = this.sessionGeneration;
     let response = await this.sendQuery(trimmed, api);
     let payload: unknown = await response.json().catch(() => null);
     const errors = Array.isArray(payload) ? payload : [payload];
@@ -266,6 +269,7 @@ export class SalesforceOrgConnection {
       response = await this.sendQuery(trimmed, api);
       payload = await response.json().catch(() => null);
     }
+    if (sessionGeneration !== this.sessionGeneration) throw new SalesforceConnectionError("Salesforce org changed during the query. Retry.", 409);
     if (!response.ok) {
       const apiErrors = Array.isArray(payload) ? payload : [payload];
       throw new SalesforceConnectionError(
@@ -302,6 +306,7 @@ export class SalesforceOrgConnection {
       throw new SalesforceConnectionError("Only a single read-only SELECT SOQL query is supported.", 400);
     }
     await this.connect();
+    const sessionGeneration = this.sessionGeneration;
     const all: T[] = [];
     let nextPath: string | null = null;
     let retried = false;
@@ -313,6 +318,7 @@ export class SalesforceOrgConnection {
       ? minimumVersion : requested;
     const apiBase = `/services/data/${effectiveVersion}/${api === "tooling" ? "tooling/" : ""}query/`;
     for (;;) {
+      if (sessionGeneration !== this.sessionGeneration) throw new SalesforceConnectionError("Salesforce org changed during the query. Retry.", 409);
       const conn = this.connection;
       if (!conn) throw new SalesforceConnectionError("Salesforce connection unavailable.", 503);
       const url: URL = new URL(nextPath ?? apiBase, conn.instanceUrl);
@@ -331,6 +337,7 @@ export class SalesforceOrgConnection {
         throw new SalesforceConnectionError("Unable to retrieve Salesforce permission data.", 502);
       }
       const payload: unknown = await response.json().catch(() => null);
+      if (sessionGeneration !== this.sessionGeneration) throw new SalesforceConnectionError("Salesforce org changed during the query. Retry.", 409);
       if (response.status === 401 && !retried) {
         retried = true;
         all.length = 0;
@@ -368,7 +375,8 @@ export class SalesforceOrgConnection {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(objectName)) {
       throw new SalesforceConnectionError("Invalid Salesforce object API name.", 400);
     }
-    const key = objectName.toLowerCase();
+    const sessionGeneration = this.sessionGeneration;
+    const key = this.cacheScope + "|" + objectName.toLowerCase();
     const cached = this.describeCache.get(key);
     if (cached && cached.expires > Date.now()) return cached.value;
     const inflight = this.pendingDescribes.get(key);
@@ -401,6 +409,7 @@ export class SalesforceOrgConnection {
         const errors = Array.isArray(payload) ? payload : [payload];
         throw new SalesforceConnectionError(errors.map(apiErrorMessage).join(" | ").slice(0, 500), response.status);
       }
+      if (sessionGeneration !== this.sessionGeneration) throw new SalesforceConnectionError("Salesforce org changed during Describe. Retry.", 409);
       const data = payload as SalesforceSObjectDescribe | null;
       if (!data || !Array.isArray(data.fields) || !Array.isArray(data.childRelationships)) {
         throw new SalesforceConnectionError("Invalid Salesforce sObject Describe response.", 502);
