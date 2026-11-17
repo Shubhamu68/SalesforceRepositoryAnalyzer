@@ -27,7 +27,7 @@ export function salesforceConnectionLabel(state: SalesforceConnectionState): str
   switch (state) {
     case "connected": return "Salesforce connected";
     case "connecting": return "Salesforce connecting…";
-    case "not-configured": return "Salesforce not configured";
+    case "not-configured": return "Salesforce not connected";
     case "unavailable": return "Salesforce unavailable";
   }
 }
@@ -45,7 +45,7 @@ export function analysisModeHint(
       ? prefix + " · Salesforce connection required"
       : prefix + " · Salesforce verification unavailable";
   }
-  return prefix + " · Salesforce not configured";
+  return prefix + " · Salesforce not connected";
 }
 
 /** Avoid repeating the generic folder prompt inside the setup modal. */
@@ -60,8 +60,6 @@ export function repositorySetupMessage(reason: string | undefined, message: stri
 }
 
 /** Acknowledge repository-only mode without repeating backend technical guidance. */
-export function orgPreflightMessage(missing: readonly string[] | undefined): string {
-  return missing?.length
-    ? "Missing " + missing.join(", ") + ". Run repository-only analysis?"
-    : "Salesforce credentials are missing. Run repository-only analysis?";
+export function orgPreflightMessage(_missing: readonly string[] | undefined): string {
+  return "No Salesforce org is connected. Continue with repository-only analysis, or connect through Salesforce CLI first?";
 }

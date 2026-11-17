@@ -6,6 +6,7 @@ import PermissionIndicator from "./components/PermissionIndicator";
 import type { PermissionEvidence } from "./components/permissionPresentation";
 import StackTraceImpact from "./components/StackTraceImpact";
 import SalesforceOrgConnection from "./components/SalesforceOrgConnection";
+import SalesforceCliLogin from "./components/SalesforceCliLogin";
 import AnalysisLoadingOverlay from "./components/AnalysisLoadingOverlay";
 import ReportOutputSetupModal from "./components/ReportOutputSetupModal";
 import RepositorySetupModal from "./components/RepositorySetupModal";
@@ -130,6 +131,7 @@ function App() {
   const [repositoryName, setRepositoryName] = useState<string>("");
   const [apiConnected, setApiConnected] = useState(false);
   const [salesforceConnection, setSalesforceConnection] = useState<SalesforceConnectionState>("connecting");
+  const [authDismissed, setAuthDismissed] = useState(false);
   const [lastSoql, setLastSoql] = useState<SoqlAnalysisResult | null>(null);
   const [reportFolderModalOpen, setReportFolderModalOpen] = useState(false);
   const [reportFolderExplanation, setReportFolderExplanation] = useState("");
@@ -279,7 +281,7 @@ function App() {
       if (!response.ok) {
         setOrgWarning({
           kind: "ERROR", title: "Salesforce connection unavailable",
-          message: payload.error || "Salesforce credentials are invalid or the org connection is unavailable. Correct the .env values and retry.",
+          message: payload.error || "The selected Salesforce CLI org is unavailable. Reauthenticate through Salesforce browser login.",
         });
         return null;
       }
@@ -287,7 +289,7 @@ function App() {
         const confirmed = await new Promise<boolean>(resolve => {
           orgWarningResolver.current = resolve;
           setOrgWarning({
-            kind: "WARNING", title: "Salesforce verification not configured",
+            kind: "WARNING", title: "Salesforce verification not connected",
             message: orgPreflightMessage(payload.missing),
           });
         });
@@ -1022,6 +1024,27 @@ function App() {
     </section>
   );
 
+  if (!authDismissed) {
+    return <SalesforceCliLogin
+      onComplete={() => {
+        setSalesforceConnection("connected");
+        setAuthDismissed(true);
+        setResult(null);
+        setLastSoql(null);
+      }}
+      onSkip={() => {
+        void fetch("/api/salesforce/disconnect", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+        }).catch(() => undefined).finally(() => {
+          setSalesforceConnection("not-configured");
+          setAuthDismissed(true);
+          setResult(null);
+          setLastSoql(null);
+        });
+      }}
+    />;
+  }
+
   return (
     <div className="workspace">
       <header className="topbar">
@@ -1034,6 +1057,11 @@ function App() {
             <span className="connection-dot" />{repositoryConnectionIndicator(apiConnected, repoChecked, repoReady).label}
           </span>
           <span className={`connection ${salesforceConnection === "connected" ? "online" : "offline"}`} title="Salesforce authentication status"><span className="connection-dot" />{salesforceConnectionLabel(salesforceConnection)}</span>
+          <button type="button" className="sf-cli-topbar-change" onClick={() => {
+            setAuthDismissed(false);
+            setResult(null);
+            setLastSoql(null);
+          }}>Change org</button>
           <span className="avatar">RA</span>
         </div>
       </header>

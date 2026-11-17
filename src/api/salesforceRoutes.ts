@@ -1,31 +1,95 @@
 import { Router } from "express";
 import { SalesforceConnectionError, SalesforceOrgConnection } from "../salesforce/SalesforceOrgConnection.js";
 
-/** Local-only backend access. No OAuth browser routes or client secrets exposed. */
-export function createSalesforceRouter(connection: SalesforceOrgConnection): Router {
+/**
+ * Localhost-only Salesforce CLI session management. These endpoints never
+ * return OAuth tokens; sign-in occurs on Salesforce's own browser login page.
+ */
+export function createSalesforceRouter(
+  connection: SalesforceOrgConnection,
+  onConnectionChange: () => void = () => {},
+): Router {
   const router = Router();
 
+  router.use((req, res, next) => {
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      const origin = req.header("Origin");
+      if (origin) {
+        let allowed = false;
+        try {
+          const url = new URL(origin);
+          allowed = url.protocol === "http:" &&
+            (url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]");
+        } catch { /* fail closed on malformed origins */ }
+        if (!allowed) { res.status(403).json({ error: "Salesforce actions require the local Analyzer UI." }); return; }
+      }
+      if (req.method === "POST" && !req.is("application/json")) {
+        res.status(415).json({ error: "Use application/json for Salesforce actions." }); return;
+      }
+    }
+    next();
+  });
+
   router.get("/status", (_req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    res.json(connection.status);
+  });
+
+  router.get("/orgs", async (_req, res) => {
     try {
       res.setHeader("Cache-Control", "no-store");
-      // Opening the UI also triggers connection if the startup attempt failed.
-      if (!connection.status.connected && connection.status.configured) {
-        void connection.connect().catch(() => undefined);
+      res.json(await connection.listAuthorizedOrgs());
+    } catch (error) { sendError(error, res); }
+  });
+
+  router.post("/select", async (req, res) => {
+    try {
+      const target = typeof req.body?.target === "string" ? req.body.target : "";
+      if (!/^[a-zA-Z0-9_.@+-]{1,255}$/.test(target)) {
+        res.status(400).json({ error: "Select a valid Salesforce CLI org." }); return;
       }
+      onConnectionChange();
+      await connection.selectOrg(target);
+      onConnectionChange();
+      res.setHeader("Cache-Control", "no-store");
       res.json(connection.status);
     } catch (error) {
+      onConnectionChange();
       sendError(error, res);
     }
   });
 
-  router.post("/reconnect", async (_req, res) => {
+  router.post("/login-web", async (req, res) => {
     try {
+      const environment = req.body?.environment;
+      if (environment !== "sandbox" && environment !== "production") {
+        res.status(400).json({ error: "Choose Sandbox or Production for Salesforce login." }); return;
+      }
+      onConnectionChange();
+      await connection.loginWeb(environment);
+      onConnectionChange();
       res.setHeader("Cache-Control", "no-store");
-      await connection.connect(true);
       res.json(connection.status);
     } catch (error) {
+      onConnectionChange();
       sendError(error, res);
     }
+  });
+
+  router.post("/disconnect", (_req, res) => {
+    connection.disconnect();
+    onConnectionChange();
+    res.setHeader("Cache-Control", "no-store");
+    res.json(connection.status);
+  });
+
+  router.post("/reconnect", async (_req, res) => {
+    try {
+      await connection.connect(true);
+      onConnectionChange();
+      res.setHeader("Cache-Control", "no-store");
+      res.json(connection.status);
+    } catch (error) { sendError(error, res); }
   });
 
   router.post("/query", async (req, res) => {
@@ -33,20 +97,19 @@ export function createSalesforceRouter(connection: SalesforceOrgConnection): Rou
       const soql = typeof req.body?.soql === "string" ? req.body.soql : "";
       const api = req.body?.api;
       if (api !== "data" && api !== "tooling") {
-        res.status(400).json({ error: "api must be 'data' or 'tooling'." });
-        return;
+        res.status(400).json({ error: "api must be 'data' or 'tooling'." }); return;
       }
       res.setHeader("Cache-Control", "no-store");
       res.json(await connection.query(soql, api));
-    } catch (error) {
-      sendError(error, res);
-    }
+    } catch (error) { sendError(error, res); }
   });
 
   return router;
 }
 
 function sendError(error: unknown, res: import("express").Response): void {
-  const statusCode = error instanceof SalesforceConnectionError ? error.statusCode : 500;
-  res.status(statusCode).json({ error: error instanceof Error ? error.message : "Salesforce request failed." });
+  const status = error instanceof SalesforceConnectionError ? error.statusCode : 503;
+  res.status(status).json({
+    error: error instanceof Error ? error.message : "Salesforce CLI action failed.",
+  });
 }

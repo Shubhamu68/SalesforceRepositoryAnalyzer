@@ -1,56 +1,49 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { OrgAnalysisPreflightService, OrgAnalysisGuardError } from "../src/services/OrgAnalysisPreflightService.js";
+import type { SalesforceOrgConnection } from "../src/salesforce/SalesforceOrgConnection.js";
 import { buildWindowsFolderPickerScript } from "../src/services/windowsReportFolderPicker.js";
 
-test("both missing credentials permit repo-only analysis only after explicit confirmation", async () => {
-  let connectionCalls = 0;
-  const service = new OrgAnalysisPreflightService({ connect: async () => { connectionCalls++; } }, {});
+function fake(connected: boolean, connect: () => Promise<void> = async () => {}) {
+  return { status: { configured: connected } as SalesforceOrgConnection["status"], connect };
+}
+
+test("no CLI org selected permits repository-only analysis only with confirmation", async () => {
+  let calls = 0;
+  const service = new OrgAnalysisPreflightService(fake(false, async () => { calls++; }));
   const status = await service.check();
   assert.equal(status.mode, "REPOSITORY_ONLY");
-  assert.deepEqual(status.missing, ["SALESFORCE_CLIENT_ID", "SALESFORCE_CLIENT_SECRET"]);
-  assert.match(status.warning ?? "", /repository metadata only/);
-  await assert.rejects(service.authorize(false), (error: unknown) => error instanceof OrgAnalysisGuardError &&
-    error.code === "ORG_REPOSITORY_ONLY_CONFIRMATION_REQUIRED");
-  assert.equal((await service.authorize(true)).mode, "REPOSITORY_ONLY");
-  assert.equal(connectionCalls, 0);
-});
-
-test("one missing client credential warns with exact missing key and does not authenticate", async () => {
-  let invoked = 0;
-  const service = new OrgAnalysisPreflightService({ connect: async () => { invoked++; } },
-    { SALESFORCE_CLIENT_ID: "configured" });
-  const result = await service.check();
-  assert.deepEqual(result.missing, ["SALESFORCE_CLIENT_SECRET"]);
-  assert.equal(invoked, 0);
-});
-
-test("configured valid credentials authorize org-backed checks", async () => {
-  let invoked = 0;
-  const service = new OrgAnalysisPreflightService({ connect: async () => { invoked++; } },
-    { SALESFORCE_CLIENT_ID: "valid-client", SALESFORCE_CLIENT_SECRET: "valid-secret" });
-  const status = await service.authorize(false);
-  assert.equal(status.mode, "ORG_AND_REPOSITORY");
   assert.deepEqual(status.missing, []);
-  assert.equal(invoked, 1);
+  assert.match(status.warning ?? "", /choose|connect|select|CLI/i);
+  await assert.rejects(service.authorize(false), (error: unknown) =>
+    error instanceof OrgAnalysisGuardError && error.code === "ORG_REPOSITORY_ONLY_CONFIRMATION_REQUIRED");
+  assert.equal((await service.authorize(true)).mode, "REPOSITORY_ONLY");
+  assert.equal(calls, 0);
 });
 
-test("invalid client credentials block with an error; no repo-only bypass", async () => {
-  const service = new OrgAnalysisPreflightService({
-    connect: async () => { throw new Error("invalid_client"); },
-  }, { SALESFORCE_CLIENT_ID: "bad", SALESFORCE_CLIENT_SECRET: "wrong" });
+test("selected Salesforce CLI org enables existing org-backed analysis", async () => {
+  let calls = 0;
+  const service = new OrgAnalysisPreflightService(fake(true, async () => { calls++; }));
+  const verdict = await service.authorize(false);
+  assert.equal(verdict.mode, "ORG_AND_REPOSITORY");
+  assert.deepEqual(verdict.missing, []);
+  assert.equal(calls, 1);
+});
+
+test("expired selected CLI session fails closed, even with repo-only acknowledgment", async () => {
+  const service = new OrgAnalysisPreflightService(fake(true, async () => {
+    throw new Error("CLI token expired");
+  }));
   await assert.rejects(service.authorize(true), (error: unknown) =>
     error instanceof OrgAnalysisGuardError &&
-    error.code === "SALESFORCE_CREDENTIALS_INVALID" &&
-    /Invalid Salesforce credentials/.test(error.message));
+    error.code === "SALESFORCE_SESSION_INVALID" &&
+    /Reauthenticate/.test(error.message) &&
+    !/CLI token expired/.test(error.message));
 });
 
-test("unavailable Salesforce authentication endpoint also blocks when creds are configured", async () => {
-  const service = new OrgAnalysisPreflightService({
-    connect: async () => { throw new Error("Unable to reach the Salesforce OAuth endpoint"); },
-  }, { SALESFORCE_CLIENT_ID: "x", SALESFORCE_CLIENT_SECRET: "y" });
-  await assert.rejects(service.check(), (error: unknown) =>
-    error instanceof OrgAnalysisGuardError && /unavailable org connection/.test(error.message));
+test("missing CLI org selection is independent of any environment variables", async () => {
+  const service = new OrgAnalysisPreflightService(fake(false));
+  assert.equal((await service.authorize(true)).mode, "REPOSITORY_ONLY");
 });
 
 test("repository-specific folder picker uses same topmost native dialog", () => {
