@@ -9,7 +9,7 @@ type CliOrg = {
   environment: "sandbox" | "production";
   status: "saved" | "expired";
 };
-type OrgList = { cliVersion: string; orgs: CliOrg[] };
+type OrgList = { cliVersion: string; orgs: CliOrg[]; warning?: string };
 type AuthStatus = { connected: boolean; username?: string; alias?: string; organizationId?: string };
 
 async function requestJson(path: string, options?: RequestInit): Promise<Record<string, unknown>> {
@@ -41,6 +41,8 @@ export default function SalesforceCliLogin({
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  const [discoveryWarning, setDiscoveryWarning] = useState("");
+  const [failedSavedSelection, setFailedSavedSelection] = useState(false);
   const [current, setCurrent] = useState<AuthStatus | null>(null);
   // A failed CLI version check must not make Sandbox/Production buttons
   // silently inert. The backend remains authoritative about compatibility.
@@ -48,38 +50,41 @@ export default function SalesforceCliLogin({
   const detectedVersion = error.match(/Salesforce CLI (\d+\.\d+\.\d+) is too old/i)?.[1];
   const hasActiveCliOrgs = orgs.some(org => org.status === "saved");
   const canLogInWithBrowser = canStartBrowserLogin({
-    checking: loading, busy: Boolean(busy), hasError: Boolean(error),
-    connected: Boolean(current?.connected), hasActiveCliOrgs,
+    checking: loading, busy: Boolean(busy),
+    hasError: Boolean(error) && !failedSavedSelection,
+    connected: Boolean(current?.connected),
+    hasActiveCliOrgs: hasActiveCliOrgs && !failedSavedSelection,
   });
 
   const refresh = useCallback(async () => {
     setLoading(true);
     setError("");
+    setDiscoveryWarning("");
     try {
-      const [orgList, status] = await Promise.all([
-        requestJson("/api/salesforce/orgs"),
-        requestJson("/api/salesforce/status"),
-      ]);
-      const list = orgList as unknown as OrgList;
+      // A connected backend session is sufficient to enter the workspace.
+      // Don't await unrelated saved-org discovery before deciding to enter.
+      const status = await requestJson("/api/salesforce/status");
+      const session = status as AuthStatus;
+      setCurrent(session);
+      if (autoContinueConnected && session.connected) {
+        onComplete(session);
+        return;
+      }
+      const payload = await requestJson("/api/salesforce/orgs");
+      const list = payload as unknown as OrgList;
       const next = Array.isArray(list.orgs) ? list.orgs : [];
       setOrgs(next);
       setCliVersion(typeof list.cliVersion === "string" ? list.cliVersion : "");
-      const session = status as AuthStatus;
+      setDiscoveryWarning(typeof list.warning === "string" ? list.warning : "");
       setSelected(previous => next.some(org => org.username === session.username)
         ? session.username!
         : next.some(org => org.username === previous) ? previous
         : next.find(org => org.status === "saved")?.username ?? next[0]?.username ?? "");
-      setCurrent(session);
-      // A previously connected CLI org is sufficient to enter the workspace.
-      // Explicit Change org navigation must not auto-close the chooser.
-      if (autoContinueConnected && session.connected) onComplete(session);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Salesforce CLI could not be found.");
     } finally {
       setLoading(false);
     }
-  // Only recompute the initial refresh if the intended auto-entry mode changes.
-  // onComplete is invoked directly from the result, not from a polling timer.
   }, [autoContinueConnected]);
 
   useEffect(() => { void refresh(); }, [refresh]);
@@ -96,6 +101,7 @@ export default function SalesforceCliLogin({
       setCurrent(status as AuthStatus);
       onComplete(status as AuthStatus);
     } catch (cause) {
+      setFailedSavedSelection(true);
       setError(cause instanceof Error ? cause.message : "Could not connect this Salesforce org.");
     } finally { setBusy(""); }
   }
@@ -142,7 +148,7 @@ export default function SalesforceCliLogin({
           <select id="sf-cli-org" className="sf-cli-select" value={selected}
             onChange={event => setSelected(event.target.value)}
             disabled={loading || Boolean(busy) || orgs.length === 0}>
-            {orgs.length === 0 && <option value="">{cliOutdated ? "Update Salesforce CLI to load saved orgs" : error ? "Cannot load CLI orgs" : "No saved orgs found"}</option>}
+            {orgs.length === 0 && <option value="">{cliOutdated ? "Update Salesforce CLI to load saved orgs" : discoveryWarning ? "Saved CLI orgs unavailable" : error ? "Cannot load CLI orgs" : "No saved orgs found"}</option>}
             {orgs.map(org => (
               <option key={org.username} value={org.username}>
                 {org.alias ? org.alias + " — " : ""}{org.username} ({org.environment})
@@ -150,7 +156,7 @@ export default function SalesforceCliLogin({
               </option>
             ))}
           </select>
-          <button type="button" className="primary-button" disabled={!selected || Boolean(busy)}
+          <button type="button" className="primary-button" disabled={!selected || loading || Boolean(busy)}
             onClick={() => void selectExisting()}>
             {busy === "select" ? "Connecting…" : "Connect"}
           </button>
@@ -172,7 +178,7 @@ export default function SalesforceCliLogin({
             {busy === "production" ? "Waiting for Production login…" : "Log in to Production"}
           </button>
         </div>
-        {!loading && !error && hasActiveCliOrgs && (
+        {!loading && !error && hasActiveCliOrgs && !failedSavedSelection && (
           <p className="sf-cli-login-hint" role="status">
             Connected Salesforce CLI authorizations are available above. Select an org and click Connect.
             Sandbox and Production browser login is enabled only when no active CLI org is found.
@@ -182,6 +188,12 @@ export default function SalesforceCliLogin({
           ? <p className="sf-cli-pending" role="status">
               Complete sign-in in the Salesforce browser window. The Analyzer will connect automatically afterward.
             </p> : null}
+        {discoveryWarning && <p className="sf-cli-discovery-warning" role="status">{discoveryWarning}</p>}
+        {failedSavedSelection && !current?.connected && (
+          <p className="sf-cli-discovery-warning" role="status">
+            The selected saved org could not connect. You can reauthorize using the Sandbox or Production browser login below.
+          </p>
+        )}
         {cliOutdated ? (
           <div className="sf-cli-upgrade" role="alert">
             <strong>Salesforce CLI update required</strong>
