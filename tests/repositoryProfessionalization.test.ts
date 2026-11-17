@@ -112,7 +112,9 @@ test("issue and PR templates exist; PR commits remain subject to cross-platform 
   const ci = read(".github/workflows/analyzer-regression.yml");
   assert.match(ci, /pull_request:/);
   assert.match(ci, /- main/);
-  assert.match(ci, /- chore\/repository-professionalization/);
+  assert.match(ci, /- 'chore\/\*\*'/);
+  assert.match(ci, /- 'feature\/\*\*'/);
+  assert.match(ci, /- 'fix\/\*\*'/);
   assert.match(ci, /os: \[ubuntu-latest, windows-latest\]/);
   assert.match(ci, /npm run test:all/);
   assert.match(read(".github/pull_request_template.md"), /UAT/);

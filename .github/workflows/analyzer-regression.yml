@@ -3,18 +3,9 @@ on:
   push:
     branches:
       - main
-      - chore/repository-professionalization
-      - feature/nested-soql-relationship-resolution
-      - fix/configurable-report-output
-      - fix/excel-only-soql-reports
-      - feature/repository-setup-and-org-credential-guards
-      - feature/org-fallback-all-access-permissions
-      - fix/platform-event-fls-and-managed-ps-warnings
-      - feature/ui-messaging-cleanup
-      - feature/soql-aggregate-expression-analysis
-      - fix/apex-soql-bind-expression-normalization
-      - fix/issue-19-field-access-evidence-status
-      - feature/compound-field-access-verification
+      - 'feature/**'
+      - 'fix/**'
+      - 'chore/**'
   pull_request:
   workflow_dispatch:
 permissions:
