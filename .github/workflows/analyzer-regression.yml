@@ -2,6 +2,8 @@ name: Salesforce Analyzer Regression
 on:
   push:
     branches:
+      - main
+      - chore/repository-professionalization
       - feature/nested-soql-relationship-resolution
       - fix/configurable-report-output
       - fix/excel-only-soql-reports

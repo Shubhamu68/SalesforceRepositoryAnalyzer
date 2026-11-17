@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Development setup and troubleshooting
+    url: https://github.com/Shubhamu68/SalesforceRepositoryAnalyzer/blob/main/docs/setup/development.md
+    about: Check configuration and test steps before submitting a new issue.

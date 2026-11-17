@@ -1,0 +1,40 @@
+name: Feature request
+description: Suggest a focused improvement to the Analyzer.
+title: "[Feature] "
+body:
+  - type: markdown
+    attributes:
+      value: "Describe the business problem before proposing implementation details. Do not include private org data."
+  - type: textarea
+    id: need
+    attributes:
+      label: Problem to solve
+      description: What task or risk should this feature address?
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected behavior
+      description: What should the user see or be able to do?
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Include 2–4 realistic scenarios and safety constraints.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - SOQL Security Analysis
+        - Access Checker / Object Access Matrix
+        - Stack Trace
+        - Salesforce Org Integration
+        - UI / Reporting
+        - Packaging / Documentation
+        - Other

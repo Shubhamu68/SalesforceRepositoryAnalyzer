@@ -5,6 +5,7 @@ on:
     branches:
       - feature/windows-portable-distribution
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
