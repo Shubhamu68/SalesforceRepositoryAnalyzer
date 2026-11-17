@@ -19,7 +19,12 @@ npm install --no-audit --no-fund
 npm start
 ```
 
-To build a portable executable, run `npm run build:win` from `desktop/electron`, or use the separate **Build Windows Desktop EXE** GitHub Actions workflow.
+To build locally, run `npm run build:win` from `desktop/electron`. The **Build Windows Desktop EXE** GitHub Actions workflow now publishes **two download options**:
+
+- **Desktop-Folder-ZIP (for testing):** Download, extract fully, open `win-unpacked/Salesforce Repository Analyzer.exe`. All Electron DLLs, resources, the bundled Node runtime, and the Analyzer UI/API must remain together. No installer or self-extraction is involved.
+- **Desktop-Portable:** Existing single-file portable `.exe` (self-extracts at launch).
+
+Both distributions still run an **unsigned .exe**. A ZIP does **not** bypass SmartScreen, WDAC, or company endpoint-security policy. If either launch is blocked, ask IT to approve/sign the app; do not disable security protection. The existing **Windows browser portable ZIP** (`Start Analyzer.cmd`) is a separate non-Electron fallback.
 
 **Requirements for users:** Windows 10/11 and Salesforce CLI 2.136+ on PATH for optional org login. Users do not need Node.js, npm, Git or VS Code.
 
