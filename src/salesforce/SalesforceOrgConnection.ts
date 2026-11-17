@@ -135,14 +135,30 @@ export class SalesforceOrgConnection {
     };
   }
 
-  async listAuthorizedOrgs(): Promise<{ cliVersion: string; orgs: CliOrg[] }> {
+  async listAuthorizedOrgs(): Promise<{
+    cliVersion: string;
+    orgs: CliOrg[];
+    warning?: string;
+  }> {
     const cliVersion = await this.cli.version();
-    return { cliVersion, orgs: await this.cli.listOrgs() };
+    try {
+      return { cliVersion, orgs: await this.cli.listOrgs() };
+    } catch {
+      // A local org-discovery failure isn't an authentication failure.
+      // Don't trap the user with an empty list AND disabled browser buttons.
+      return {
+        cliVersion,
+        orgs: [],
+        warning: "Saved CLI orgs could not be loaded. Retry Refresh orgs, or sign in to Sandbox/Production below.",
+      };
+    }
   }
 
   async loginWeb(environment: "sandbox" | "production"): Promise<void> {
     const username = await this.cli.loginWeb(environment);
-    await this.selectOrg(username);
+    // CLI just authorized the username. Don't re-enumerate every saved org,
+    // because a discovery timeout must not invalidate a completed web login.
+    await this.activateOrg({ username, environment, status: "saved" });
   }
 
   async selectOrg(target: string): Promise<void> {
@@ -152,6 +168,10 @@ export class SalesforceOrgConnection {
       org.alias?.toLowerCase() === target.toLowerCase());
     if (!selected) throw new SalesforceConnectionError(
       "The selected Salesforce org is not authorized in CLI. Sign in through the browser.", 400);
+    await this.activateOrg(selected);
+  }
+
+  private async activateOrg(selected: CliOrg): Promise<void> {
     const previousOrg = this.selectedOrg;
     const previousConnection = this.connection;
     const previousError = this.lastError;
