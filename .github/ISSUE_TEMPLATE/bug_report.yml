@@ -1,0 +1,51 @@
+name: Bug report
+description: Reproduce an Analyzer error or unexpected permission/report finding.
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: "Please redact Salesforce org IDs, client secrets, customer records, and private paths before posting."
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is incorrect?
+      placeholder: "The SOQL Analyzer reports..."
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Persona, workflow, example SOQL/Apex and repeatable steps; use sanitized metadata.
+    validations:
+      required: true
+  - type: textarea
+    id: expectation
+    attributes:
+      label: Expected versus actual
+      description: Include exact relevant messages or report columns.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Release tag, branch or commit SHA.
+  - type: dropdown
+    id: workflow
+    attributes:
+      label: Affected feature
+      options:
+        - SOQL Security Analysis
+        - Access Checker
+        - Object Access Matrix
+        - Stack Trace Impact
+        - Salesforce Org Connection
+        - Windows Portable
+        - Other
+  - type: textarea
+    id: notes
+    attributes:
+      label: Logs or screenshots (redacted)
+      description: Never attach credential-bearing files.
