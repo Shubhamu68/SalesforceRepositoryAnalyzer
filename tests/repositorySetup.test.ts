@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { validateSalesforceRepository, RepositorySetupError } from "../src/services/SalesforceRepositoryValidator.js";
 import { RepositoryConfigurationService, REPOSITORY_ENV_KEY } from "../src/services/RepositoryConfigurationService.js";
-import { saveLocalEnvEntry } from "../src/services/LocalEnvFileService.js";
+import { saveLocalEnvEntry, removeLocalEnvEntries } from "../src/services/LocalEnvFileService.js";
 import { createRepositoryRouter } from "../src/api/repositoryRoutes.js";
 import express from "express";
 import type { AddressInfo } from "node:net";
@@ -288,5 +288,32 @@ test("stored repository path stays canonical across repeated validations", async
     // Path identity is canonical even when the configured picker gave the
     // shorter OS-provided alias (common in Windows temp directories).
     assert.equal((await validateSalesforceRepository(f.valid)).repositoryPath, expected);
+  } finally { await f.clean(); }
+});
+
+test("legacy OAuth settings are scrubbed from local .env without changing unrelated config", async () => {
+  const f = await fixture();
+  try {
+    const previous = [
+      "# old client ID remains as an inert comment",
+      "SALESFORCE_CLIENT_ID=deprecated",
+      "export SALESFORCE_CLIENT_SECRET=old-secret",
+      "SALESFORCE_LOGIN_URL=https://test.salesforce.com",
+      "SALESFORCE_REPOSITORY_PATH=C:/work",
+      "SALESFORCE_API_VERSION=v62.0",
+      "",
+    ].join("\r\n");
+    await writeFile(f.envFile, previous);
+    assert.equal(await removeLocalEnvEntries(f.envFile, [
+      "SALESFORCE_CLIENT_ID", "SALESFORCE_CLIENT_SECRET", "SALESFORCE_LOGIN_URL",
+    ]), true);
+    const after = await readFile(f.envFile, "utf8");
+    assert.doesNotMatch(after, /^(?:export )?SALESFORCE_CLIENT_(?:ID|SECRET)=/m);
+    assert.doesNotMatch(after, /^SALESFORCE_LOGIN_URL=/m);
+    assert.match(after, /SALESFORCE_API_VERSION=v62\.0\r\n/);
+    assert.match(after, /SALESFORCE_REPOSITORY_PATH=C:\/work\r\n/);
+    assert.equal(await removeLocalEnvEntries(f.envFile, [
+      "SALESFORCE_CLIENT_ID", "SALESFORCE_CLIENT_SECRET", "SALESFORCE_LOGIN_URL",
+    ]), false);
   } finally { await f.clean(); }
 });
