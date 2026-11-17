@@ -1,0 +1,21 @@
+.sf-login-overlay{position:fixed;inset:0;background:rgba(9,22,42,.86);z-index:200;display:flex;align-items:center;justify-content:center;padding:20px;overflow:auto}
+.sf-login-overlay .sf-login-card{width:min(820px,100%);max-height:min(92vh,950px);overflow:auto;box-shadow:0 24px 70px #07121c75}
+.sf-login-card{background:#fff;border:1px solid #dce6f3;border-radius:12px;padding:28px;color:#1b304e;display:grid;gap:16px}
+.sf-login-heading{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}
+.sf-login-kicker{font-size:10px;color:#2569df;letter-spacing:.1em;font-weight:800}
+.sf-login-heading h2{font-size:23px;margin:8px 0}.sf-login-heading p{margin:0;line-height:1.7;color:#677b96;font-size:12px;max-width:650px}
+.sf-login-actions{display:flex;gap:12px;flex-wrap:wrap}.sf-login-actions button{min-width:165px}
+.sf-login-hint{font-size:11px;line-height:1.65;color:#647a97;margin:0}
+.sf-login-list-head{display:flex;align-items:center;justify-content:space-between;border-top:1px solid #e8edf5;padding-top:16px}
+.sf-login-list-head h3{font-size:14px;margin:0}.sf-login-list-head .secondary-button{padding:8px 12px}
+.sf-login-empty{color:#70829b;font-size:12px;padding:18px 12px;border:1px dashed #d2deed;border-radius:7px;margin:0}
+.sf-login-orgs{display:grid;gap:8px;max-height:270px;overflow:auto}
+.sf-login-org{display:flex;align-items:center;gap:12px;border:1px solid #e2e9f3;border-radius:7px;padding:12px;min-width:0}
+.sf-login-org-info{display:grid;gap:3px;flex:1;min-width:0}
+.sf-login-org-info strong,.sf-login-org-info span{font-size:12px;overflow-wrap:anywhere}
+.sf-login-org-info span,.sf-login-org-info small{color:#70829c;font-size:11px}
+.sf-login-state{font-size:10px;font-weight:750;padding:5px 8px;border-radius:5px;white-space:nowrap}
+.sf-login-state.connected{background:#e9f8ef;color:#18814c}.sf-login-state.expired{background:#fff4e1;color:#9c6316}
+.sf-login-org button{white-space:nowrap;font-size:11px;padding:9px 12px}.sf-login-footer{border-top:1px solid #e8edf5;padding-top:15px;display:flex;justify-content:space-between;align-items:center;gap:12px;color:#687c96;font-size:12px}
+.sf-login-footer strong{color:#244264}
+@media(max-width:600px){.sf-login-card{padding:19px}.sf-login-org{flex-wrap:wrap}.sf-login-org-info{flex-basis:100%}.sf-login-footer{align-items:stretch;flex-direction:column}.sf-login-actions button{flex:1}}
