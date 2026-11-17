@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import "./SalesforceCliLogin.css";
+import { canStartBrowserLogin } from "../utils/salesforceAuthUi";
 
 type CliOrg = {
   alias?: string;
@@ -26,10 +27,12 @@ async function requestJson(path: string, options?: RequestInit): Promise<Record<
  * the Salesforce-hosted browser login page, never by the Analyzer.
  */
 export default function SalesforceCliLogin({
-  onComplete, onSkip, compact = false,
+  onComplete, onSkip, onBack, autoContinueConnected = false, compact = false,
 }: {
   onComplete: (status: AuthStatus) => void;
   onSkip?: () => void;
+  onBack?: () => void;
+  autoContinueConnected?: boolean;
   compact?: boolean;
 }) {
   const [orgs, setOrgs] = useState<CliOrg[]>([]);
@@ -43,7 +46,11 @@ export default function SalesforceCliLogin({
   // silently inert. The backend remains authoritative about compatibility.
   const cliOutdated = /Salesforce CLI [\d.]+ is too old for secure token retrieval/i.test(error);
   const detectedVersion = error.match(/Salesforce CLI (\d+\.\d+\.\d+) is too old/i)?.[1];
-
+  const hasActiveCliOrgs = orgs.some(org => org.status === "saved");
+  const canLogInWithBrowser = canStartBrowserLogin({
+    checking: loading, busy: Boolean(busy), hasError: Boolean(error),
+    connected: Boolean(current?.connected), hasActiveCliOrgs,
+  });
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -57,15 +64,23 @@ export default function SalesforceCliLogin({
       const next = Array.isArray(list.orgs) ? list.orgs : [];
       setOrgs(next);
       setCliVersion(typeof list.cliVersion === "string" ? list.cliVersion : "");
-      setSelected(previous => next.some(org => org.username === previous)
-        ? previous : next[0]?.username ?? "");
-      setCurrent(status as AuthStatus);
+      const session = status as AuthStatus;
+      setSelected(previous => next.some(org => org.username === session.username)
+        ? session.username!
+        : next.some(org => org.username === previous) ? previous
+        : next.find(org => org.status === "saved")?.username ?? next[0]?.username ?? "");
+      setCurrent(session);
+      // A previously connected CLI org is sufficient to enter the workspace.
+      // Explicit Change org navigation must not auto-close the chooser.
+      if (autoContinueConnected && session.connected) onComplete(session);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Salesforce CLI could not be found.");
     } finally {
       setLoading(false);
     }
-  }, []);
+  // Only recompute the initial refresh if the intended auto-entry mode changes.
+  // onComplete is invoked directly from the result, not from a polling timer.
+  }, [autoContinueConnected]);
 
   useEffect(() => { void refresh(); }, [refresh]);
 
@@ -86,6 +101,7 @@ export default function SalesforceCliLogin({
   }
 
   async function browserLogin(environment: "sandbox" | "production") {
+    if (!canLogInWithBrowser) return;
     setBusy(environment);
     setError("");
     try {
@@ -146,16 +162,22 @@ export default function SalesforceCliLogin({
         </div>
 
         <div className="sf-cli-separator"><span>OR LOG IN THROUGH SALESFORCE</span></div>
-        <div className="sf-cli-row sf-cli-login-actions">
-          <button type="button" className="secondary-button" disabled={Boolean(busy) || loading}
+        <div className="sf-cli-row sf-cli-login-actions" aria-label="Sandbox or Production browser login">
+          <button type="button" className="secondary-button" disabled={!canLogInWithBrowser}
             onClick={() => void browserLogin("sandbox")}>
             {busy === "sandbox" ? "Waiting for Sandbox login…" : "Log in to Sandbox"}
           </button>
-          <button type="button" className="secondary-button" disabled={Boolean(busy) || loading}
+          <button type="button" className="secondary-button" disabled={!canLogInWithBrowser}
             onClick={() => void browserLogin("production")}>
             {busy === "production" ? "Waiting for Production login…" : "Log in to Production"}
           </button>
         </div>
+        {!loading && !error && hasActiveCliOrgs && (
+          <p className="sf-cli-login-hint" role="status">
+            Connected Salesforce CLI authorizations are available above. Select an org and click Connect.
+            Sandbox and Production browser login is enabled only when no active CLI org is found.
+          </p>
+        )}
         {busy === "sandbox" || busy === "production"
           ? <p className="sf-cli-pending" role="status">
               Complete sign-in in the Salesforce browser window. The Analyzer will connect automatically afterward.
@@ -181,8 +203,13 @@ export default function SalesforceCliLogin({
           Expired CLI logins must be reauthorized through Salesforce.
         </p>
         {onSkip && (
-          <button type="button" className="sf-cli-skip" disabled={Boolean(busy)} onClick={onSkip}>
+          <button type="button" className="sf-cli-skip" disabled={loading || Boolean(busy) || Boolean(current?.connected)} onClick={onSkip}>
             Continue with repository-only analysis
+          </button>
+        )}
+        {onBack && (
+          <button type="button" className="sf-cli-skip" disabled={Boolean(busy)} onClick={onBack}>
+            Back to workspace
           </button>
         )}
       </section>

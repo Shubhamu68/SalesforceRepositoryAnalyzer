@@ -7,6 +7,7 @@ import type { PermissionEvidence } from "./components/permissionPresentation";
 import StackTraceImpact from "./components/StackTraceImpact";
 import SalesforceOrgConnection from "./components/SalesforceOrgConnection";
 import SalesforceCliLogin from "./components/SalesforceCliLogin";
+import { shouldShowOrgChooser, type OrgChooserMode } from "./utils/salesforceAuthUi";
 import AnalysisLoadingOverlay from "./components/AnalysisLoadingOverlay";
 import ReportOutputSetupModal from "./components/ReportOutputSetupModal";
 import RepositorySetupModal from "./components/RepositorySetupModal";
@@ -132,6 +133,7 @@ function App() {
   const [apiConnected, setApiConnected] = useState(false);
   const [salesforceConnection, setSalesforceConnection] = useState<SalesforceConnectionState>("connecting");
   const [authDismissed, setAuthDismissed] = useState(false);
+  const [orgChooserMode, setOrgChooserMode] = useState<OrgChooserMode>("startup");
   const [lastSoql, setLastSoql] = useState<SoqlAnalysisResult | null>(null);
   const [reportFolderModalOpen, setReportFolderModalOpen] = useState(false);
   const [reportFolderExplanation, setReportFolderExplanation] = useState("");
@@ -181,6 +183,15 @@ function App() {
     const interval = window.setInterval(() => { void refreshSalesforceConnection(); }, 5000);
     return () => { active = false; window.clearInterval(interval); };
   }, []);
+
+  useEffect(() => {
+    // The backend may already have a selected CLI org when the UI reloads.
+    // Remember a successful startup connection, but don't close a user-requested
+    // Change org screen merely because the previous org remains connected.
+    if (orgChooserMode === "startup" && salesforceConnection === "connected") {
+      setAuthDismissed(true);
+    }
+  }, [orgChooserMode, salesforceConnection]);
 
   useEffect(() => {
     // Do not overwrite an invalid-folder selection error while setup is open.
@@ -1024,8 +1035,10 @@ function App() {
     </section>
   );
 
-  if (!authDismissed) {
+  if (shouldShowOrgChooser(authDismissed, orgChooserMode, salesforceConnection === "connected")) {
     return <SalesforceCliLogin
+      autoContinueConnected={orgChooserMode === "startup"}
+      onBack={orgChooserMode === "manual" ? () => { setAuthDismissed(true); } : undefined}
       onComplete={() => {
         setSalesforceConnection("connected");
         setAuthDismissed(true);
@@ -1058,10 +1071,11 @@ function App() {
           </span>
           <span className={`connection ${salesforceConnection === "connected" ? "online" : "offline"}`} title="Salesforce authentication status"><span className="connection-dot" />{salesforceConnectionLabel(salesforceConnection)}</span>
           <button type="button" className="sf-cli-topbar-change" onClick={() => {
+            setOrgChooserMode("manual");
             setAuthDismissed(false);
             setResult(null);
             setLastSoql(null);
-          }}>Change org</button>
+          }}>{salesforceConnection === "connected" ? "Change org" : "Connect org"}</button>
           <span className="avatar">RA</span>
         </div>
       </header>

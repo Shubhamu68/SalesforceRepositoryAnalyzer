@@ -28,3 +28,8 @@
 .sf-cli-command code{font:600 13px Consolas,"Courier New",monospace;color:#253f61}
 .sf-cli-upgrade p code{font-family:Consolas,"Courier New",monospace;color:#253f61}
 .sf-cli-upgrade .sf-cli-upgrade-error{font-size:11px;color:#8e6e47;border-top:1px solid #ead2ab;padding-top:8px}
+
+/* Disabled login controls must look disabled during discovery and whenever
+   an authorized CLI org is available; do not imply that clicks are accepted. */
+.sf-cli-login-actions button:disabled{opacity:.45;color:#798aa1;background:#e8eef7;border-color:#cfd9e7;cursor:not-allowed;box-shadow:none}
+.sf-cli-login-hint{font-size:11px;color:#647b97;background:#f3f7fc;border:1px solid #dfe8f6;padding:9px 12px;border-radius:6px;line-height:1.6;margin:0}

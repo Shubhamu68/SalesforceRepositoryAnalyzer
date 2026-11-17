@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import "./SalesforceOrgConnection.css";
-import SalesforceCliLogin from "./SalesforceCliLogin";
 
 type ConnectionStatus = {
   configured: boolean;
@@ -46,7 +45,6 @@ async function readJson(response: Response): Promise<Record<string, unknown>> {
 
 export default function SalesforceOrgConnection() {
   const [status, setStatus] = useState<ConnectionStatus | null>(null);
-  const [busy, setBusy] = useState(false);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState("");
   const [api, setApi] = useState<QueryApi>("data");
@@ -75,35 +73,6 @@ export default function SalesforceOrgConnection() {
     return () => { active = false; window.clearInterval(interval); };
   }, []);
 
-  async function reconnect() {
-    setError("");
-    setBusy(true);
-    try {
-      const response = await fetch("/api/salesforce/reconnect", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
-      const data = await readJson(response);
-      setStatus(data as unknown as ConnectionStatus);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Salesforce authentication failed.");
-      await refreshStatus().catch(() => undefined);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function disconnect() {
-    setError("");
-    setBusy(true);
-    try {
-      await readJson(await fetch("/api/salesforce/disconnect", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
-      }));
-      setResult(null);
-      await refreshStatus();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not disconnect local session.");
-    } finally { setBusy(false); }
-  }
-
   async function runQuery(query: string, queryApi: QueryApi) {
     setRunning(true);
     setError("");
@@ -129,7 +98,6 @@ export default function SalesforceOrgConnection() {
 
   return (
     <div className="sf-page">
-      <SalesforceCliLogin compact onComplete={() => { setResult(null); void refreshStatus(); }} />
       <section className="panel sf-connection-panel">
         <div className="panel-heading">
           <div>
@@ -153,14 +121,11 @@ export default function SalesforceOrgConnection() {
             <div><span>Instance</span><strong>{status?.instanceUrl || "—"}</strong></div>
           </div></details>
           {status?.message && <p className="sf-warning" role="status">{status.message}</p>}
-          <div className="sf-actions">
-            <button className="secondary-button" type="button" disabled={busy || !status?.configured} onClick={() => void reconnect()}>
-              {busy ? "Reconnecting…" : "Refresh CLI session"}
-            </button>
-            <button className="secondary-button" type="button" disabled={busy || !status?.configured} onClick={() => void disconnect()}>
-              Disconnect Analyzer
-            </button>
-          </div>
+          {!status?.connected && (
+            <p className="sf-description">
+              No Salesforce org is connected. Select Connect org in the top bar to authorize an org.
+            </p>
+          )}
         </div>
       </section>
 
