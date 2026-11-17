@@ -57,3 +57,44 @@ test("Desktop build is isolated from the current Windows browser portable workfl
   assert.match(workflow, /upload-artifact@v4/);
   assert.match(legacy, /SalesforceRepositoryAnalyzer-Windows-Portable/);
 });
+
+test("desktop displays a startup screen without waiting for the Analyzer API", () => {
+  const main = readFileSync("desktop/electron/main.mjs", "utf8");
+  const splash = readFileSync("desktop/electron/splash.html", "utf8");
+  const pkg = readFileSync("desktop/electron/package.json", "utf8");
+  const api = readFileSync("src/api/server.ts", "utf8");
+  assert.match(main, /show: true/);
+  assert.match(main, /window\.loadFile\(splashFile\)/);
+  assert.match(main, /openWindow\(\);\s*const origin = await startBackend\(\)/);
+  assert.match(main, /await showWorkspace\(origin\)/);
+  assert.match(main, /fetch\(origin \+ "\/api\/health\/live"/);
+  assert.match(api, /app\.get\("\/api\/health\/live"/);
+  assert.match(splash, /Starting your local workspace/);
+  assert.match(splash, /Content-Security-Policy/);
+  assert.match(pkg, /"splash\.html"/);
+  assert.match(pkg, /"startupTrace\.mjs"/);
+});
+
+test("startup log uses only approved fixed event names and durations", async () => {
+  const { mkdtempSync, readFileSync, rmSync } = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const { createDesktopStartupTrace } = await import("../desktop/electron/startupTrace.mjs");
+  const dir = mkdtempSync(path.join(os.tmpdir(), "analyzer-startup-trace-"));
+  try {
+    const trace = createDesktopStartupTrace(dir);
+    trace.mark("main-loaded");
+    trace.mark("backend-spawned");
+    trace.mark("backend-ready");
+    trace.mark("ui-rendered");
+    assert.throws(() => trace.mark("secret-token=BAD"), /Invalid startup timing phase/);
+    const lines = readFileSync(trace.file, "utf8").trim().split("\n");
+    assert.equal(lines.length, 4);
+    for (const line of lines) {
+      assert.match(line, /^\d{4}-\d\d-\d\dT[^\s]+ (main-loaded|backend-spawned|backend-ready|ui-rendered) elapsedMs=\d+ processUptimeMs=\d+$/);
+      assert.doesNotMatch(line, /password|token=|orgId|example\.com|Bearer/i);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
