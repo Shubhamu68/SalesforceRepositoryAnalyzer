@@ -39,6 +39,11 @@ export default function SalesforceCliLogin({
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [current, setCurrent] = useState<AuthStatus | null>(null);
+  // A failed CLI version check must not make Sandbox/Production buttons
+  // silently inert. The backend remains authoritative about compatibility.
+  const cliOutdated = /Salesforce CLI [\d.]+ is too old for secure token retrieval/i.test(error);
+  const detectedVersion = error.match(/Salesforce CLI (\d+\.\d+\.\d+) is too old/i)?.[1];
+
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -135,18 +140,18 @@ export default function SalesforceCliLogin({
           </button>
         </div>
         <div className="sf-cli-smallrow">
-          <span>{loading ? "Checking Salesforce CLI…" : cliVersion ? "Installed: " + cliVersion : "Salesforce CLI required"}</span>
+          <span>{loading ? "Checking Salesforce CLI…" : cliVersion ? "Installed: " + cliVersion : detectedVersion ? "Installed: " + detectedVersion + " · update required" : "Salesforce CLI status unavailable"}</span>
           <button type="button" className="sf-cli-link" disabled={loading || Boolean(busy)}
             onClick={() => void refresh()}>Refresh orgs</button>
         </div>
 
         <div className="sf-cli-separator"><span>OR LOG IN THROUGH SALESFORCE</span></div>
         <div className="sf-cli-row sf-cli-login-actions">
-          <button type="button" className="secondary-button" disabled={Boolean(busy) || loading || Boolean(error && !cliVersion)}
+          <button type="button" className="secondary-button" disabled={Boolean(busy) || loading}
             onClick={() => void browserLogin("sandbox")}>
             {busy === "sandbox" ? "Waiting for Sandbox login…" : "Log in to Sandbox"}
           </button>
-          <button type="button" className="secondary-button" disabled={Boolean(busy) || loading || Boolean(error && !cliVersion)}
+          <button type="button" className="secondary-button" disabled={Boolean(busy) || loading}
             onClick={() => void browserLogin("production")}>
             {busy === "production" ? "Waiting for Production login…" : "Log in to Production"}
           </button>
@@ -155,7 +160,21 @@ export default function SalesforceCliLogin({
           ? <p className="sf-cli-pending" role="status">
               Complete sign-in in the Salesforce browser window. The Analyzer will connect automatically afterward.
             </p> : null}
-        {error && <p className="sf-cli-error" role="alert">{error}</p>}
+        {cliOutdated ? (
+          <div className="sf-cli-upgrade" role="alert">
+            <strong>Salesforce CLI update required</strong>
+            <p>
+              {detectedVersion ? `Version ${detectedVersion} is installed. ` : ""}
+              The Analyzer needs Salesforce CLI 2.136.0 or newer to retrieve an access token securely.
+              Update the CLI before connecting to either Sandbox or Production.
+            </p>
+            <div className="sf-cli-command"><code>sf update</code></div>
+            <p>Run this command in Command Prompt or PowerShell, check the version with <code>sf --version</code>,
+              then click <strong>Refresh orgs</strong> above. If the old version is still detected,
+              restart the Analyzer API or desktop launcher.</p>
+            <p className="sf-cli-upgrade-error">CLI response: {error}</p>
+          </div>
+        ) : error && <p className="sf-cli-error" role="alert">{error}</p>}
         <p className="sf-cli-note">
           Your password never enters the Analyzer. CLI maintains OAuth authorization;
           the Analyzer retains only the chosen org's access token in local backend memory.
