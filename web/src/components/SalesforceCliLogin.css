@@ -20,3 +20,11 @@
 .sf-cli-note{color:#8390a3;font-size:11px;line-height:1.8;margin:0}
 .sf-cli-skip{padding:10px 4px;justify-self:center}
 @media(max-width:600px){.sf-cli-card{padding:25px 18px}.sf-cli-row{flex-wrap:wrap}.sf-cli-row>*{flex:1 1 100%}.sf-cli-login-actions>*{flex:1 1 100%}.sf-cli-card h1{font-size:20px}}
+
+.sf-cli-upgrade{display:grid;gap:9px;background:#fff7ed;border:1px solid #f1cf9e;border-radius:8px;padding:14px 15px;color:#714b1c;font-size:12px;line-height:1.65}
+.sf-cli-upgrade strong{font-size:13px;color:#795018}
+.sf-cli-upgrade p{margin:0}
+.sf-cli-command{background:#fff;border:1px solid #ead2ab;border-radius:6px;padding:10px 13px;user-select:text}
+.sf-cli-command code{font:600 13px Consolas,"Courier New",monospace;color:#253f61}
+.sf-cli-upgrade p code{font-family:Consolas,"Courier New",monospace;color:#253f61}
+.sf-cli-upgrade .sf-cli-upgrade-error{font-size:11px;color:#8e6e47;border-top:1px solid #ead2ab;padding-top:8px}
