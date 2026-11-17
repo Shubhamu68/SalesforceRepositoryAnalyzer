@@ -102,7 +102,7 @@ test("login UI shows recovery instructions for list failure instead of trapping 
   assert.match(component, /setDiscoveryWarning\(typeof list\.warning/);
   assert.match(component, /Saved CLI orgs unavailable/);
   assert.match(component, /setFailedSavedSelection\(true\)/);
-  assert.match(component, /hasActiveCliOrgs: hasActiveCliOrgs && !failedSavedSelection/);
+  assert.match(component, /checking: loading, busy: Boolean\(busy\)/);
   assert.match(component, /setCurrent\(session\)/);
   assert.match(component, /if \(autoContinueConnected && session\.connected\)/);
   assert.match(backend, /await this\.activateOrg\(\{ username, environment, status: "saved" \}\)/);
