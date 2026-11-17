@@ -105,13 +105,14 @@ function openWindow() {
     }
   });
   window.on("closed", () => { window = null; app.quit(); });
-  void window.loadFile(splashFile).catch(() => {
+  return window.loadFile(splashFile).then(() => true).catch(() => {
     startupTrace.mark("startup-failed");
     if (!shuttingDown) {
       dialog.showErrorBox("Unable to show startup screen",
         "The desktop application resources are incomplete.");
       app.quit();
     }
+    return false;
   });
 }
 
@@ -198,9 +199,11 @@ if (primaryInstance) app.whenReady().then(async () => {
   // The UI is local, but still sandbox its renderer and deny sensitive privileges.
   session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
   try {
-    openWindow();
+    const splashReady = openWindow();
     const origin = await startBackend();
-    await showWorkspace(origin);
+    // Preserve the startup view until its local file load completes; otherwise
+    // a very fast backend could race the first page navigation.
+    if (await splashReady) await showWorkspace(origin);
   } catch {
     startupTrace.mark("startup-failed");
     if (!shuttingDown) {
