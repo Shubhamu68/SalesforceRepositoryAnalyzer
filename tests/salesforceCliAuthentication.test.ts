@@ -222,3 +222,14 @@ test("org identity must agree with selected CLI org, preventing cross-org access
     assert.equal(conn.status.connected,false);
   } finally { globalThis.fetch=original; }
 });
+
+
+test("CLI version detection is cached during repeated org discovery", async () => {
+  const calls:string[]=[];
+  const connection=new SalesforceOrgConnection(new SalesforceCliAuthProvider(fakeRunner(calls)));
+  const first=await connection.listAuthorizedOrgs();
+  const second=await connection.listAuthorizedOrgs();
+  assert.equal(first.orgs.length,3);
+  assert.equal(second.orgs.length,3);
+  assert.equal(calls.filter(cmd=>cmd==="--version").length,1);
+});

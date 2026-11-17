@@ -121,9 +121,11 @@ function normalizeOrg(raw: unknown): CliOrg | undefined {
 }
 
 export class SalesforceCliAuthProvider {
+  private versionCache: string | null = null;
   constructor(private readonly run: CliRunner = runSalesforceCli) {}
 
   async version(): Promise<string> {
+    if (this.versionCache) return this.versionCache;
     const output = (await this.run(["--version"], 10000)).trim().slice(0, 120);
     const match = output.match(/@salesforce\/cli\/(\d+)\.(\d+)\.(\d+)/);
     if (!match) throw new Error("Cannot determine Salesforce CLI version. Update Salesforce CLI with 'sf update'.");
@@ -133,6 +135,7 @@ export class SalesforceCliAuthProvider {
       throw new Error("Salesforce CLI " + match[0].split("/")[1] +
         " is too old for secure token retrieval. Run 'sf update' to install version 2.136 or newer.");
     }
+    this.versionCache = output;
     return output;
   }
 
