@@ -132,7 +132,7 @@ export class SalesforceCliAuthProvider {
     const major = Number(match[1]);
     const minor = Number(match[2]);
     if (major < 2 || (major === 2 && minor < 136)) {
-      throw new Error("Salesforce CLI " + match[0].split("/")[1] +
+      throw new Error("Salesforce CLI " + [match[1], match[2], match[3]].join(".") +
         " is too old for secure token retrieval. Run 'sf update' to install version 2.136 or newer.");
     }
     this.versionCache = output;
