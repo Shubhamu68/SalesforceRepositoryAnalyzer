@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { cliAuthPhase, timedAuthStep } from "./SalesforceAuthTiming.js";
 
 /**
  * Salesforce CLI is installed by each developer and owns OAuth authorization.
@@ -22,6 +23,8 @@ const MAX_JSON_BYTES = 2 * 1024 * 1024;
 const CLI_TIMEOUT = 60000;
 // Local-only org discovery must not wait for a refresh from every sandbox.
 const LOCAL_DISCOVERY_TIMEOUT = 15000;
+// Saved orgs are only a UI hint; every selected session is still validated.
+const SAVED_ORGS_CACHE_MS = 120000;
 const WEB_LOGIN_TIMEOUT = 300000;
 
 /** Arguments are shell-safe because Windows needs its sf.cmd wrapper. */
@@ -42,7 +45,8 @@ export function assertCliArguments(args: string[]): void {
 
 export const runSalesforceCli: CliRunner = async (args, timeoutMs) => {
   assertCliArguments(args);
-  return new Promise<string>((resolve, reject) => {
+  // Includes CLI startup, Windows sf.cmd overhead and command execution.
+  return timedAuthStep(cliAuthPhase(args), () => new Promise<string>((resolve, reject) => {
     // sf.cmd is a Windows command shim. All arguments are allowlisted above;
     // never pass user-supplied commands, paths, credentials or shell syntax.
     const child = spawn(process.platform === "win32" ? "sf.cmd" : "sf", args, {
@@ -92,7 +96,7 @@ export const runSalesforceCli: CliRunner = async (args, timeoutMs) => {
           : "Salesforce CLI command failed. Confirm the CLI is installed and the org is accessible."));
       } else finish();
     });
-  });
+  }));
 };
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -139,28 +143,73 @@ function normalizeOrg(raw: unknown): CliOrg | undefined {
 
 export class SalesforceCliAuthProvider {
   private versionCache: string | null = null;
+  private pendingVersion: Promise<string> | null = null;
+  private savedOrgs: CliOrg[] | null = null;
+  private savedOrgsExpiresAt = 0;
+  private pendingOrgs: Promise<CliOrg[]> | null = null;
+
   constructor(private readonly run: CliRunner = runSalesforceCli) {}
 
   async version(): Promise<string> {
     if (this.versionCache) return this.versionCache;
-    const output = (await this.run(["--version"], 10000)).trim().slice(0, 120);
-    const match = output.match(/@salesforce\/cli\/(\d+)\.(\d+)\.(\d+)/);
-    if (!match) throw new Error("Cannot determine Salesforce CLI version. Update Salesforce CLI with 'sf update'.");
-    const major = Number(match[1]);
-    const minor = Number(match[2]);
-    if (major < 2 || (major === 2 && minor < 136)) {
-      throw new Error("Salesforce CLI " + [match[1], match[2], match[3]].join(".") +
-        " is too old for secure token retrieval. Run 'sf update' to install version 2.136 or newer.");
-    }
-    this.versionCache = output;
-    return output;
+    if (this.pendingVersion) return this.pendingVersion;
+    // Concurrent /orgs calls must not spawn two expensive sf --version processes.
+    const pending = (async () => {
+      const output = (await this.run(["--version"], 10000)).trim().slice(0, 120);
+      const match = output.match(/@salesforce\/cli\/(\d+)\.(\d+)\.(\d+)/);
+      if (!match) throw new Error("Cannot determine Salesforce CLI version. Update Salesforce CLI with 'sf update'.");
+      const major = Number(match[1]);
+      const minor = Number(match[2]);
+      if (major < 2 || (major === 2 && minor < 136)) {
+        throw new Error("Salesforce CLI " + [match[1], match[2], match[3]].join(".") +
+          " is too old for secure token retrieval. Run 'sf update' to install version 2.136 or newer.");
+      }
+      this.versionCache = output;
+      return output;
+    })();
+    this.pendingVersion = pending;
+    try { return await pending; }
+    finally { if (this.pendingVersion === pending) this.pendingVersion = null; }
   }
 
-  async listOrgs(): Promise<CliOrg[]> {
+  /**
+   * Cached CLI org data is for display/selection only. It is never treated
+   * as proof of an active or authorized session: showToken and UserInfo remain
+   * required. A manual refresh bypasses the short-lived discovery cache.
+   */
+  async listOrgs(refresh = false): Promise<CliOrg[]> {
+    if (this.pendingOrgs) return (await this.pendingOrgs).map(org => ({ ...org }));
+    if (!refresh && this.savedOrgs && Date.now() < this.savedOrgsExpiresAt) {
+      return this.savedOrgs.map(org => ({ ...org }));
+    }
+    const pending = this.discoverSavedOrgs();
+    this.pendingOrgs = pending;
+    try {
+      const orgs = await pending;
+      this.savedOrgs = orgs.map(org => ({ ...org }));
+      this.savedOrgsExpiresAt = Date.now() + SAVED_ORGS_CACHE_MS;
+      return orgs.map(org => ({ ...org }));
+    } finally {
+      if (this.pendingOrgs === pending) this.pendingOrgs = null;
+    }
+  }
+
+  /** Use the last user-visible org selection without re-running CLI discovery. */
+  findListedOrg(target: string): CliOrg | undefined {
+    const found = this.savedOrgs?.find(org =>
+      org.username.toLowerCase() === target.toLowerCase() ||
+      org.alias?.toLowerCase() === target.toLowerCase());
+    return found ? { ...found } : undefined;
+  }
+
+  private invalidateSavedOrgs(): void {
+    this.savedOrgs = null;
+    this.savedOrgsExpiresAt = 0;
+  }
+
+  private async discoverSavedOrgs(): Promise<CliOrg[]> {
     await this.version();
-    // Fast local-first discovery. The original sf org list --json checks every
-    // saved org over the network; one expired/slow refresh blocks the UI.
-    // A saved CLI authorization does NOT prove the org is currently connected.
+    // Only local discovery: avoid a live status check of every saved org.
     let all: unknown[];
     try {
       const rows = parseCliResult(await this.run(
@@ -168,7 +217,6 @@ export class SalesforceCliAuthProvider {
       all = ["nonScratchOrgs", "scratchOrgs", "devHubs", "other", "orgs"]
         .flatMap(key => Array.isArray(rows[key]) ? rows[key] as unknown[] : []);
     } catch {
-      // Second independent local-only command (JSON result is often an array).
       const payload = parseCliPayload(await this.run(
         ["org", "list", "auth", "--json"], LOCAL_DISCOVERY_TIMEOUT));
       if (Array.isArray(payload)) all = payload;
@@ -224,6 +272,7 @@ export class SalesforceCliAuthProvider {
     if (!username || !ORG_NAME_SAFE.test(username)) {
       throw new Error("Salesforce CLI completed login without a usable username.");
     }
+    this.invalidateSavedOrgs();
     return username;
   }
 }
