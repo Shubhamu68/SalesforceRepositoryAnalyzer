@@ -55,7 +55,14 @@ export class AnalyzerRuntimeService {
     // Validate on every access to detect removed/moved repositories and fail
     // before any scanner or permission lookup starts.
     const paths = await this.repository.resolvePaths();
-    const key = paths.repositoryPath + "|" + String(useOrg);
+    const session = this.connection.status;
+    // Cache never crosses Salesforce orgs, authenticated administrators or
+    // reconnects. Repository-only mode remains independent of org sessions.
+    const scope = useOrg
+      ? [session.organizationId ?? "", session.userId ?? "", session.instanceUrl ?? "",
+          session.connectedAt ?? ""].join("|")
+      : "";
+    const key = paths.repositoryPath + "|" + String(useOrg) + "|" + scope;
     const existing = this.contexts.get(key);
     if (existing) return existing;
 

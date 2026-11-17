@@ -14,13 +14,13 @@ test("analysis copy distinguishes a live org connection from verified permission
   const states: SalesforceConnectionState[] = ["connected", "connecting", "unavailable", "not-configured"];
   assert.deepEqual(states.map(salesforceConnectionLabel), [
     "Salesforce connected", "Salesforce connecting…",
-    "Salesforce unavailable", "Salesforce not configured",
+    "Salesforce unavailable", "Salesforce not connected",
   ]);
   for (const screen of ["access", "soql", "matrix", "stack"] as const) {
     const connected = analysisModeHint(screen, "connected");
     assert.match(connected, /verification available/);
     assert.doesNotMatch(connected, /verified|granted|allowed/i);
-    assert.match(analysisModeHint(screen, "not-configured"), /not configured/);
+    assert.match(analysisModeHint(screen, "not-configured"), /not connected/);
     assert.match(analysisModeHint(screen, "connecting"), /connecting/);
   }
   assert.match(analysisModeHint("soql", "unavailable"), /connection required/);
@@ -29,10 +29,10 @@ test("analysis copy distinguishes a live org connection from verified permission
   assert.match(analysisModeHint("matrix", "unavailable"), /verification unavailable/);
 });
 
-test("repository-only mode is explicit about missing credentials, not denied access", () => {
-  assert.equal(orgPreflightMessage(["SALESFORCE_CLIENT_ID"]), "Missing SALESFORCE_CLIENT_ID. Run repository-only analysis?");
-  assert.match(orgPreflightMessage([]), /credentials are missing/i);
-  assert.doesNotMatch(orgPreflightMessage(["SALESFORCE_CLIENT_SECRET"]), /access denied/i);
+test("repository-only mode is explicit about unselected CLI org, not missing secrets", () => {
+  assert.match(orgPreflightMessage([]), /No Salesforce org is connected/);
+  assert.match(orgPreflightMessage([]), /CLI/);
+  assert.doesNotMatch(orgPreflightMessage([]), /client secret|password|denied/i);
 });
 
 test("first-run setup avoids generic duplicate error banners but preserves real errors", () => {

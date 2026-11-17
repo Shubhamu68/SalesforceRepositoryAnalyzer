@@ -1,7 +1,7 @@
+import { SalesforceCliAuthProvider, type CliOrg } from "./SalesforceCliAuthProvider.js";
 /**
- * Local, server-side Salesforce connection using OAuth client credentials.
- * A single Run As user is configured on the Salesforce External Client App.
- * Tokens are held only in process memory; no browser OAuth flow is involved.
+ * Local Salesforce CLI browser authorization: no Analyzer-owned client secret
+ * or integration Run As identity. Tokens stay in backend process memory.
  */
 export type SalesforceQueryApi = "data" | "tooling";
 
@@ -9,21 +9,16 @@ export type SalesforceConnectionStatus = {
   configured: boolean;
   connecting: boolean;
   connected: boolean;
-  authMode: "client_credentials";
+  authMode: "salesforce_cli";
   environment: "sandbox" | "production" | "custom";
   loginHost: string;
   organizationId?: string;
   userId?: string;
   instanceUrl?: string;
   connectedAt?: string;
+  alias?: string;
+  username?: string;
   message?: string;
-};
-
-type SalesforceOAuthToken = {
-  access_token?: string;
-  instance_url?: string;
-  id?: string;
-  token_type?: string;
 };
 
 type SalesforceOAuthConnection = {
@@ -98,14 +93,6 @@ function getApiVersion(): string {
 }
 
 // Do not reflect arbitrary Salesforce responses into public error messages.
-function oauthErrorMessage(value: unknown): string {
-  if (!value || typeof value !== "object") return "Salesforce returned an unexpected OAuth response.";
-  const data = value as Record<string, unknown>;
-  const error = typeof data.error === "string" ? data.error : "oauth_error";
-  const detail = typeof data.error_description === "string" ? data.error_description : "";
-  return `${error}${detail ? `: ${detail}` : ""}`.slice(0, 300);
-}
-
 function apiErrorMessage(value: unknown): string {
   if (!value || typeof value !== "object") return "Salesforce returned an unexpected error.";
   const data = value as Record<string, unknown>;
@@ -114,132 +101,187 @@ function apiErrorMessage(value: unknown): string {
   return `${code}${detail ? `: ${detail}` : ""}`.slice(0, 300);
 }
 
-function extractIdentity(identityUrl?: string): { organizationId?: string; userId?: string } {
-  if (!identityUrl) return {};
-  let identity: URL;
-  try {
-    identity = new URL(identityUrl);
-  } catch {
-    return {};
-  }
-  // Identity URL may be on login.salesforce.com or the org My Domain.
-  if (identity.protocol !== "https:" || !isSalesforceHostname(identity.hostname)) return {};
-  const match = identity.pathname.match(/^\/id\/(00D[A-Za-z0-9]{12,15})\/(005[A-Za-z0-9]{12,15})\/?$/);
-  return match ? { organizationId: match[1], userId: match[2] } : {};
-}
-
 /** This connector is intentionally accessible only from the local backend. */
 export class SalesforceOrgConnection {
   private connection: SalesforceOAuthConnection | null = null;
   private connecting: Promise<void> | null = null;
   private lastAttemptAt = 0;
   private lastError: string | null = null;
+  private selectedOrg: CliOrg | null = null;
+  private epoch = 0;
+  constructor(private readonly cli = new SalesforceCliAuthProvider()) {}
   private readonly describeCache = new Map<string, { expires: number; value: SalesforceSObjectDescribe }>();
   private readonly pendingDescribes = new Map<string, Promise<SalesforceSObjectDescribe>>();
 
-  private get loginUrl(): URL {
-    return validateSalesforceUrl(
-      process.env.SALESFORCE_LOGIN_URL || "https://test.salesforce.com",
-      "SALESFORCE_LOGIN_URL"
-    );
-  }
-
-  private get clientId(): string {
-    const value = process.env.SALESFORCE_CLIENT_ID?.trim();
-    if (!value) throw new SalesforceConnectionError("SALESFORCE_CLIENT_ID is missing in the backend .env file.", 400);
-    return value;
-  }
-
-  private get clientSecret(): string {
-    const value = process.env.SALESFORCE_CLIENT_SECRET?.trim();
-    if (!value) throw new SalesforceConnectionError("SALESFORCE_CLIENT_SECRET is missing in the backend .env file.", 400);
-    return value;
-  }
-
   get status(): SalesforceConnectionStatus {
-    const loginUrl = this.loginUrl;
-    const configured = Boolean(process.env.SALESFORCE_CLIENT_ID?.trim() && process.env.SALESFORCE_CLIENT_SECRET?.trim());
-    const environment = loginUrl.hostname === "test.salesforce.com" || loginUrl.hostname.includes(".sandbox.")
-      ? "sandbox" : loginUrl.hostname === "login.salesforce.com" ? "production" : "custom";
+    const selected = this.selectedOrg;
     return {
-      configured,
+      configured: Boolean(selected),
       connecting: Boolean(this.connecting),
       connected: Boolean(this.connection),
-      authMode: "client_credentials",
-      environment,
-      loginHost: loginUrl.hostname,
+      authMode: "salesforce_cli",
+      environment: selected?.environment ?? "sandbox",
+      loginHost: selected?.environment === "production" ? "login.salesforce.com" : "test.salesforce.com",
+      ...(selected?.alias ? { alias: selected.alias } : {}),
+      ...(selected ? { username: selected.username } : {}),
       ...(this.connection ? {
         organizationId: this.connection.organizationId,
         userId: this.connection.userId,
         instanceUrl: this.connection.instanceUrl,
-        connectedAt: this.connection.connectedAt
+        connectedAt: this.connection.connectedAt,
       } : {}),
-      ...(!configured ? { message: "Add SALESFORCE_CLIENT_ID and SALESFORCE_CLIENT_SECRET to the backend .env file." }
-        : this.lastError ? { message: this.lastError } : {})
+      ...(!selected ? { message: "Select a Salesforce CLI org or sign in with your browser." } :
+        this.lastError ? { message: this.lastError } : {}),
     };
   }
 
-  /**
-   * Safe to call from backend startup, the status route, and a query.
-   * Concurrent calls share one token request. Failed attempts are throttled,
-   * but a manual reconnect can bypass the cooldown.
-   */
+  async listAuthorizedOrgs(): Promise<{
+    cliVersion: string;
+    orgs: CliOrg[];
+    warning?: string;
+  }> {
+    const cliVersion = await this.cli.version();
+    try {
+      return { cliVersion, orgs: await this.cli.listOrgs() };
+    } catch {
+      // A local org-discovery failure isn't an authentication failure.
+      // Don't trap the user with an empty list AND disabled browser buttons.
+      return {
+        cliVersion,
+        orgs: [],
+        warning: "Saved CLI orgs could not be loaded. Retry Refresh orgs, or sign in to Sandbox/Production below.",
+      };
+    }
+  }
+
+  async loginWeb(environment: "sandbox" | "production"): Promise<void> {
+    const username = await this.cli.loginWeb(environment);
+    // CLI just authorized the username. Don't re-enumerate every saved org,
+    // because a discovery timeout must not invalidate a completed web login.
+    await this.activateOrg({ username, environment, status: "saved" });
+  }
+
+  async selectOrg(target: string): Promise<void> {
+    const orgs = await this.cli.listOrgs();
+    const selected = orgs.find(org =>
+      org.username.toLowerCase() === target.toLowerCase() ||
+      org.alias?.toLowerCase() === target.toLowerCase());
+    if (!selected) throw new SalesforceConnectionError(
+      "The selected Salesforce org is not authorized in CLI. Sign in through the browser.", 400);
+    await this.activateOrg(selected);
+  }
+
+  private async activateOrg(selected: CliOrg): Promise<void> {
+    const previousOrg = this.selectedOrg;
+    const previousConnection = this.connection;
+    const previousError = this.lastError;
+    const previousAttempt = this.lastAttemptAt;
+    const transition = ++this.epoch;
+    this.selectedOrg = selected;
+    this.connection = null;
+    this.lastError = null;
+    this.lastAttemptAt = 0;
+    this.describeCache.clear();
+    this.pendingDescribes.clear();
+    try {
+      await this.connect(true);
+    } catch (error) {
+      // A failed switch must not discard a previously working org.
+      // Never restore it if another switch/disconnect superseded this request.
+      if (this.epoch === transition && previousOrg && previousConnection) {
+        this.epoch++;
+        this.selectedOrg = previousOrg;
+        this.connection = previousConnection;
+        this.lastError = previousError;
+        this.lastAttemptAt = previousAttempt;
+        this.describeCache.clear();
+        this.pendingDescribes.clear();
+      }
+      throw error;
+    }
+  }
+
+  disconnect(): void {
+    // Never run sf org logout: VS Code and other tools share the CLI session.
+    this.epoch++;
+    this.selectedOrg = null;
+    this.connection = null;
+    this.lastError = null;
+    this.lastAttemptAt = 0;
+    this.describeCache.clear();
+    this.pendingDescribes.clear();
+  }
+
+  /** Same public connection contract; CLI now manages refresh and SSO/MFA. */
   async connect(force = false): Promise<void> {
-    if (this.connecting) return this.connecting;
+    if (!this.selectedOrg) throw new SalesforceConnectionError(
+      "Select an authorized Salesforce org in the Analyzer first.", 409);
+    if (this.connecting) {
+      try { await this.connecting; } catch { /* Connection may have been superseded. */ }
+      if (this.connection && !force) return;
+    }
     if (this.connection && !force) return;
     if (!force && this.lastError && Date.now() - this.lastAttemptAt < RECONNECT_COOLDOWN_MS) {
       throw new SalesforceConnectionError(this.lastError, 503);
     }
+    const epoch = this.epoch;
+    const selected = this.selectedOrg;
     this.lastAttemptAt = Date.now();
     this.lastError = null;
-    this.connecting = this.acquireToken().then((connection) => {
-      this.connection = connection;
-      this.lastError = null;
-    }).catch((err: unknown) => {
-      this.connection = null;
-      this.lastError = err instanceof Error ? err.message : "Salesforce authentication failed.";
-      throw err;
-    }).finally(() => {
-      this.connecting = null;
-    });
-    return this.connecting;
-  }
-
-  private async acquireToken(): Promise<SalesforceOAuthConnection> {
-    const endpoint = new URL("/services/oauth2/token", this.loginUrl);
-    const form = new URLSearchParams({
-      grant_type: "client_credentials",
-      client_id: this.clientId,
-      client_secret: this.clientSecret
-    });
-    let response: Response;
-    try {
-      response = await fetch(endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
-        body: form,
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
-      });
-    } catch {
-      throw new SalesforceConnectionError("Unable to reach the Salesforce OAuth endpoint. Check VPN/network and login URL.", 502);
-    }
-    const payload: unknown = await response.json().catch(() => null);
-    if (!response.ok) {
-      throw new SalesforceConnectionError(`Salesforce authentication failed: ${oauthErrorMessage(payload)}`, 502);
-    }
-    const token = payload as SalesforceOAuthToken | null;
-    if (!token?.access_token || !token.instance_url ||
-        (token.token_type && token.token_type.toLowerCase() !== "bearer")) {
-      throw new SalesforceConnectionError("Salesforce OAuth response was missing a bearer token or instance URL.", 502);
-    }
-    // Never send bearer tokens to an untrusted host received in a response.
-    const instanceUrl = validateSalesforceUrl(token.instance_url, "Salesforce instance URL").origin;
-    return {
-      accessToken: token.access_token,
-      instanceUrl,
-      ...extractIdentity(token.id),
-      connectedAt: new Date().toISOString()
-    };
+    const work = (async () => {
+      try {
+        const session = await this.cli.showToken(selected.username);
+        const instanceUrl = validateSalesforceUrl(session.instanceUrl, "Salesforce instance URL").origin;
+        let organizationId = /^00D[A-Za-z0-9]{12,15}$/.test(session.orgId ?? "") ? session.orgId : selected.orgId;
+        let userId: string | undefined;
+        // Retain user-ID diagnostic support; a failed optional identity lookup
+        // cannot promote or bypass any actual object/FLS permission check.
+        try {
+          const response = await fetch(new URL("/services/oauth2/userinfo", instanceUrl), {
+            headers: { Authorization: "Bearer " + session.accessToken, Accept: "application/json" },
+            signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+          });
+          if (response.status === 401) {
+            throw new SalesforceConnectionError("Salesforce CLI session expired. Sign in through the Salesforce browser again.", 401);
+          }
+          if (response.ok) {
+            const identity = await response.json() as Record<string, unknown>;
+            if (typeof identity.organization_id === "string" && /^00D[A-Za-z0-9]{12,15}$/.test(identity.organization_id)) {
+              if (organizationId && identity.organization_id.slice(0, 15) !== organizationId.slice(0, 15)) {
+                throw new SalesforceConnectionError("Salesforce CLI returned a session from a different org. Reauthenticate the selected org.", 409);
+              }
+              organizationId = identity.organization_id;
+            }
+            if (typeof identity.user_id === "string" && /^005[A-Za-z0-9]{12,15}$/.test(identity.user_id)) {
+              userId = identity.user_id;
+            }
+          }
+        } catch (cause) {
+          // UserInfo may be unavailable for some org policies, but explicit
+          // invalid-session and org-identity mismatches must never be ignored.
+          if (cause instanceof SalesforceConnectionError) throw cause;
+        }
+        if (epoch !== this.epoch) throw new SalesforceConnectionError(
+          "Salesforce org changed during authentication. Retry.", 409);
+        this.connection = {
+          accessToken: session.accessToken,
+          instanceUrl,
+          organizationId,
+          userId,
+          connectedAt: new Date().toISOString(),
+        };
+        this.describeCache.clear();
+      } catch (error) {
+        if (epoch === this.epoch) {
+          this.connection = null;
+          this.lastError = error instanceof Error ? error.message : "Salesforce CLI login failed.";
+        }
+        throw error;
+      }
+    })();
+    this.connecting = work;
+    try { await work; }
+    finally { if (this.connecting === work) this.connecting = null; }
   }
 
   async query(soql: string, api: SalesforceQueryApi): Promise<{
@@ -259,16 +301,20 @@ export class SalesforceOrgConnection {
       throw new SalesforceConnectionError("Enter one read-only SELECT SOQL query (maximum 10,000 characters).", 400);
     }
     await this.connect();
+    const originEpoch = this.epoch;
     let response = await this.sendQuery(trimmed, api);
     let payload: unknown = await response.json().catch(() => null);
     const errors = Array.isArray(payload) ? payload : [payload];
     const sessionExpired = response.status === 401 || (response.status === 403 && errors.some((error) =>
       error && typeof error === "object" && (error as Record<string, unknown>).errorCode === "INVALID_SESSION_ID"));
     if (sessionExpired) {
-      // Client Credentials has no refresh token; issue a fresh credentials grant.
+      // CLI owns refresh tokens; request a renewed CLI access session.
       await this.connect(true);
       response = await this.sendQuery(trimmed, api);
       payload = await response.json().catch(() => null);
+    }
+    if (this.epoch !== originEpoch) {
+      throw new SalesforceConnectionError("Salesforce org changed during this query. Retry analysis.", 409);
     }
     if (!response.ok) {
       const apiErrors = Array.isArray(payload) ? payload : [payload];
@@ -306,6 +352,7 @@ export class SalesforceOrgConnection {
       throw new SalesforceConnectionError("Only a single read-only SELECT SOQL query is supported.", 400);
     }
     await this.connect();
+    const originEpoch = this.epoch;
     const all: T[] = [];
     let nextPath: string | null = null;
     let retried = false;
@@ -317,6 +364,8 @@ export class SalesforceOrgConnection {
       ? minimumVersion : requested;
     const apiBase = `/services/data/${effectiveVersion}/${api === "tooling" ? "tooling/" : ""}query/`;
     for (;;) {
+      if (this.epoch !== originEpoch) throw new SalesforceConnectionError(
+        "Salesforce org changed during this analysis. Rerun against the selected org.", 409);
       const conn = this.connection;
       if (!conn) throw new SalesforceConnectionError("Salesforce connection unavailable.", 503);
       const url: URL = new URL(nextPath ?? apiBase, conn.instanceUrl);
@@ -335,6 +384,8 @@ export class SalesforceOrgConnection {
         throw new SalesforceConnectionError("Unable to retrieve Salesforce permission data.", 502);
       }
       const payload: unknown = await response.json().catch(() => null);
+      if (this.epoch !== originEpoch) throw new SalesforceConnectionError(
+        "Salesforce org changed during this analysis. Rerun against the selected org.", 409);
       if (response.status === 401 && !retried) {
         retried = true;
         all.length = 0;
@@ -365,7 +416,7 @@ export class SalesforceOrgConnection {
 
   /**
    * Read relationship metadata in the current org, using the existing
-   * Client Credentials session. No token or Describe response is sent to the UI.
+   * Salesforce CLI session. No token or Describe response is sent to the UI.
    * Describe results are cached briefly; failures are not cached.
    */
   async describeSObject(objectName: string): Promise<SalesforceSObjectDescribe> {
@@ -380,6 +431,7 @@ export class SalesforceOrgConnection {
 
     const promise = (async () => {
       await this.connect();
+      const originEpoch = this.epoch;
       const request = async (): Promise<Response> => {
         const session = this.connection;
         if (!session) throw new SalesforceConnectionError("Salesforce connection unavailable.", 503);
@@ -401,6 +453,8 @@ export class SalesforceOrgConnection {
         throw new SalesforceConnectionError("Unable to retrieve Salesforce relationship metadata.", 502);
       }
       const payload: unknown = await response.json().catch(() => null);
+      if (this.epoch !== originEpoch) throw new SalesforceConnectionError(
+        "Salesforce org changed during Describe. Rerun analysis.", 409);
       if (!response.ok) {
         const errors = Array.isArray(payload) ? payload : [payload];
         throw new SalesforceConnectionError(errors.map(apiErrorMessage).join(" | ").slice(0, 500), response.status);

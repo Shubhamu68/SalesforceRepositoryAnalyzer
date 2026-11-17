@@ -5,7 +5,9 @@ type ConnectionStatus = {
   configured: boolean;
   connecting: boolean;
   connected: boolean;
-  authMode: "client_credentials";
+  authMode: "salesforce_cli";
+  alias?: string;
+  username?: string;
   environment: "sandbox" | "production" | "custom";
   loginHost: string;
   organizationId?: string;
@@ -43,7 +45,6 @@ async function readJson(response: Response): Promise<Record<string, unknown>> {
 
 export default function SalesforceOrgConnection() {
   const [status, setStatus] = useState<ConnectionStatus | null>(null);
-  const [busy, setBusy] = useState(false);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState("");
   const [api, setApi] = useState<QueryApi>("data");
@@ -71,21 +72,6 @@ export default function SalesforceOrgConnection() {
     const interval = window.setInterval(() => { void load(); }, 5000);
     return () => { active = false; window.clearInterval(interval); };
   }, []);
-
-  async function reconnect() {
-    setError("");
-    setBusy(true);
-    try {
-      const response = await fetch("/api/salesforce/reconnect", { method: "POST" });
-      const data = await readJson(response);
-      setStatus(data as unknown as ConnectionStatus);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Salesforce authentication failed.");
-      await refreshStatus().catch(() => undefined);
-    } finally {
-      setBusy(false);
-    }
-  }
 
   async function runQuery(query: string, queryApi: QueryApi) {
     setRunning(true);
@@ -116,7 +102,7 @@ export default function SalesforceOrgConnection() {
         <div className="panel-heading">
           <div>
             <h2>Connection</h2>
-            <p>Uses Client Credentials configured in <code>.env</code>.</p>
+            <p>Uses your individual Salesforce CLI browser authorization, with no shared secret.</p>
           </div>
           <span role="status" className={`sf-connection-pill ${status?.connected ? "sf-connection-on" : status?.connecting ? "sf-connection-pending" : "sf-connection-off"}`}>
             {connectionLabel}
@@ -126,18 +112,20 @@ export default function SalesforceOrgConnection() {
           <details className="sf-detail-disclosure"><summary>Connection details</summary>
           <div className="sf-connection-details">
             <div><span>Environment</span><strong>{status?.environment || "—"}</strong></div>
-            <div><span>Authentication</span><strong>Client Credentials (server-to-server)</strong></div>
+            <div><span>Authentication</span><strong>Salesforce CLI browser login</strong></div>
+            <div><span>CLI alias</span><strong>{status?.alias || "—"}</strong></div>
             <div><span>Login domain</span><strong>{status?.loginHost || "—"}</strong></div>
             <div><span>Salesforce org ID</span><strong>{status?.organizationId || "—"}</strong></div>
-            <div><span>Run As user ID</span><strong>{status?.userId || "—"}</strong></div>
+            <div><span>Username</span><strong>{status?.username || "—"}</strong></div>
+            <div><span>Authenticated user ID</span><strong>{status?.userId || "—"}</strong></div>
             <div><span>Instance</span><strong>{status?.instanceUrl || "—"}</strong></div>
           </div></details>
           {status?.message && <p className="sf-warning" role="status">{status.message}</p>}
-          <div className="sf-actions">
-            <button className="secondary-button" type="button" disabled={busy || !status?.configured} onClick={() => void reconnect()}>
-              {busy ? "Authenticating…" : "Retry connection"}
-            </button>
-          </div>
+          {!status?.connected && (
+            <p className="sf-description">
+              No Salesforce org is connected. Select Connect org in the top bar to authorize an org.
+            </p>
+          )}
         </div>
       </section>
 

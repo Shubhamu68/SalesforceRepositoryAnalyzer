@@ -14,33 +14,43 @@ START (Windows 10/11)
 5. The first SOQL Security Analysis requiring an Excel report will ask you
    to choose a valid, writable report output folder, if not configured.
 
-CONFIGURATION (in .env, beside Start Analyzer.cmd)
+AUTHENTICATION AND CONFIGURATION
+- Salesforce CLI (sf) must be installed and available in PATH on each user's
+  Windows machine; Node/npm and VS Code remain unnecessary for the portable app.
+- Minimum CLI version: 2.136.0 for dedicated access-token commands.
+  Run `sf update` to upgrade an older installation before opening the Analyzer.
+- On the first screen choose an authorized CLI org, or choose "Log in to
+  Sandbox" / "Log in to Production" to open Salesforce's regular browser login.
+- Enter your Salesforce username/password only on Salesforce's official login
+  page (including SSO and MFA). Never type passwords into this Analyzer.
+- Previously authorized CLI orgs are available for selection, but expired
+  authorizations require browser reauthentication.
+- Logout/Disconnect in the Analyzer does NOT remove CLI credentials shared
+  with Salesforce CLI and VS Code.
+- You can choose Continue repository-only when no org connection is needed.
+
+CONFIGURATION (.env beside Start Analyzer.cmd)
 SALESFORCE_REPOSITORY_PATH=C:/Your/Local/SalesforceRepo
 SALESFORCE_ANALYZER_OUTPUT_DIRECTORY=C:/Users/You/Documents/AnalyzerReports
-SALESFORCE_LOGIN_URL=https://test.salesforce.com
 SALESFORCE_API_VERSION=v62.0
-SALESFORCE_CLIENT_ID=your-approved-app-client-id
-SALESFORCE_CLIENT_SECRET=your-own-authorized-secret
 
 - Repo/output paths are machine-specific. Do not copy another user's paths.
-- A configured path is reused only if it still passes validation.
-- Missing credentials allow repository-only checks after the existing warning.
-  Invalid credentials may block org-dependent SOQL/Stack analyses as before.
-- Only the local machine's loopback address is used. No external server needed.
-- Do not rename or move files inside the extracted distribution.
-- Windows PowerShell and interactive desktop access are needed for the existing
-  native folder selection dialogs.
-- No Node.js/npm/VS Code installation is required on recipients' machines.
-- If the Windows company security policy blocks unsigned batch files or the
-  bundled runtime, seek IT approval rather than bypassing security controls.
+- A configured path is reused only if it passes validation.
+- Only local loopback is used for the Analyzer browser/API; the Salesforce
+  login browser page connects directly to Salesforce's secure HTTPS origin.
+- Windows PowerShell and interactive desktop access are needed for the folder
+  selection dialogs.
+- No standalone Node.js/npm installation is required on recipients' machines.
+- Corporate endpoint policies might restrict CLI/browser login. Obtain IT
+  approval rather than bypassing controls.
 
 SECURITY
-DO NOT publish Salesforce client secrets in Git, GitHub Actions, or the
-distributed ZIP. This build contains only a blank .env.example. Supply each
-authorized user with credentials by an approved secure channel, or use a
-separate properly scoped integration for your team.
-The user who receives a client secret can extract and reuse it; this is
-not a secure end-user OAuth authentication mechanism.
+The Analyzer does not require or distribute a custom Salesforce OAuth app,
+client ID or client secret. CLI manages individual OAuth authorizations.
+The Analyzer accesses only the chosen org and keeps its short-lived access
+token in backend process memory. The ZIP contains only a safe .env.example.
+Never share CLI auth files, auth URLs, tokens, customer data or screenshots
+containing live org records.
 
 For a native standalone desktop window in a later version, an Electron shell
 can replace the browser launcher without rewriting the analyzer features.

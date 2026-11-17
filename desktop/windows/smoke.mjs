@@ -29,7 +29,6 @@ const child = spawn(node, [executable], {
   env: {
     ...process.env, SALESFORCE_ANALYZER_PORT: String(port),
     SALESFORCE_ANALYZER_STATIC_DIR: ui,
-    SALESFORCE_CLIENT_ID: "", SALESFORCE_CLIENT_SECRET: "",
     SALESFORCE_REPOSITORY_PATH: "", SALESFORCE_ANALYZER_OUTPUT_DIRECTORY: "",
   },
   stdio: ["ignore", "pipe", "pipe"],
@@ -55,6 +54,10 @@ try {
   const repository = await (await fetch(url + "/api/repository/status")).json();
   assert.equal(repository.configured, false);
   assert.equal(repository.reason, "MISSING");
+  const salesforce = await (await fetch(url + "/api/salesforce/status")).json();
+  assert.equal(salesforce.authMode, "salesforce_cli");
+  assert.equal(salesforce.connected, false);
+  assert.equal(salesforce.configured, false);
   const reports = await (await fetch(url + "/api/report-output/status")).json();
   assert.equal(reports.configured, false);
   const frontend = await fetch(url);

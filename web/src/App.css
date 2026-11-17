@@ -91,3 +91,5 @@
 .matrix-access-chip.matrix-org-verified{border:1px solid #f0d6a5;background:#fff8e9;color:#80540f}
 
 .source-section summary{cursor:pointer;font-weight:700;color:#274b78;font-size:13px}
+
+.sf-cli-topbar-change{border:1px solid #cbd8ed;border-radius:7px;background:transparent;padding:7px 11px;color:#254b87;font-size:11px;font-weight:700;cursor:pointer}.sf-cli-topbar-change:hover{background:#eaf2ff}.sf-cli-topbar-change:focus-visible{outline:2px solid #2563eb;outline-offset:2px}

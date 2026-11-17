@@ -6,6 +6,8 @@ import PermissionIndicator from "./components/PermissionIndicator";
 import type { PermissionEvidence } from "./components/permissionPresentation";
 import StackTraceImpact from "./components/StackTraceImpact";
 import SalesforceOrgConnection from "./components/SalesforceOrgConnection";
+import SalesforceCliLogin from "./components/SalesforceCliLogin";
+import { shouldShowOrgChooser, type OrgChooserMode } from "./utils/salesforceAuthUi";
 import AnalysisLoadingOverlay from "./components/AnalysisLoadingOverlay";
 import ReportOutputSetupModal from "./components/ReportOutputSetupModal";
 import RepositorySetupModal from "./components/RepositorySetupModal";
@@ -130,6 +132,8 @@ function App() {
   const [repositoryName, setRepositoryName] = useState<string>("");
   const [apiConnected, setApiConnected] = useState(false);
   const [salesforceConnection, setSalesforceConnection] = useState<SalesforceConnectionState>("connecting");
+  const [authDismissed, setAuthDismissed] = useState(false);
+  const [orgChooserMode, setOrgChooserMode] = useState<OrgChooserMode>("startup");
   const [lastSoql, setLastSoql] = useState<SoqlAnalysisResult | null>(null);
   const [reportFolderModalOpen, setReportFolderModalOpen] = useState(false);
   const [reportFolderExplanation, setReportFolderExplanation] = useState("");
@@ -179,6 +183,15 @@ function App() {
     const interval = window.setInterval(() => { void refreshSalesforceConnection(); }, 5000);
     return () => { active = false; window.clearInterval(interval); };
   }, []);
+
+  useEffect(() => {
+    // The backend may already have a selected CLI org when the UI reloads.
+    // Remember a successful startup connection, but don't close a user-requested
+    // Change org screen merely because the previous org remains connected.
+    if (orgChooserMode === "startup" && salesforceConnection === "connected") {
+      setAuthDismissed(true);
+    }
+  }, [orgChooserMode, salesforceConnection]);
 
   useEffect(() => {
     // Do not overwrite an invalid-folder selection error while setup is open.
@@ -279,7 +292,7 @@ function App() {
       if (!response.ok) {
         setOrgWarning({
           kind: "ERROR", title: "Salesforce connection unavailable",
-          message: payload.error || "Salesforce credentials are invalid or the org connection is unavailable. Correct the .env values and retry.",
+          message: payload.error || "The selected Salesforce CLI org is unavailable. Reauthenticate through Salesforce browser login.",
         });
         return null;
       }
@@ -287,7 +300,7 @@ function App() {
         const confirmed = await new Promise<boolean>(resolve => {
           orgWarningResolver.current = resolve;
           setOrgWarning({
-            kind: "WARNING", title: "Salesforce verification not configured",
+            kind: "WARNING", title: "Salesforce verification not connected",
             message: orgPreflightMessage(payload.missing),
           });
         });
@@ -1022,6 +1035,31 @@ function App() {
     </section>
   );
 
+  if (shouldShowOrgChooser(authDismissed, orgChooserMode, salesforceConnection === "connected")) {
+    return <SalesforceCliLogin
+      autoContinueConnected={orgChooserMode === "startup"}
+      onBack={orgChooserMode === "manual" ? () => { setAuthDismissed(true); } : undefined}
+      onComplete={() => {
+        setSalesforceConnection("connected");
+        setAuthDismissed(true);
+        setResult(null);
+        setLastSoql(null);
+      }}
+      onSkip={orgChooserMode === "startup" ? () => {
+        // Repository-only is an explicit first-run decision. The manual
+        // Change org screen uses Back instead, preserving the current session.
+        void fetch("/api/salesforce/disconnect", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+        }).catch(() => undefined).finally(() => {
+          setSalesforceConnection("not-configured");
+          setAuthDismissed(true);
+          setResult(null);
+          setLastSoql(null);
+        });
+      } : undefined}
+    />;
+  }
+
   return (
     <div className="workspace">
       <header className="topbar">
@@ -1034,6 +1072,12 @@ function App() {
             <span className="connection-dot" />{repositoryConnectionIndicator(apiConnected, repoChecked, repoReady).label}
           </span>
           <span className={`connection ${salesforceConnection === "connected" ? "online" : "offline"}`} title="Salesforce authentication status"><span className="connection-dot" />{salesforceConnectionLabel(salesforceConnection)}</span>
+          <button type="button" className="sf-cli-topbar-change" onClick={() => {
+            setOrgChooserMode("manual");
+            setAuthDismissed(false);
+            setResult(null);
+            setLastSoql(null);
+          }}>{salesforceConnection === "connected" ? "Change org" : "Connect org"}</button>
           <span className="avatar">RA</span>
         </div>
       </header>
