@@ -35,7 +35,7 @@ const orgPreflight = new OrgAnalysisPreflightService(salesforceOrgConnection);
 // These configuration and connectivity routes are usable before repo setup.
 app.use("/api/repository", createRepositoryRouter(repositoryConfiguration, () => runtime.invalidate()));
 app.use("/api/report-output", createReportOutputRouter(reportOutputConfiguration));
-app.use("/api/salesforce", createSalesforceRouter(salesforceOrgConnection));
+app.use("/api/salesforce", createSalesforceRouter(salesforceOrgConnection, () => runtime.invalidate()));
 
 app.get("/api/health", async (_req, res) => {
   const status = await repositoryConfiguration.status();
@@ -189,12 +189,4 @@ if (staticDirectory) {
 
 app.listen(PORT, "127.0.0.1", () => {
   console.log("Salesforce Repository Analyzer API running on http://localhost:" + PORT);
-  if (process.env.SALESFORCE_CLIENT_ID?.trim() && process.env.SALESFORCE_CLIENT_SECRET?.trim()) {
-    void salesforceOrgConnection.connect().then(() => {
-      console.log("Salesforce org authenticated (Client Credentials).");
-    }).catch((error: unknown) => {
-      console.warn("Salesforce org auto-connect unavailable:",
-        error instanceof Error ? error.message : "Unknown error");
-    });
-  }
 });

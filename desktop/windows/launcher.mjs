@@ -20,11 +20,11 @@ for (const file of [node, backend, path.join(frontend, "index.html"), exampleEnv
 }
 
 // The checked-in release contains .env.example only. Never overwrite a user's
-// existing credential or path configuration.
+// existing local settings or configured paths.
 if (!existsSync(localEnv)) {
   try {
     copyFileSync(exampleEnv, localEnv, 0);
-    console.log("Created .env from the safe template. Add your own Salesforce credentials if needed.");
+    console.log("Created .env from the safe template. Salesforce login is managed using the local sf CLI.");
   } catch (error) {
     console.error("Cannot create .env. Extract the ZIP to a writable folder before launching.");
     process.exit(1);

@@ -93,16 +93,16 @@ test("first selection creates .env and immediately exposes repository paths", as
   } finally { await f.clean(); }
 });
 
-test("existing .env preserves Salesforce credentials, output config, comments and CRLF", async () => {
+test("existing .env preserves unrelated settings, output config, comments and CRLF", async () => {
   const f = await fixture();
   try {
-    const original = "# Existing settings\r\nSALESFORCE_CLIENT_SECRET=secret-not-for-output\r\nSALESFORCE_ANALYZER_OUTPUT_DIRECTORY=reports\r\n";
+    const original = "# Existing settings\r\nCUSTOM_SETTING=secret-not-for-output\r\nSALESFORCE_ANALYZER_OUTPUT_DIRECTORY=reports\r\n";
     await writeFile(f.envFile, original);
     const config = new RepositoryConfigurationService(f.envFile, async () => f.valid, f.environment);
     await config.chooseAndSave();
     const after = await readFile(f.envFile, "utf8");
     assert.ok(after.startsWith(original));
-    assert.match(after, /SALESFORCE_CLIENT_SECRET=secret-not-for-output/);
+    assert.match(after, /CUSTOM_SETTING=secret-not-for-output/);
     assert.match(after, /SALESFORCE_ANALYZER_OUTPUT_DIRECTORY=reports/);
     assert.match(after, /\r\nSALESFORCE_REPOSITORY_PATH="/);
   } finally { await f.clean(); }
@@ -111,7 +111,7 @@ test("existing .env preserves Salesforce credentials, output config, comments an
 test("invalid selected folder does not overwrite existing repository path or .env", async () => {
   const f = await fixture();
   try {
-    const original = "SALESFORCE_REPOSITORY_PATH=original\r\nSALESFORCE_CLIENT_ID=abc\r\n";
+    const original = "SALESFORCE_REPOSITORY_PATH=original\r\nANOTHER_SETTING=abc\r\n";
     await writeFile(f.envFile, original);
     f.environment[REPOSITORY_ENV_KEY] = f.valid;
     const config = new RepositoryConfigurationService(f.envFile, async () => f.root, f.environment);

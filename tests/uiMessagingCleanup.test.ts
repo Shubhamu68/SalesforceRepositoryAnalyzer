@@ -29,10 +29,10 @@ test("analysis copy distinguishes a live org connection from verified permission
   assert.match(analysisModeHint("matrix", "unavailable"), /verification unavailable/);
 });
 
-test("repository-only mode is explicit about missing credentials, not denied access", () => {
-  assert.equal(orgPreflightMessage(["SALESFORCE_CLIENT_ID"]), "Missing SALESFORCE_CLIENT_ID. Run repository-only analysis?");
-  assert.match(orgPreflightMessage([]), /credentials are missing/i);
-  assert.doesNotMatch(orgPreflightMessage(["SALESFORCE_CLIENT_SECRET"]), /access denied/i);
+test("repository-only mode is explicit about missing org selection, not denied access", () => {
+  assert.equal(orgPreflightMessage(["SALESFORCE_ORG_SELECTION"]), "No Salesforce org is selected. Run repository-only analysis?");
+  assert.match(orgPreflightMessage([]), /verification is not connected/i);
+  assert.doesNotMatch(orgPreflightMessage(["SALESFORCE_ORG_SELECTION"]), /access denied/i);
 });
 
 test("first-run setup avoids generic duplicate error banners but preserves real errors", () => {

@@ -62,6 +62,6 @@ export function repositorySetupMessage(reason: string | undefined, message: stri
 /** Acknowledge repository-only mode without repeating backend technical guidance. */
 export function orgPreflightMessage(missing: readonly string[] | undefined): string {
   return missing?.length
-    ? "Missing " + missing.join(", ") + ". Run repository-only analysis?"
-    : "Salesforce credentials are missing. Run repository-only analysis?";
+    ? "No Salesforce org is selected. Run repository-only analysis?"
+    : "Salesforce org verification is not connected. Run repository-only analysis?";
 }

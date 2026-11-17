@@ -1,31 +1,67 @@
 import { Router } from "express";
+import { isLocalConfigurationRequest } from "./reportOutputRoutes.js";
 import { SalesforceConnectionError, SalesforceOrgConnection } from "../salesforce/SalesforceOrgConnection.js";
+import { SalesforceCliError } from "../salesforce/SalesforceCliAuth.js";
 
-/** Local-only backend access. No OAuth browser routes or client secrets exposed. */
-export function createSalesforceRouter(connection: SalesforceOrgConnection): Router {
+/** The CLI executes only in the user's local backend process, never in the browser. */
+export function createSalesforceRouter(
+  connection: SalesforceOrgConnection,
+  onOrgChanged: () => void = () => undefined,
+): Router {
   const router = Router();
+  router.use((req, res, next) => {
+    if (!isLocalConfigurationRequest(req.get("host"), req.get("origin"))) {
+      res.status(403).json({ error: "Salesforce org setup is available on localhost only." });
+      return;
+    }
+    res.setHeader("Cache-Control", "no-store");
+    next();
+  });
 
   router.get("/status", (_req, res) => {
+    res.json(connection.status);
+  });
+
+  router.get("/orgs", async (_req, res) => {
+    try { res.json(await connection.listOrgs()); }
+    catch (error) { sendError(error, res); }
+  });
+
+  router.post("/login", async (req, res) => {
     try {
-      res.setHeader("Cache-Control", "no-store");
-      // Opening the UI also triggers connection if the startup attempt failed.
-      if (!connection.status.connected && connection.status.configured) {
-        void connection.connect().catch(() => undefined);
+      const environment = req.body?.environment;
+      if (environment !== "sandbox" && environment !== "production") {
+        res.status(400).json({ error: "Choose sandbox or production." });
+        return;
       }
-      res.json(connection.status);
-    } catch (error) {
-      sendError(error, res);
-    }
+      res.json(await connection.login(environment));
+      onOrgChanged();
+    } catch (error) { sendError(error, res); }
+  });
+
+  router.post("/select", async (req, res) => {
+    try {
+      const username = req.body?.username;
+      if (typeof username !== "string") {
+        res.status(400).json({ error: "Choose an existing Salesforce CLI org." });
+        return;
+      }
+      res.json(await connection.selectOrg(username));
+      onOrgChanged();
+    } catch (error) { sendError(error, res); }
+  });
+
+  router.post("/disconnect", (_req, res) => {
+    res.json(connection.disconnect());
+    onOrgChanged();
   });
 
   router.post("/reconnect", async (_req, res) => {
     try {
-      res.setHeader("Cache-Control", "no-store");
       await connection.connect(true);
       res.json(connection.status);
-    } catch (error) {
-      sendError(error, res);
-    }
+      onOrgChanged();
+    } catch (error) { sendError(error, res); }
   });
 
   router.post("/query", async (req, res) => {
@@ -36,17 +72,17 @@ export function createSalesforceRouter(connection: SalesforceOrgConnection): Rou
         res.status(400).json({ error: "api must be 'data' or 'tooling'." });
         return;
       }
-      res.setHeader("Cache-Control", "no-store");
       res.json(await connection.query(soql, api));
-    } catch (error) {
-      sendError(error, res);
-    }
+    } catch (error) { sendError(error, res); }
   });
 
   return router;
 }
 
 function sendError(error: unknown, res: import("express").Response): void {
-  const statusCode = error instanceof SalesforceConnectionError ? error.statusCode : 500;
-  res.status(statusCode).json({ error: error instanceof Error ? error.message : "Salesforce request failed." });
+  const statusCode = error instanceof SalesforceConnectionError || error instanceof SalesforceCliError
+    ? error.statusCode : 500;
+  const message = error instanceof SalesforceConnectionError || error instanceof SalesforceCliError
+    ? error.message : "Salesforce request failed.";
+  res.status(statusCode).json({ error: message });
 }

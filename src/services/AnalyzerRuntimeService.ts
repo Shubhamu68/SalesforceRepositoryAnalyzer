@@ -55,7 +55,7 @@ export class AnalyzerRuntimeService {
     // Validate on every access to detect removed/moved repositories and fail
     // before any scanner or permission lookup starts.
     const paths = await this.repository.resolvePaths();
-    const key = paths.repositoryPath + "|" + String(useOrg);
+    const key = paths.repositoryPath + "|" + String(useOrg) + "|" + (useOrg ? this.connection.cacheScope : "repository-only");
     const existing = this.contexts.get(key);
     if (existing) return existing;
 
