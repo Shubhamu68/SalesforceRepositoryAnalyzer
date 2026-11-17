@@ -1,4 +1,5 @@
 import { SalesforceCliAuthProvider, type CliOrg } from "./SalesforceCliAuthProvider.js";
+import { timedAuthStep } from "./SalesforceAuthTiming.js";
 /**
  * Local Salesforce CLI browser authorization: no Analyzer-owned client secret
  * or integration Run As identity. Tokens stay in backend process memory.
@@ -155,20 +156,26 @@ export class SalesforceOrgConnection {
   }
 
   async loginWeb(environment: "sandbox" | "production"): Promise<void> {
-    const username = await this.cli.loginWeb(environment);
-    // CLI just authorized the username. Don't re-enumerate every saved org,
-    // because a discovery timeout must not invalidate a completed web login.
-    await this.activateOrg({ username, environment, status: "saved" });
+    return timedAuthStep("auth.totalLogin", async () => {
+      const username = await timedAuthStep("auth.browserLogin",
+        () => this.cli.loginWeb(environment));
+      // CLI just authorized the username. Don't re-enumerate every saved org,
+      // because a discovery timeout must not invalidate a completed web login.
+      await timedAuthStep("auth.activateOrg",
+        () => this.activateOrg({ username, environment, status: "saved" }));
+    });
   }
 
   async selectOrg(target: string): Promise<void> {
-    const orgs = await this.cli.listOrgs();
-    const selected = orgs.find(org =>
-      org.username.toLowerCase() === target.toLowerCase() ||
-      org.alias?.toLowerCase() === target.toLowerCase());
-    if (!selected) throw new SalesforceConnectionError(
-      "The selected Salesforce org is not authorized in CLI. Sign in through the browser.", 400);
-    await this.activateOrg(selected);
+    return timedAuthStep("auth.selectOrg", async () => {
+      const orgs = await this.cli.listOrgs();
+      const selected = orgs.find(org =>
+        org.username.toLowerCase() === target.toLowerCase() ||
+        org.alias?.toLowerCase() === target.toLowerCase());
+      if (!selected) throw new SalesforceConnectionError(
+        "The selected Salesforce org is not authorized in CLI. Sign in through the browser.", 400);
+      await this.activateOrg(selected);
+    });
   }
 
   private async activateOrg(selected: CliOrg): Promise<void> {
@@ -230,32 +237,34 @@ export class SalesforceOrgConnection {
     this.lastError = null;
     const work = (async () => {
       try {
-        const session = await this.cli.showToken(selected.username);
+        const session = await timedAuthStep("auth.session", () => this.cli.showToken(selected.username));
         const instanceUrl = validateSalesforceUrl(session.instanceUrl, "Salesforce instance URL").origin;
         let organizationId = /^00D[A-Za-z0-9]{12,15}$/.test(session.orgId ?? "") ? session.orgId : selected.orgId;
         let userId: string | undefined;
         // Retain user-ID diagnostic support; a failed optional identity lookup
         // cannot promote or bypass any actual object/FLS permission check.
         try {
-          const response = await fetch(new URL("/services/oauth2/userinfo", instanceUrl), {
-            headers: { Authorization: "Bearer " + session.accessToken, Accept: "application/json" },
-            signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-          });
-          if (response.status === 401) {
-            throw new SalesforceConnectionError("Salesforce CLI session expired. Sign in through the Salesforce browser again.", 401);
-          }
-          if (response.ok) {
-            const identity = await response.json() as Record<string, unknown>;
-            if (typeof identity.organization_id === "string" && /^00D[A-Za-z0-9]{12,15}$/.test(identity.organization_id)) {
-              if (organizationId && identity.organization_id.slice(0, 15) !== organizationId.slice(0, 15)) {
-                throw new SalesforceConnectionError("Salesforce CLI returned a session from a different org. Reauthenticate the selected org.", 409);
+          await timedAuthStep("auth.userInfo", async () => {
+            const response = await fetch(new URL("/services/oauth2/userinfo", instanceUrl), {
+              headers: { Authorization: "Bearer " + session.accessToken, Accept: "application/json" },
+              signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+            });
+            if (response.status === 401) {
+              throw new SalesforceConnectionError("Salesforce CLI session expired. Sign in through the Salesforce browser again.", 401);
+            }
+            if (response.ok) {
+              const identity = await response.json() as Record<string, unknown>;
+              if (typeof identity.organization_id === "string" && /^00D[A-Za-z0-9]{12,15}$/.test(identity.organization_id)) {
+                if (organizationId && identity.organization_id.slice(0, 15) !== organizationId.slice(0, 15)) {
+                  throw new SalesforceConnectionError("Salesforce CLI returned a session from a different org. Reauthenticate the selected org.", 409);
+                }
+                organizationId = identity.organization_id;
               }
-              organizationId = identity.organization_id;
+              if (typeof identity.user_id === "string" && /^005[A-Za-z0-9]{12,15}$/.test(identity.user_id)) {
+                userId = identity.user_id;
+              }
             }
-            if (typeof identity.user_id === "string" && /^005[A-Za-z0-9]{12,15}$/.test(identity.user_id)) {
-              userId = identity.user_id;
-            }
-          }
+          });
         } catch (cause) {
           // UserInfo may be unavailable for some org policies, but explicit
           // invalid-session and org-identity mismatches must never be ignored.
