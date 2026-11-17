@@ -35,7 +35,7 @@ const loadedEnv = parseEnv(readFileSync(localEnv, "utf8"));
 const environment = { ...process.env };
 for (const [key, value] of Object.entries(loadedEnv)) {
   // Local .env wins over stale inherited PowerShell or Windows variables.
-  if (key.startsWith("SALESFORCE_")) environment[key] = value;
+  if (key.startsWith("SALESFORCE_") && !["SALESFORCE_CLIENT_ID", "SALESFORCE_CLIENT_SECRET", "SALESFORCE_LOGIN_URL"].includes(key)) environment[key] = value;
 }
 
 async function freeLocalPort() {
