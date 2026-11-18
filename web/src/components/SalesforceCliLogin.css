@@ -15,7 +15,8 @@
 .sf-cli-separator:before,.sf-cli-separator:after{content:"";height:1px;background:#e3eaf5;flex:1}
 .sf-cli-login-actions>*{flex:1;text-align:center}
 .sf-cli-error{background:#fff0f0;border:1px solid #ffccd2;color:#a62f40;font-size:12px;padding:12px;border-radius:7px;margin:0}
-.sf-cli-pending{background:#edf5ff;border:1px solid #cddff8;color:#205889;padding:11px;border-radius:7px;font-size:12px;margin:0}
+.sf-cli-pending{background:#edf5ff;border:1px solid #cddff8;color:#205889;padding:11px;border-radius:7px;font-size:12px;margin:0;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.sf-cli-pending .sf-cli-link{flex-shrink:0;white-space:nowrap}
 .sf-cli-connected{background:#eaf7f0;border:1px solid #b8e1cc;color:#14623e;padding:11px;border-radius:7px;font-size:12px;font-weight:650}
 .sf-cli-note{color:#8390a3;font-size:11px;line-height:1.5;margin:0}
 .sf-cli-skip{padding:7px 4px;justify-self:center}
