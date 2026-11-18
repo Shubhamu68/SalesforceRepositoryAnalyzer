@@ -7,6 +7,7 @@ import { SoqlSecurityFinding } from "../models/SoqlSecurityFinding.js";
 import { SoqlSecurityAnalyzer } from "../analyzer/soqlSecurityAnalyzer.js";
 import { scanApexSoql } from "../scanner/apexSoqlScanner.js";
 import { writeSoqlReport } from "../reporter/soqlReportWriter.js";
+import { recordSoqlCount, timeSoqlPhase, withSoqlPerformance } from "./SoqlPerformanceMetrics.js";
 
 export interface SoqlAnalysisSummary extends DeclaredSoqlModeCounts {
   queriesAnalyzed: number;
@@ -37,28 +38,31 @@ export class SoqlAnalysisService {
   async analyze(
     persona: Persona
   ): Promise<SoqlAnalysisResult> {
+    return withSoqlPerformance(async () => {
     const queries: SoqlQuery[] =
-      (await scanApexSoql(
+      (await timeSoqlPhase("repository.scan", () => scanApexSoql(
         this.repositoryPath
-      )).filter((query) => isDataAccessAnalysisObject(query.object));
+      ))).filter((query) => isDataAccessAnalysisObject(query.object));
+    recordSoqlCount("queries.analyzed", queries.length);
 
     const findings =
-      await this.soqlSecurityAnalyzer.analyze(
+      await timeSoqlPhase("security.total", () => this.soqlSecurityAnalyzer.analyze(
         persona,
         queries
-      );
+      ));
+    recordSoqlCount("findings", findings.length);
 
     const outputDirectory = typeof this.outputDirectory === "function"
       ? this.outputDirectory()
       : this.outputDirectory;
 
     const reports =
-      await writeSoqlReport(
+      await timeSoqlPhase("excel.total", () => writeSoqlReport(
         outputDirectory,
         persona.name,
         queries.length,
         findings
-      );
+      ));
 
     const affectedApexClasses =
       new Set(
@@ -95,5 +99,6 @@ export class SoqlAnalysisService {
       findings,
       reports,
     };
+    });
   }
 }
