@@ -1,5 +1,6 @@
 import { SalesforceCliAuthProvider, SalesforceCliLoginCancelledError, type CliOrg, type CliWebLogin } from "./SalesforceCliAuthProvider.js";
 import { timedAuthStep } from "./SalesforceAuthTiming.js";
+import { timeSoqlOrgQuery } from "../services/SoqlPerformanceMetrics.js";
 /**
  * Local Salesforce CLI browser authorization: no Analyzer-owned client secret
  * or integration Run As identity. Tokens stay in backend process memory.
@@ -430,6 +431,7 @@ export class SalesforceOrgConnection {
     soql: string, api: SalesforceQueryApi, limit = 20000,
     minimumVersion?: "v63.0",
   ): Promise<T[]> {
+    return timeSoqlOrgQuery(soql, async () => {
     if (api !== "data" && api !== "tooling") throw new SalesforceConnectionError("Invalid API type.", 400);
     if (!/^SELECT\s/i.test(soql.trim()) || soql.length > MAX_QUERY_LENGTH || soql.includes(";")) {
       throw new SalesforceConnectionError("Only a single read-only SELECT SOQL query is supported.", 400);
@@ -495,6 +497,7 @@ export class SalesforceOrgConnection {
       }
       nextPath = page.nextRecordsUrl;
     }
+    });
   }
 
   /**
