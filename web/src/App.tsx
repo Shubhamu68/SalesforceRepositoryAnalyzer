@@ -72,7 +72,9 @@ type SoqlAnalysisResult = {
     reviews: number;
     affectedApexClasses: number;
     userModeQueries: number;
-    noUserModeQueries: number;
+    securityEnforcedQueries: number;
+    systemModeQueries: number;
+    unspecifiedModeQueries: number;
   };
   outputFolder: string;
 };
@@ -827,12 +829,20 @@ function App() {
         analysis.summary.affectedApexClasses,
       ],
       [
-        "USER_MODE",
+        "WITH USER_MODE",
         analysis.summary.userModeQueries,
       ],
       [
-        "No explicit USER_MODE",
-        analysis.summary.noUserModeQueries,
+        "WITH SECURITY_ENFORCED",
+        analysis.summary.securityEnforcedQueries,
+      ],
+      [
+        "WITH SYSTEM_MODE",
+        analysis.summary.systemModeQueries,
+      ],
+      [
+        "No explicit mode",
+        analysis.summary.unspecifiedModeQueries,
       ],
     ];
 
@@ -877,6 +887,9 @@ function App() {
               )
             )}
           </div>
+          <p className="soql-mode-explainer">
+            These counts show declared SOQL clauses, not effective runtime modes. Queries with no explicit mode may still run in user mode depending on their Apex API version.
+          </p>
         </div>
       </div>
     );
@@ -890,7 +903,9 @@ function App() {
     { label: "Review findings", value: soqlSummary?.reviews, icon: "◉", tone: "amber" },
     { label: "Affected classes", value: soqlSummary?.affectedApexClasses, icon: "{ }", tone: "purple" },
     { label: "WITH USER_MODE", value: soqlSummary?.userModeQueries, icon: "✓", tone: "green" },
-    { label: "No explicit USER_MODE", value: soqlSummary?.noUserModeQueries, icon: "!", tone: "amber" },
+    { label: "WITH SECURITY_ENFORCED", value: soqlSummary?.securityEnforcedQueries, icon: "◈", tone: "blue" },
+    { label: "WITH SYSTEM_MODE", value: soqlSummary?.systemModeQueries, icon: "○", tone: "purple" },
+    { label: "No explicit mode", value: soqlSummary?.unspecifiedModeQueries, icon: "?", tone: "amber" },
   ];
 
   const showSoqlOverlay = checking && page === "soql";
