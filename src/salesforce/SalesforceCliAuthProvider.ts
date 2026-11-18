@@ -15,7 +15,14 @@ export type CliOrg = {
   status: "saved" | "expired";
 };
 export type CliToken = { accessToken: string; instanceUrl: string; orgId?: string; username?: string };
-export type CliRunner = (args: string[], timeoutMs: number) => Promise<string>;
+export type CliRunner = (args: string[], timeoutMs: number, signal?: AbortSignal) => Promise<string>;
+
+export class SalesforceCliLoginCancelledError extends Error {
+  constructor() {
+    super("Salesforce browser login was cancelled.");
+    this.name = "SalesforceCliLoginCancelledError";
+  }
+}
 
 const ARG_SAFE = /^[a-zA-Z0-9_@.+:/-]+$/;
 const ORG_NAME_SAFE = /^[a-zA-Z0-9_.@+-]{1,255}$/;
@@ -43,8 +50,9 @@ export function assertCliArguments(args: string[]): void {
   if (!permitted) throw new Error("Unsupported Salesforce CLI command.");
 }
 
-export const runSalesforceCli: CliRunner = async (args, timeoutMs) => {
+export const runSalesforceCli: CliRunner = async (args, timeoutMs, signal) => {
   assertCliArguments(args);
+  if (signal?.aborted) throw new SalesforceCliLoginCancelledError();
   // Includes CLI startup, Windows sf.cmd overhead and command execution.
   return timedAuthStep(cliAuthPhase(args), () => new Promise<string>((resolve, reject) => {
     // sf.cmd is a Windows command shim. All arguments are allowlisted above;
@@ -57,26 +65,41 @@ export const runSalesforceCli: CliRunner = async (args, timeoutMs) => {
     let output = "";
     let stderrSeen = false;
     let finished = false;
-    const timer = setTimeout(() => {
-      // Windows sf.cmd wraps another process; kill its tree, not just the shell.
+
+    function terminateProcessTree() {
+      // On Windows sf.cmd is a wrapper process. Killing only the wrapper
+      // leaves the CLI OAuth listener alive; terminate its entire child tree.
       if (process.platform === "win32" && child.pid) {
         const killer = spawn("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
           shell: false, windowsHide: true, stdio: "ignore",
         });
         killer.on("error", () => { child.kill(); });
       } else child.kill();
+    }
+
+    const onAbort = () => {
+      terminateProcessTree();
+      finish(new SalesforceCliLoginCancelledError());
+    };
+    const timer = setTimeout(() => {
+      terminateProcessTree();
       const action = args[0] === "org" && args[1] === "login" ? "Salesforce browser login"
         : args[0] === "org" && args[1] === "list" ? "Reading saved Salesforce CLI orgs"
         : "Salesforce CLI command";
       finish(new Error(action + " timed out. Retry or check CLI availability."));
     }, timeoutMs);
+
     function finish(error?: Error) {
       if (finished) return;
       finished = true;
       clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
       if (error) reject(error);
       else resolve(output);
     }
+
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
     child.stdout.on("data", (data: Buffer) => {
       output += data.toString("utf8");
       if (output.length > MAX_JSON_BYTES) {
@@ -256,8 +279,10 @@ export class SalesforceCliAuthProvider {
     };
   }
 
-  async loginWeb(environment: "sandbox" | "production"): Promise<string> {
+  async loginWeb(environment: "sandbox" | "production", signal?: AbortSignal): Promise<string> {
+    if (signal?.aborted) throw new SalesforceCliLoginCancelledError();
     await this.version();
+    if (signal?.aborted) throw new SalesforceCliLoginCancelledError();
     if (environment !== "sandbox" && environment !== "production") {
       throw new Error("Choose Sandbox or Production.");
     }
@@ -266,8 +291,9 @@ export class SalesforceCliAuthProvider {
     const loginHost = environment === "sandbox" ? "test" : "login";
     const result = parseCliResult(await this.run(
       ["org", "login", "web", "--instance-url", "https://" + loginHost + ".salesforce.com", "--json"],
-      WEB_LOGIN_TIMEOUT,
+      WEB_LOGIN_TIMEOUT, signal,
     ));
+    if (signal?.aborted) throw new SalesforceCliLoginCancelledError();
     const username = text(result.username);
     if (!username || !ORG_NAME_SAFE.test(username)) {
       throw new Error("Salesforce CLI completed login without a usable username.");
