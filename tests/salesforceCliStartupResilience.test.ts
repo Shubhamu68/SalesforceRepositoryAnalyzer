@@ -60,7 +60,7 @@ test("an outdated CLI still fails explicitly rather than being hidden as a slow-
   assert.equal(conn.status.connected, false);
 });
 
-test("browser login recovers from initial CLI version timeout and verifies user identity", async () => {
+test("browser login bypasses unrelated CLI version timeout and verifies user identity", async () => {
   let attempts = 0;
   const runner: CliRunner = async args => {
     if (args[0] === "--version") {
@@ -89,7 +89,7 @@ test("browser login recovers from initial CLI version timeout and verifies user 
     assert.equal(conn.status.connected, true);
     assert.equal(conn.status.organizationId, ORG_ID);
     assert.equal(conn.status.userId, USER_ID);
-    assert.equal(attempts, 2);
+    assert.equal(attempts, 1, "direct OAuth login must not repeat a failed version preflight");
     assert.equal(identityChecks, 1, "Salesforce UserInfo still verifies the session");
     assert.doesNotMatch(JSON.stringify(conn.status), /private-test-token/);
   } finally {

@@ -110,7 +110,7 @@ test("login UI shows recovery instructions for list failure instead of trapping 
   assert.match(component, /busy: busy === "select" \|\| busy === "switching" \|\| busy === "cancelling"/);
   assert.match(component, /setCurrent\(session\)/);
   assert.match(component, /if \(autoContinueConnected && session\.connected && loginAttempt\.current === 0\)/);
-  assert.match(backend, /this\.activateOrg\(\{ username, environment, status: "saved" \}, controller\.signal\)/);
+  assert.match(backend, /this\.activateOrg\(\{ \.\.\.browserOrg, environment, status: "saved" \}, controller\.signal, browserOrg\)/);
   assert.match(cli, /"org", "list", "--skip-connection-status", "--json"/);
   assert.match(cli, /"org", "list", "auth", "--json"/);
   assert.doesNotMatch(cli, /this\.run\(\["org", "list", "--json"\]/);

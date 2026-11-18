@@ -69,8 +69,8 @@ test("CLI org discovery lists sandbox and production, preserving stale authoriza
 test("CLI browser login uses default OAuth app and no client ID or secret", async () => {
   const calls:string[] = [];
   const cli = new SalesforceCliAuthProvider(fakeRunner(calls));
-  assert.equal(await cli.loginWeb("sandbox"),"admin@example.com");
-  assert.equal(await cli.loginWeb("production"),"admin-prod@example.com");
+  assert.deepEqual(await cli.loginWeb("sandbox"), { username: "admin@example.com" });
+  assert.deepEqual(await cli.loginWeb("production"), { username: "admin-prod@example.com" });
   assert.ok(calls.includes("org login web --instance-url https://test.salesforce.com --json"));
   assert.ok(calls.includes("org login web --instance-url https://login.salesforce.com --json"));
   assert.ok(calls.every(c=>!c.includes("--client-id") && !c.includes("--client-secret")));

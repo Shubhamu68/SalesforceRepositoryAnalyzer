@@ -1,4 +1,4 @@
-import { SalesforceCliAuthProvider, SalesforceCliLoginCancelledError, type CliOrg } from "./SalesforceCliAuthProvider.js";
+import { SalesforceCliAuthProvider, SalesforceCliLoginCancelledError, type CliOrg, type CliWebLogin } from "./SalesforceCliAuthProvider.js";
 import { timedAuthStep } from "./SalesforceAuthTiming.js";
 /**
  * Local Salesforce CLI browser authorization: no Analyzer-owned client secret
@@ -195,13 +195,13 @@ export class SalesforceOrgConnection {
     await this.cancelLoginWeb();
     const controller = new AbortController();
     const work = timedAuthStep("auth.totalLogin", async () => {
-      const username = await timedAuthStep("auth.browserLogin",
+      const browserOrg = await timedAuthStep("auth.browserLogin",
         () => this.cli.loginWeb(environment, controller.signal));
       if (controller.signal.aborted) throw new SalesforceCliLoginCancelledError();
       // No saved-org enumeration after browser login; the selected token
       // and Salesforce user identity are still verified by activateOrg().
       await timedAuthStep("auth.activateOrg",
-        () => this.activateOrg({ username, environment, status: "saved" }, controller.signal));
+        () => this.activateOrg({ ...browserOrg, environment, status: "saved" }, controller.signal, browserOrg));
       if (controller.signal.aborted) throw new SalesforceCliLoginCancelledError();
     }).catch(error => {
       if (controller.signal.aborted || error instanceof SalesforceCliLoginCancelledError) {
@@ -239,7 +239,7 @@ export class SalesforceOrgConnection {
     });
   }
 
-  private async activateOrg(selected: CliOrg, signal?: AbortSignal): Promise<void> {
+  private async activateOrg(selected: CliOrg, signal?: AbortSignal, completedWebLogin?: CliWebLogin): Promise<void> {
     if (signal?.aborted) throw new SalesforceCliLoginCancelledError();
     const previousOrg = this.selectedOrg;
     const previousConnection = this.connection;
@@ -253,7 +253,7 @@ export class SalesforceOrgConnection {
     this.describeCache.clear();
     this.pendingDescribes.clear();
     try {
-      await this.connect(true);
+      await this.connect(true, completedWebLogin);
       if (signal?.aborted) throw new SalesforceCliLoginCancelledError();
     } catch (error) {
       // Restore the previously verified org only if the old operation still
@@ -294,7 +294,7 @@ export class SalesforceOrgConnection {
   }
 
   /** Same public connection contract; CLI now manages refresh and SSO/MFA. */
-  async connect(force = false): Promise<void> {
+  async connect(force = false, completedWebLogin?: CliWebLogin): Promise<void> {
     if (!this.selectedOrg) throw new SalesforceConnectionError(
       "Select an authorized Salesforce org in the Analyzer first.", 409);
     if (this.connecting) {
@@ -311,7 +311,7 @@ export class SalesforceOrgConnection {
     this.lastError = null;
     const work = (async () => {
       try {
-        const session = await timedAuthStep("auth.session", () => this.cli.showToken(selected.username));
+        const session = await timedAuthStep("auth.session", () => this.cli.showToken(selected.username, completedWebLogin));
         const instanceUrl = validateSalesforceUrl(session.instanceUrl, "Salesforce instance URL").origin;
         let organizationId = /^00D[A-Za-z0-9]{12,15}$/.test(session.orgId ?? "") ? session.orgId : selected.orgId;
         let userId: string | undefined;

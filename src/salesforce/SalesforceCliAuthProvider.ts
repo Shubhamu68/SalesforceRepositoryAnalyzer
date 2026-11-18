@@ -15,6 +15,8 @@ export type CliOrg = {
   status: "saved" | "expired";
 };
 export type CliToken = { accessToken: string; instanceUrl: string; orgId?: string; username?: string };
+/** Redacted metadata returned by a completed sf org login web --json command. */
+export type CliWebLogin = { username: string; instanceUrl?: string; orgId?: string };
 export type CliRunner = (args: string[], timeoutMs: number, signal?: AbortSignal) => Promise<string>;
 
 export class SalesforceCliLoginCancelledError extends Error {
@@ -274,10 +276,35 @@ export class SalesforceCliAuthProvider {
       (a.alias ?? a.username).localeCompare(b.alias ?? b.username));
   }
 
-  async showToken(username: string): Promise<CliToken> {
+  async showToken(username: string, completedWebLogin?: CliWebLogin): Promise<CliToken> {
     if (!ORG_NAME_SAFE.test(username)) throw new Error("Invalid Salesforce CLI org username.");
+    // A successful browser login supplies its *own* org ID, username and
+    // instance URL. Reuse that same-command metadata only for this login;
+    // saved-org listings are never trusted as proof of an authorized session.
+    // Still require a fresh CLI access token and the caller's Salesforce
+    // UserInfo check. Missing metadata falls back to the original two commands.
+    const webOrg = completedWebLogin &&
+      completedWebLogin.username.toLowerCase() === username.toLowerCase() &&
+      text(completedWebLogin.instanceUrl) &&
+      /^00D[A-Za-z0-9]{12,15}$/.test(completedWebLogin.orgId ?? "")
+      ? completedWebLogin : undefined;
+    const tokenRequest = this.run(
+      ["org", "auth", "show-access-token", "--target-org", username, "--json"], CLI_TIMEOUT);
+    if (webOrg) {
+      const token = parseCliResult(await tokenRequest);
+      const accessToken = text(token.accessToken);
+      if (!accessToken) {
+        throw new Error("Salesforce CLI did not provide a valid session. Reauthenticate in the browser.");
+      }
+      return {
+        accessToken, instanceUrl: webOrg.instanceUrl!,
+        orgId: webOrg.orgId, username,
+      };
+    }
+    // Saved-org selection and older CLI login output retain the existing
+    // independent display check, launched concurrently with token retrieval.
     const [secret, display] = await Promise.all([
-      this.run(["org", "auth", "show-access-token", "--target-org", username, "--json"], CLI_TIMEOUT),
+      tokenRequest,
       this.run(["org", "display", "--target-org", username, "--json"], CLI_TIMEOUT),
     ]);
     const token = parseCliResult(secret);
@@ -294,26 +321,38 @@ export class SalesforceCliAuthProvider {
     };
   }
 
-  async loginWeb(environment: "sandbox" | "production", signal?: AbortSignal): Promise<string> {
-    if (signal?.aborted) throw new SalesforceCliLoginCancelledError();
-    await this.version();
+  async loginWeb(environment: "sandbox" | "production", signal?: AbortSignal): Promise<CliWebLogin> {
     if (signal?.aborted) throw new SalesforceCliLoginCancelledError();
     if (environment !== "sandbox" && environment !== "production") {
       throw new Error("Choose Sandbox or Production.");
     }
-    // Salesforce CLI opens the regular Salesforce login page; passwords and
-    // MFA/SSO data never enter this local Analyzer.
+    // Launch OAuth immediately rather than holding the user's browser behind
+    // a separate 7-9 second Windows sf --version subprocess. The UI already
+    // discovers CLI readiness in the background. We STILL enforce the minimum
+    // CLI version before returning a login result or retrieving an access
+    // token; an old CLI can never become a connected Analyzer session.
     const loginHost = environment === "sandbox" ? "test" : "login";
     const result = parseCliResult(await this.run(
       ["org", "login", "web", "--instance-url", "https://" + loginHost + ".salesforce.com", "--json"],
       WEB_LOGIN_TIMEOUT, signal,
     ));
     if (signal?.aborted) throw new SalesforceCliLoginCancelledError();
+    // No separate sf --version process on fresh login. Token retrieval below
+    // requires the supported "org auth show-access-token" CLI capability, and
+    // the backend independently validates the live Salesforce session and org.
+    // A missing/outdated CLI will fail the required command; this avoids an
+    // expensive preflight without accepting unverified credentials.
     const username = text(result.username);
     if (!username || !ORG_NAME_SAFE.test(username)) {
       throw new Error("Salesforce CLI completed login without a usable username.");
     }
     this.invalidateSavedOrgs();
-    return username;
+    // The CLI deliberately redacts the OAuth token, but includes the org
+    // identity and URL. Never persist or expose the full CLI login payload.
+    return {
+      username,
+      ...(text(result.instanceUrl) ? { instanceUrl: text(result.instanceUrl) } : {}),
+      ...(text(result.orgId) ? { orgId: text(result.orgId) } : {}),
+    };
   }
 }

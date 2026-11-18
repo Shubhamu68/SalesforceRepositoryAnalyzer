@@ -38,7 +38,8 @@ export default function SalesforceCliLogin({
   const [orgs, setOrgs] = useState<CliOrg[]>([]);
   const [selected, setSelected] = useState("");
   const [cliVersion, setCliVersion] = useState("");
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [savedOrgsLoaded, setSavedOrgsLoaded] = useState(false);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [discoveryWarning, setDiscoveryWarning] = useState("");
@@ -47,9 +48,9 @@ export default function SalesforceCliLogin({
   // the user's newer Sandbox/Production choice.
   const browserRequest = useRef<AbortController | null>(null);
   const loginAttempt = useRef(0);
-  // Saved-org discovery is optional UI data. Never block direct sign-in
-  // while Salesforce CLI startup/discovery runs in the background.
-  // The backend still validates the CLI version and OAuth session.
+  // Saved-org discovery is explicitly requested by the user, never started
+  // just because the login screen appeared. Direct browser login still uses
+  // the CLI token command and validates the Salesforce session and org.
   const cliOutdated = /Salesforce CLI [\d.]+ is too old for secure token retrieval/i.test(error);
   const detectedVersion = error.match(/Salesforce CLI (\d+\.\d+\.\d+) is too old/i)?.[1];
   const canLogInWithBrowser = canStartBrowserLogin({
@@ -57,38 +58,45 @@ export default function SalesforceCliLogin({
     busy: busy === "select" || busy === "switching" || busy === "cancelling",
   });
 
-  const refresh = useCallback(async (force = false) => {
-    setLoading(true);
-    setError("");
-    setDiscoveryWarning("");
-    try {
-      // A connected backend session is sufficient to enter the workspace.
-      // Don't await unrelated saved-org discovery before deciding to enter.
-      const status = await requestJson("/api/salesforce/status");
+  // This local status request does not launch any CLI process.
+  // Keep a verified current session available without loading saved orgs.
+  useEffect(() => {
+    let active = true;
+    void requestJson("/api/salesforce/status").then(status => {
+      if (!active) return;
       const session = status as AuthStatus;
       setCurrent(session);
       if (autoContinueConnected && session.connected && loginAttempt.current === 0) {
         onComplete(session);
-        return;
       }
+    }).catch(cause => {
+      if (active) setError(cause instanceof Error ? cause.message : "Unable to check Analyzer connection.");
+    });
+    return () => { active = false; };
+  }, [autoContinueConnected]);
+
+  const loadSavedOrgs = useCallback(async (force = false) => {
+    setLoading(true);
+    setError("");
+    setDiscoveryWarning("");
+    try {
       const payload = await requestJson(force ? "/api/salesforce/orgs?refresh=1" : "/api/salesforce/orgs");
       const list = payload as unknown as OrgList;
       const next = Array.isArray(list.orgs) ? list.orgs : [];
       setOrgs(next);
       setCliVersion(typeof list.cliVersion === "string" ? list.cliVersion : "");
       setDiscoveryWarning(typeof list.warning === "string" ? list.warning : "");
-      setSelected(previous => next.some(org => org.username === session.username)
-        ? session.username!
+      setSelected(previous => next.some(org => org.username === current?.username)
+        ? current!.username!
         : next.some(org => org.username === previous) ? previous
         : next.find(org => org.status === "saved")?.username ?? next[0]?.username ?? "");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Salesforce CLI could not be found.");
     } finally {
+      setSavedOrgsLoaded(true);
       setLoading(false);
     }
-  }, [autoContinueConnected]);
-
-  useEffect(() => { void refresh(); }, [refresh]);
+  }, [current?.username]);
 
   async function selectExisting() {
     if (!selected) return;
@@ -189,7 +197,7 @@ export default function SalesforceCliLogin({
           <select id="sf-cli-org" className="sf-cli-select" value={selected}
             onChange={event => setSelected(event.target.value)}
             disabled={loading || Boolean(busy) || orgs.length === 0}>
-            {orgs.length === 0 && <option value="">{loading ? "Loading saved CLI orgs…" : cliOutdated ? "Update Salesforce CLI to load saved orgs" : discoveryWarning ? "Saved CLI orgs unavailable" : error ? "Cannot load CLI orgs" : "No saved orgs found"}</option>}
+            {orgs.length === 0 && <option value="">{loading ? "Loading saved CLI orgs…" : !savedOrgsLoaded ? "Click Load saved orgs" : cliOutdated ? "Update Salesforce CLI to load saved orgs" : discoveryWarning ? "Saved CLI orgs unavailable" : error ? "Cannot load CLI orgs" : "No saved orgs found"}</option>}
             {orgs.map(org => (
               <option key={org.username} value={org.username}>
                 {org.alias || org.username} ({org.environment})
@@ -203,9 +211,9 @@ export default function SalesforceCliLogin({
           </button>
         </div>
         <div className="sf-cli-smallrow">
-          <span>{loading ? "Discovering saved orgs… (sign-in is available)" : cliVersion ? "CLI " + (cliVersion.match(/@salesforce\/cli\/(\d+\.\d+\.\d+)/)?.[1] ?? cliVersion) : detectedVersion ? "CLI " + detectedVersion + " · update required" : "CLI status unavailable"}</span>
+          <span>{loading ? "Discovering saved orgs… (sign-in is available)" : !savedOrgsLoaded ? "Saved orgs load on demand; browser sign-in is ready." : cliVersion ? "CLI " + (cliVersion.match(/@salesforce\/cli\/(\d+\.\d+\.\d+)/)?.[1] ?? cliVersion) : detectedVersion ? "CLI " + detectedVersion + " · update required" : "CLI status unavailable"}</span>
           <button type="button" className="sf-cli-link" disabled={loading || Boolean(busy)}
-            onClick={() => void refresh(true)}>Refresh orgs</button>
+            onClick={() => void loadSavedOrgs(savedOrgsLoaded)}>{savedOrgsLoaded ? "Refresh orgs" : "Load saved orgs"}</button>
         </div>
 
         <div className="sf-cli-separator"><span>OR SIGN IN</span></div>
