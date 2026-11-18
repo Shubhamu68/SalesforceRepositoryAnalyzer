@@ -15,12 +15,12 @@ import { OrgAnalysisPreflightService, OrgAnalysisGuardError } from "../services/
 import { RepositorySetupError } from "../services/SalesforceRepositoryValidator.js";
 import { removeLegacySalesforceOauthEnvironment, removeLegacySalesforceOauthSettings } from "../services/LocalEnvFileService.js";
 
-// Backend can start without any repository configured. Existing shell values
-// still take precedence over .env at startup, as before.
-if (existsSync(".env")) {
-  // Migrate an existing local settings file without retaining obsolete OAuth secrets.
-  await removeLegacySalesforceOauthSettings(".env");
-  process.loadEnvFile(".env");
+// The desktop edition persists settings in its user-data folder; the existing
+// browser/CLI editions continue using the project's local .env by default.
+const localEnvPath = path.resolve(process.env.SALESFORCE_ANALYZER_ENV_PATH?.trim() || ".env");
+if (existsSync(localEnvPath)) {
+  await removeLegacySalesforceOauthSettings(localEnvPath);
+  process.loadEnvFile(localEnvPath);
 }
 // The Salesforce CLI owns OAuth. Ignore stale user/system shell variables, too.
 removeLegacySalesforceOauthEnvironment();
@@ -43,6 +43,13 @@ const orgPreflight = new OrgAnalysisPreflightService(salesforceOrgConnection);
 app.use("/api/repository", createRepositoryRouter(repositoryConfiguration, () => runtime.invalidate()));
 app.use("/api/report-output", createReportOutputRouter(reportOutputConfiguration));
 app.use("/api/salesforce", createSalesforceRouter(salesforceOrgConnection, () => runtime.invalidate()));
+
+// Fast liveness probe for desktop startup. Unlike the existing health endpoint,
+// this never scans the user's Salesforce repository on every readiness poll.
+app.get("/api/health/live", (_req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.json({ status: "ok" });
+});
 
 app.get("/api/health", async (_req, res) => {
   const status = await repositoryConfiguration.status();

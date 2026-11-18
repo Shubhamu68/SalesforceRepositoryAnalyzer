@@ -82,6 +82,16 @@ export function createSalesforceRouter(
     }
   });
 
+  // Explicit cancellation interrupts the active Salesforce CLI OAuth process,
+  // not just the waiting browser request. No Salesforce org is logged out.
+  router.post("/login-web/cancel", async (_req, res) => {
+    try {
+      const cancelled = await connection.cancelLoginWeb();
+      res.setHeader("Cache-Control", "no-store");
+      res.json({ cancelled });
+    } catch (error) { sendError(error, res); }
+  });
+
   router.post("/disconnect", (_req, res) => {
     connection.disconnect();
     onConnectionChange();

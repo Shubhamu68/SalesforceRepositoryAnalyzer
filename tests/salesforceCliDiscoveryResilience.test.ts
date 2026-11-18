@@ -24,7 +24,7 @@ test("startup lists saved CLI orgs locally, never refreshing every org over the 
   assert.equal(orgs.length, 1);
   assert.equal(orgs[0].alias, "unifiedQA");
   assert.deepEqual(commands.slice(1), [
-    { args: "org list --skip-connection-status --json", timeout: 15000 },
+    { args: "org list --skip-connection-status --json", timeout: 30000 },
   ]);
   assert.ok(commands.every(item => item.args !== "org list --json"));
   assert.doesNotThrow(() => assertCliArguments(["org", "list", "auth", "--json"]));
@@ -106,10 +106,11 @@ test("login UI shows recovery instructions for list failure instead of trapping 
   assert.match(component, /Saved CLI orgs unavailable/);
   assert.match(component, /canStartBrowserLogin\(\{/);
   assert.doesNotMatch(component, /setFailedSavedSelection|hasActiveCliOrgs/);
-  assert.match(component, /checking: loading, busy: Boolean\(busy\)/);
+  assert.doesNotMatch(component, /checking: loading/);
+  assert.match(component, /busy: busy === "select" \|\| busy === "switching" \|\| busy === "cancelling"/);
   assert.match(component, /setCurrent\(session\)/);
-  assert.match(component, /if \(autoContinueConnected && session\.connected\)/);
-  assert.match(backend, /this\.activateOrg\(\{ username, environment, status: "saved" \}\)/);
+  assert.match(component, /if \(autoContinueConnected && session\.connected && loginAttempt\.current === 0\)/);
+  assert.match(backend, /this\.activateOrg\(\{ username, environment, status: "saved" \}, controller\.signal\)/);
   assert.match(cli, /"org", "list", "--skip-connection-status", "--json"/);
   assert.match(cli, /"org", "list", "auth", "--json"/);
   assert.doesNotMatch(cli, /this\.run\(\["org", "list", "--json"\]/);

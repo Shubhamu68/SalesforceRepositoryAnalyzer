@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import "./SalesforceCliLogin.css";
 import { canStartBrowserLogin } from "../utils/salesforceAuthUi";
 
@@ -43,12 +43,18 @@ export default function SalesforceCliLogin({
   const [error, setError] = useState("");
   const [discoveryWarning, setDiscoveryWarning] = useState("");
   const [current, setCurrent] = useState<AuthStatus | null>(null);
-  // Discovery, not the presence of another org, controls button availability.
-  // The backend remains responsible for CLI version and OAuth validation.
+  // Ignore responses from abandoned browser logins so they cannot overwrite
+  // the user's newer Sandbox/Production choice.
+  const browserRequest = useRef<AbortController | null>(null);
+  const loginAttempt = useRef(0);
+  // Saved-org discovery is optional UI data. Never block direct sign-in
+  // while Salesforce CLI startup/discovery runs in the background.
+  // The backend still validates the CLI version and OAuth session.
   const cliOutdated = /Salesforce CLI [\d.]+ is too old for secure token retrieval/i.test(error);
   const detectedVersion = error.match(/Salesforce CLI (\d+\.\d+\.\d+) is too old/i)?.[1];
   const canLogInWithBrowser = canStartBrowserLogin({
-    checking: loading, busy: Boolean(busy),
+    // The other environment remains clickable during a browser login.
+    busy: busy === "select" || busy === "switching" || busy === "cancelling",
   });
 
   const refresh = useCallback(async (force = false) => {
@@ -61,7 +67,7 @@ export default function SalesforceCliLogin({
       const status = await requestJson("/api/salesforce/status");
       const session = status as AuthStatus;
       setCurrent(session);
-      if (autoContinueConnected && session.connected) {
+      if (autoContinueConnected && session.connected && loginAttempt.current === 0) {
         onComplete(session);
         return;
       }
@@ -100,24 +106,69 @@ export default function SalesforceCliLogin({
     } finally { setBusy(""); }
   }
 
-  async function browserLogin(environment: "sandbox" | "production") {
-    if (!canLogInWithBrowser) return;
-    setBusy(environment);
+  const loginRequestOptions = {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  };
+
+  async function cancelBrowserLogin() {
+    const previous = browserRequest.current;
+    if (!previous) return;
+    const attempt = ++loginAttempt.current;
+    previous.abort(); // Stop waiting for the old HTTP response immediately.
+    browserRequest.current = null;
+    setBusy("cancelling");
     setError("");
     try {
-      // Salesforce CLI opens the official login in the machine's default
-      // browser; this request resolves after the CLI has completed OAuth.
+      // This also terminates the Salesforce CLI OAuth subprocess. Cancelling
+      // fetch alone would leave sf.cmd waiting for up to five minutes.
+      await requestJson("/api/salesforce/login-web/cancel", loginRequestOptions);
+    } catch (cause) {
+      if (attempt === loginAttempt.current) {
+        setError(cause instanceof Error ? cause.message : "Unable to cancel Salesforce login.");
+      }
+    } finally {
+      if (attempt === loginAttempt.current) setBusy("");
+    }
+  }
+
+  async function browserLogin(environment: "sandbox" | "production") {
+    if (!canLogInWithBrowser || busy === environment) return;
+    const attempt = ++loginAttempt.current;
+    const previous = browserRequest.current;
+    previous?.abort();
+    browserRequest.current = null;
+    setBusy(previous ? "switching" : environment);
+    setError("");
+    try {
+      if (previous) {
+        // Wait for the old CLI process tree to exit before opening a new
+        // Salesforce OAuth listener (which may reuse the same callback port).
+        await requestJson("/api/salesforce/login-web/cancel", loginRequestOptions);
+      }
+      if (attempt !== loginAttempt.current) return;
+      const controller = new AbortController();
+      browserRequest.current = controller;
+      setBusy(environment);
       const status = await requestJson("/api/salesforce/login-web", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ environment }),
+        signal: controller.signal,
       });
+      if (attempt !== loginAttempt.current || controller.signal.aborted) return;
       setCurrent(status as AuthStatus);
       onComplete(status as AuthStatus);
     } catch (cause) {
-      const message = cause instanceof Error ? cause.message : "Salesforce browser login failed.";
-      await refresh();
-      setError(message);
-    } finally { setBusy(""); }
+      if (attempt !== loginAttempt.current ||
+          (cause instanceof Error && cause.name === "AbortError")) return;
+      setError(cause instanceof Error ? cause.message : "Salesforce browser login failed.");
+    } finally {
+      if (attempt === loginAttempt.current) {
+        browserRequest.current = null;
+        setBusy("");
+      }
+    }
   }
 
   return (
@@ -138,7 +189,7 @@ export default function SalesforceCliLogin({
           <select id="sf-cli-org" className="sf-cli-select" value={selected}
             onChange={event => setSelected(event.target.value)}
             disabled={loading || Boolean(busy) || orgs.length === 0}>
-            {orgs.length === 0 && <option value="">{cliOutdated ? "Update Salesforce CLI to load saved orgs" : discoveryWarning ? "Saved CLI orgs unavailable" : error ? "Cannot load CLI orgs" : "No saved orgs found"}</option>}
+            {orgs.length === 0 && <option value="">{loading ? "Loading saved CLI orgs…" : cliOutdated ? "Update Salesforce CLI to load saved orgs" : discoveryWarning ? "Saved CLI orgs unavailable" : error ? "Cannot load CLI orgs" : "No saved orgs found"}</option>}
             {orgs.map(org => (
               <option key={org.username} value={org.username}>
                 {org.alias || org.username} ({org.environment})
@@ -152,26 +203,31 @@ export default function SalesforceCliLogin({
           </button>
         </div>
         <div className="sf-cli-smallrow">
-          <span>{loading ? "Checking CLI…" : cliVersion ? "CLI " + (cliVersion.match(/@salesforce\/cli\/(\d+\.\d+\.\d+)/)?.[1] ?? cliVersion) : detectedVersion ? "CLI " + detectedVersion + " · update required" : "CLI status unavailable"}</span>
+          <span>{loading ? "Discovering saved orgs… (sign-in is available)" : cliVersion ? "CLI " + (cliVersion.match(/@salesforce\/cli\/(\d+\.\d+\.\d+)/)?.[1] ?? cliVersion) : detectedVersion ? "CLI " + detectedVersion + " · update required" : "CLI status unavailable"}</span>
           <button type="button" className="sf-cli-link" disabled={loading || Boolean(busy)}
             onClick={() => void refresh(true)}>Refresh orgs</button>
         </div>
 
         <div className="sf-cli-separator"><span>OR SIGN IN</span></div>
         <div className="sf-cli-row sf-cli-login-actions" aria-label="Sandbox or Production browser login">
-          <button type="button" className="secondary-button" disabled={!canLogInWithBrowser}
+          <button type="button" className="secondary-button" disabled={!canLogInWithBrowser || busy === "sandbox"}
             onClick={() => void browserLogin("sandbox")}>
             {busy === "sandbox" ? "Waiting for Sandbox login…" : "Log in to Sandbox"}
           </button>
-          <button type="button" className="secondary-button" disabled={!canLogInWithBrowser}
+          <button type="button" className="secondary-button" disabled={!canLogInWithBrowser || busy === "production"}
             onClick={() => void browserLogin("production")}>
             {busy === "production" ? "Waiting for Production login…" : "Log in to Production"}
           </button>
         </div>
         {busy === "sandbox" || busy === "production"
-          ? <p className="sf-cli-pending" role="status">
-              Complete sign-in in your browser.
-            </p> : null}
+          ? <div className="sf-cli-pending" role="status">
+              <span>Complete sign-in in your browser, or choose the other environment.</span>
+              <button type="button" className="sf-cli-link" onClick={() => void cancelBrowserLogin()}>
+                Cancel login
+              </button>
+            </div> : null}
+        {busy === "switching" || busy === "cancelling"
+          ? <p className="sf-cli-pending" role="status">Stopping previous Salesforce login…</p> : null}
         {discoveryWarning && <p className="sf-cli-discovery-warning" role="status">{discoveryWarning}</p>}
         {cliOutdated ? (
           <div className="sf-cli-upgrade" role="alert">
@@ -185,7 +241,7 @@ export default function SalesforceCliLogin({
           Salesforce handles sign-in. Your password is not stored in the Analyzer.
         </p>
         {onSkip && (
-          <button type="button" className="sf-cli-skip" disabled={loading || Boolean(busy) || Boolean(current?.connected)} onClick={onSkip}>
+          <button type="button" className="sf-cli-skip" disabled={Boolean(busy) || Boolean(current?.connected)} onClick={onSkip}>
             Use repository-only analysis
           </button>
         )}
