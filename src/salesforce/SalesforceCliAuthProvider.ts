@@ -337,8 +337,11 @@ export class SalesforceCliAuthProvider {
       WEB_LOGIN_TIMEOUT, signal,
     ));
     if (signal?.aborted) throw new SalesforceCliLoginCancelledError();
-    await this.version();
-    if (signal?.aborted) throw new SalesforceCliLoginCancelledError();
+    // No separate sf --version process on fresh login. Token retrieval below
+    // requires the supported "org auth show-access-token" CLI capability, and
+    // the backend independently validates the live Salesforce session and org.
+    // A missing/outdated CLI will fail the required command; this avoids an
+    // expensive preflight without accepting unverified credentials.
     const username = text(result.username);
     if (!username || !ORG_NAME_SAFE.test(username)) {
       throw new Error("Salesforce CLI completed login without a usable username.");
