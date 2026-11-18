@@ -41,7 +41,8 @@ $results = foreach ($check in $checks) {
     for ($i = 1; $i -le $check.Iterations; $i++) {
         $elapsed = [System.Diagnostics.Stopwatch]::StartNew()
         # Do not inspect or persist the command response: token output is sensitive.
-        & sf @($check.Args) *> $null
+        $commandArgs = [string[]] $check.Args
+        & sf @commandArgs *> $null
         $exit = $LASTEXITCODE
         $elapsed.Stop()
         [PSCustomObject]@{
