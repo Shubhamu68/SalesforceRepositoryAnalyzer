@@ -323,18 +323,21 @@ export class SalesforceCliAuthProvider {
 
   async loginWeb(environment: "sandbox" | "production", signal?: AbortSignal): Promise<CliWebLogin> {
     if (signal?.aborted) throw new SalesforceCliLoginCancelledError();
-    await this.version();
-    if (signal?.aborted) throw new SalesforceCliLoginCancelledError();
     if (environment !== "sandbox" && environment !== "production") {
       throw new Error("Choose Sandbox or Production.");
     }
-    // Salesforce CLI opens the regular Salesforce login page; passwords and
-    // MFA/SSO data never enter this local Analyzer.
+    // Launch OAuth immediately rather than holding the user's browser behind
+    // a separate 7-9 second Windows sf --version subprocess. The UI already
+    // discovers CLI readiness in the background. We STILL enforce the minimum
+    // CLI version before returning a login result or retrieving an access
+    // token; an old CLI can never become a connected Analyzer session.
     const loginHost = environment === "sandbox" ? "test" : "login";
     const result = parseCliResult(await this.run(
       ["org", "login", "web", "--instance-url", "https://" + loginHost + ".salesforce.com", "--json"],
       WEB_LOGIN_TIMEOUT, signal,
     ));
+    if (signal?.aborted) throw new SalesforceCliLoginCancelledError();
+    await this.version();
     if (signal?.aborted) throw new SalesforceCliLoginCancelledError();
     const username = text(result.username);
     if (!username || !ORG_NAME_SAFE.test(username)) {
