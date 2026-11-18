@@ -32,7 +32,11 @@ test("refreshing CLI after upgrade succeeds without clearing existing Analyzer s
 test("login UI does not silently disable sandbox and production buttons after CLI errors", () => {
   const ui = readFileSync("web/src/components/SalesforceCliLogin.tsx", "utf8");
   const styles = readFileSync("web/src/components/SalesforceCliLogin.css", "utf8");
-  assert.equal((ui.match(/disabled=\{!canLogInWithBrowser\}/g) ?? []).length, 2);
+  assert.match(ui, /disabled=\{!canLogInWithBrowser \|\| busy === "sandbox"\}/);
+  assert.match(ui, /disabled=\{!canLogInWithBrowser \|\| busy === "production"\}/);
+  assert.match(ui, /Cancel login/);
+  assert.match(ui, /loginAttempt\.current/);
+  assert.match(ui, /previous\?\.abort\(\)/);
   assert.doesNotMatch(ui, /disabled=\{[^\n]*error\s*&&\s*!cliVersion/);
   assert.match(ui, /Salesforce CLI update required/);
   assert.match(ui, /sf update/);
