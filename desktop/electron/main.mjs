@@ -9,6 +9,8 @@ import { isAllowedExternalUrl, resolveDesktopPaths } from "./runtimePaths.mjs";
 import { createDesktopStartupTrace } from "./startupTrace.mjs";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
+const windowIcon = path.join(dirname, "assets", "analyzer.ico");
+if (process.platform === "win32") app.setAppUserModelId("com.salesforcerepositoryanalyzer.desktop");
 const desktopRoot = app.isPackaged
   ? path.join(process.resourcesPath, "analyzer")
   : path.join(dirname, "staging");
@@ -63,6 +65,7 @@ function openWindow() {
   const splashUrl = pathToFileURL(splashFile).href;
   window = new BrowserWindow({
     title: "Salesforce Repository Analyzer",
+    icon: windowIcon,
     width: 1440,
     height: 900,
     minWidth: 1000,

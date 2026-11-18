@@ -56,12 +56,16 @@ test("Desktop build is isolated from the current Windows browser portable workfl
   const legacy = readFileSync(".github/workflows/windows-portable.yml", "utf8");
   assert.match(workflow, /desktop\/electron\/stage\.mjs/);
   assert.match(workflow, /desktop\/electron\/smoke\.mjs/);
-  assert.match(workflow, /build:win/);
+  assert.match(workflow, /build:folder/);
+  assert.match(workflow, /Build unpacked Windows desktop folder/);
+  assert.doesNotMatch(workflow, /Build portable Windows EXE/);
   assert.match(workflow, /SalesforceRepositoryAnalyzer-Desktop-Folder-ZIP/);
   assert.match(workflow, /Compress-Archive -LiteralPath \$desktopRoot/);
   assert.match(workflow, /resources\/analyzer\/app\/dist\/api\/server\.js/);
   assert.match(workflow, /resources\/analyzer\/runtime\/node\.exe/);
-  assert.match(workflow, /SalesforceRepositoryAnalyzer-Desktop-Portable/);
+  assert.doesNotMatch(workflow, /SalesforceRepositoryAnalyzer-Desktop-Portable/);
+  assert.doesNotMatch(workflow, /release\/electron-desktop\/\*\.exe/);
+  assert.equal((workflow.match(/actions\/upload-artifact@v4/g) ?? []).length, 1);
   assert.match(workflow, /upload-artifact@v4/);
   assert.match(legacy, /SalesforceRepositoryAnalyzer-Windows-Portable/);
 });
@@ -120,4 +124,31 @@ test("startup log uses only approved fixed event names and durations", async () 
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("Windows desktop uses the blue Analyzer brand icon rather than Electron", () => {
+  const pkg = JSON.parse(readFileSync("desktop/electron/package.json", "utf8"));
+  const main = readFileSync("desktop/electron/main.mjs", "utf8");
+  const appStyles = readFileSync("web/src/App.css", "utf8");
+  const icon = readFileSync("desktop/electron/assets/analyzer.ico");
+  assert.equal(pkg.scripts["build:folder"], "electron-builder --win --x64 --dir --publish never");
+  assert.equal(pkg.scripts["build:win"], undefined);
+  assert.equal(pkg.build.win.icon, "assets/analyzer.ico");
+  assert.ok(pkg.build.files.includes("assets/analyzer.ico"));
+  assert.match(main, /icon: windowIcon/);
+  assert.match(main, /app\.setAppUserModelId\("com\.salesforcerepositoryanalyzer\.desktop"\)/);
+  assert.match(appStyles, /\.brand-mark\{[^}]*background:#2268eb/);
+  assert.equal(icon.readUInt16LE(0), 0);
+  assert.equal(icon.readUInt16LE(2), 1);
+  assert.ok(icon.readUInt16LE(4) >= 3, "ICO must have multiple image sizes");
+  assert.ok(icon.length > 1000);
+});
+
+test("Change org button is visible on the dark navy navigation bar", () => {
+  const css = readFileSync("web/src/App.css", "utf8");
+  const jsx = readFileSync("web/src/App.tsx", "utf8");
+  assert.match(jsx, /className="sf-cli-topbar-change"/);
+  assert.match(css, /\.sf-cli-topbar-change\{[^}]*background:#eaf2ff/s);
+  assert.match(css, /\.sf-cli-topbar-change\{[^}]*color:#163f83/s);
+  assert.match(css, /\.sf-cli-topbar-change:focus-visible\{outline:3px solid #80bbff/);
 });

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- Reuses the existing Analyzer blue hexagonal brand mark. -->
+  <path d="M128 10.24 245.76 56.32 230.4 194.56 128 245.76 25.6 194.56 10.24 56.32Z" fill="#b5d0ff"/>
+  <path d="M128 23.04 232.96 64 218.88 186.88 128 231.68 37.12 186.88 23.04 64Z" fill="#2268eb"/>
+  <path d="M87.04 76.8H168.96L207.36 128 168.96 179.2H87.04L48.64 128Z" fill="none" stroke="#fff" stroke-width="18" stroke-linejoin="round"/>
+</svg>

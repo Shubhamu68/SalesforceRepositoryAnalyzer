@@ -7,7 +7,7 @@
   "main": "main.mjs",
   "scripts": {
     "start": "electron .",
-    "build:win": "electron-builder --win portable --x64 --publish never"
+    "build:folder": "electron-builder --win --x64 --dir --publish never"
   },
   "devDependencies": {
     "electron": "45.3.4",
@@ -26,16 +26,14 @@
       "runtimePaths.mjs",
       "startupTrace.mjs",
       "splash.html",
+      "assets/analyzer.ico",
       "package.json"
     ],
     "extraResources": [
       { "from": "staging", "to": "analyzer" }
     ],
     "win": {
-      "target": [
-        { "target": "portable", "arch": ["x64"] }
-      ],
-      "artifactName": "SalesforceRepositoryAnalyzer-Desktop-${version}-${arch}.${ext}"
+      "icon": "assets/analyzer.ico"
     }
   }
 }

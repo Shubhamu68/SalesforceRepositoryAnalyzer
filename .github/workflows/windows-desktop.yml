@@ -1,4 +1,4 @@
-name: Build Windows Desktop EXE
+name: Build Windows Desktop Folder ZIP
 
 on:
   workflow_dispatch:
@@ -48,11 +48,11 @@ jobs:
       - name: Install Electron build tools
         working-directory: desktop/electron
         run: npm install --no-audit --no-fund
-      - name: Build portable Windows EXE
+      - name: Build unpacked Windows desktop folder
         working-directory: desktop/electron
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-        run: npm run build:win
+        run: npm run build:folder
       - name: Package unpacked desktop folder as ZIP
         shell: pwsh
         run: |
@@ -88,9 +88,4 @@ jobs:
           path: release/electron-desktop/SalesforceRepositoryAnalyzer-Desktop-Unpacked.zip
           if-no-files-found: error
           retention-days: 30
-      - uses: actions/upload-artifact@v4
-        with:
-          name: SalesforceRepositoryAnalyzer-Desktop-Portable
-          path: release/electron-desktop/*.exe
-          if-no-files-found: error
-          retention-days: 30
+
