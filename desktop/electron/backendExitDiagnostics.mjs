@@ -1,13 +1,13 @@
 // Classify backend failures without writing stderr, user paths, credentials,
 // Salesforce tokens or other untrusted output into a persistent diagnostic log.
 const stderrCategories = [
-  [/\\b(?:ERR_MODULE_NOT_FOUND|MODULE_NOT_FOUND)\\b|Cannot find (?:module|package)/i, "MODULE_NOT_FOUND"],
-  [/\\b(?:EADDRINUSE|EADDRNOTAVAIL)\\b/i, "PORT_UNAVAILABLE"],
-  [/\\b(?:EACCES|EPERM)\\b|permission denied/i, "ACCESS_DENIED"],
-  [/\\b(?:ENOENT)\\b/i, "RESOURCE_NOT_FOUND"],
-  [/\\b(?:ERR_INVALID_ARG_VALUE|ERR_INVALID_ENV_VALUE|ERR_INVALID_ARG_TYPE)\\b|bad option: /i, "INVALID_CONFIGURATION"],
-  [/\\b(?:ERR_DLOPEN_FAILED)\\b|DLL load failed/i, "DLL_LOAD_FAILED"],
-  [/\\bSyntaxError\\b/i, "JS_SYNTAX_ERROR"],
+  [/\b(?:ERR_MODULE_NOT_FOUND|MODULE_NOT_FOUND)\b|Cannot find (?:module|package)/i, "MODULE_NOT_FOUND"],
+  [/\b(?:EADDRINUSE|EADDRNOTAVAIL)\b/i, "PORT_UNAVAILABLE"],
+  [/\b(?:EACCES|EPERM)\b|permission denied/i, "ACCESS_DENIED"],
+  [/\b(?:ENOENT)\b/i, "RESOURCE_NOT_FOUND"],
+  [/\b(?:ERR_INVALID_ARG_VALUE|ERR_INVALID_ENV_VALUE|ERR_INVALID_ARG_TYPE)\b|bad option: /i, "INVALID_CONFIGURATION"],
+  [/\b(?:ERR_DLOPEN_FAILED)\b|DLL load failed/i, "DLL_LOAD_FAILED"],
+  [/\bSyntaxError\b/i, "JS_SYNTAX_ERROR"],
 ];
 const nativeExitCodes = new Map([
   [0xc0000135, "DLL_LOAD_FAILED"],
