@@ -100,3 +100,6 @@
 
 /* Clarify that declared SOQL modes differ from API-version-dependent runtime modes. */
 .soql-mode-explainer{font-size:12px;line-height:1.55;color:#60748d;margin:14px 0 0}
+
+/* Keep long declared-mode labels readable on narrower desktop layouts. */
+@media (min-width:791px) and (max-width:1020px){.metrics-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
