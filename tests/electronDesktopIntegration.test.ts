@@ -74,7 +74,13 @@ test("desktop displays a startup screen without waiting for the Analyzer API", (
   assert.match(main, /show: true/);
   assert.match(main, /window\.loadFile\(splashFile\)/);
   assert.match(main, /const splashReady = openWindow\(\);\s*const origin = await startBackend\(\)/);
-  assert.match(main, /if \(await splashReady\) await showWorkspace\(origin\)/);
+  assert.match(main, /await splashReady;\s*startupStage = "ui";\s*await showWorkspace\(origin\)/);
+  assert.match(main, /startupTrace\.mark\("backend-entered"\)/);
+  assert.match(main, /startupTrace\.mark\("resources-verified"\)/);
+  assert.match(main, /startupTrace\.mark\("settings-loaded"\)/);
+  assert.match(main, /startupTrace\.mark\("port-selected"\)/);
+  assert.match(main, /startupTrace\.mark\("splash-load-failed"\)/);
+  assert.match(main, /startupTrace\.failure\(startupStage, error\)/);
   assert.match(main, /fetch\(origin \+ "\/api\/health\/live"/);
   assert.match(api, /app\.get\("\/api\/health\/live"/);
   assert.match(splash, /Starting your local workspace/);
@@ -95,12 +101,21 @@ test("startup log uses only approved fixed event names and durations", async () 
     trace.mark("backend-spawned");
     trace.mark("backend-ready");
     trace.mark("ui-rendered");
+    // Failure details can contain sensitive paths/metadata: only explicit
+    // error-code allowlist values may reach the diagnostic file.
+    trace.failure("resources", { code: "RESOURCE_MISSING", message: "C:/private/secret" });
+    trace.failure("settings", { code: "Bearer org-token", message: "private" });
     assert.throws(() => trace.mark("secret-token=BAD"), /Invalid startup timing phase/);
+    assert.throws(() => trace.failure("private-stage", new Error("secret")), /Invalid startup failure stage/);
     const lines = readFileSync(trace.file, "utf8").trim().split("\n");
-    assert.equal(lines.length, 4);
-    for (const line of lines) {
+    assert.equal(lines.length, 6);
+    for (const line of lines.slice(0, 4)) {
       assert.match(line, /^\d{4}-\d\d-\d\dT[^\s]+ (main-loaded|backend-spawned|backend-ready|ui-rendered) elapsedMs=\d+ processUptimeMs=\d+$/);
-      assert.doesNotMatch(line, /password|token=|orgId|example\.com|Bearer/i);
+    }
+    assert.match(lines[4], /startup-error stage=resources code=RESOURCE_MISSING$/);
+    assert.match(lines[5], /startup-error stage=settings code=UNKNOWN$/);
+    for (const line of lines) {
+      assert.doesNotMatch(line, /password|token|orgId|example\.com|Bearer|private/i);
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });
