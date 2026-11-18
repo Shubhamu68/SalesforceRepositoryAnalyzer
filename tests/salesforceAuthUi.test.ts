@@ -39,8 +39,12 @@ test("Change org always offers Sandbox and Production login after CLI discovery"
   const login = readFileSync("web/src/components/SalesforceCliLogin.tsx", "utf8");
   const policy = readFileSync("web/src/utils/salesforceAuthUi.ts", "utf8");
   const css = readFileSync("web/src/components/SalesforceCliLogin.css", "utf8");
-  assert.equal((login.match(/disabled=\{!canLogInWithBrowser\}/g) ?? []).length, 2);
-  assert.match(login, /checking: loading, busy: Boolean\(busy\)/);
+  assert.match(login, /disabled=\{!canLogInWithBrowser \|\| busy === "sandbox"\}/);
+  assert.match(login, /disabled=\{!canLogInWithBrowser \|\| busy === "production"\}/);
+  assert.match(login, /checking: loading/);
+  assert.match(login, /busy: busy === "select" \|\| busy === "switching" \|\| busy === "cancelling"/);
+  assert.match(login, /Cancel login/);
+  assert.match(login, /\/api\/salesforce\/login-web\/cancel/);
   assert.doesNotMatch(login, /hasActiveCliOrgs|hasError: Boolean\(error\)|connected: Boolean\(current\?\.connected\)/);
   assert.doesNotMatch(policy, /!state\.connected|!state\.hasActiveCliOrgs/);
   assert.match(login, /Change Salesforce org/);
