@@ -8,6 +8,7 @@ import type { SalesforceOrgConnection } from "../src/salesforce/SalesforceOrgCon
 test("CLI org selection and browser login REST routes never expose tokens", async () => {
   let selected="";
   let changed=0;
+  let cancelled=0;
   const conn={
     get status() {
       return { configured: Boolean(selected), connecting:false, connected:Boolean(selected),
@@ -20,6 +21,7 @@ test("CLI org selection and browser login REST routes never expose tokens", asyn
     }),
     selectOrg: async (target:string) => { selected=target; },
     loginWeb: async (environment:string) => { selected=environment==="production"?"prod":"qa"; },
+    cancelLoginWeb: async () => { cancelled++; return true; },
     disconnect: () => { selected=""; },
     connect: async () => {},
     query: async () => ({done:true,api:"data",totalSize:0,displayedCount:0,truncated:false,records:[]}),
@@ -72,6 +74,21 @@ test("CLI org selection and browser login REST routes never expose tokens", asyn
     assert.equal(payload.environment,"production");
     assert.equal(changed,5);
     assert.doesNotMatch(JSON.stringify(payload),/accessToken|refreshToken|clientSecret/);
+
+    const forbiddenCancel=await fetch(url+"/api/salesforce/login-web/cancel",{
+      method:"POST",
+      headers:{"Content-Type":"application/json","Origin":"https://untrusted.example"},
+      body:"{}",
+    });
+    assert.equal(forbiddenCancel.status,403);
+    assert.equal(cancelled,0,"cross-origin requests must not cancel a local CLI authorization");
+
+    const cancel=await fetch(url+"/api/salesforce/login-web/cancel",{
+      method:"POST",headers:{"Content-Type":"application/json"},body:"{}",
+    });
+    assert.equal(cancel.status,200);
+    assert.deepEqual(await cancel.json(),{cancelled:true});
+    assert.equal(cancelled,1);
   } finally {
     await new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve()));
   }
