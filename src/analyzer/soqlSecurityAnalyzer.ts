@@ -13,6 +13,7 @@ import type { SalesforceFieldMetadataService } from "../salesforce/SalesforceFie
 import type { SoqlFieldReference } from "../models/SoqlFieldInventory.js";
 import { ApexExecutionSecurityModeResolver } from "../services/ApexExecutionSecurityModeResolver.js";
 import { runtimeImpactForFinding, type SoqlExecutionMode } from "./soqlExecutionMode.js";
+import { recordSoqlCount, timeSoqlPhase, timeSoqlSync } from "../services/SoqlPerformanceMetrics.js";
 
 /** Prevent hundreds of simultaneous Salesforce requests on large repositories. */
 const CONCURRENCY = 4;
@@ -69,32 +70,34 @@ export class SoqlSecurityAnalyzer {
   async analyze(persona: Persona, inputQueries: SoqlQuery[]): Promise<SoqlSecurityFinding[]> {
     // Direct callers may bypass SoqlAnalysisService; skip event queries here too.
     const queries = inputQueries.filter((query) => isDataAccessAnalysisObject(query.object));
-    const resolved = await this.personaPermissionResolver.resolve(persona);
+    const resolved = await timeSoqlPhase("permissions.resolve", () => this.personaPermissionResolver.resolve(persona));
     const evaluator = createPersonaAccessEvaluator(resolved);
-    const relationshipMap = await buildRelationshipMap(this.objectsDirectory);
+    const relationshipMap = await timeSoqlPhase("relationships.local", () => buildRelationshipMap(this.objectsDirectory));
     // The same scoped collector and Describe hydrator are used by Stack Trace.
     // Only queries with unresolved paths trigger optional Salesforce Describe.
     if (this.orgRelationshipMetadata) {
-      const hydrator = this.orgRelationshipMetadata.createHydrator(relationshipMap);
-      await boundedMap(queries, async (query) => {
-        const firstPass = collectQueryFields(query, relationshipMap);
-        if (firstPass.unresolved.length) {
-          await hydrator.hydrateQuery(query,
-            firstPass.unresolvedEntries.map((item) => `${item.baseObject}.${item.fieldPath}`));
-        }
+      await timeSoqlPhase("relationships.org", async () => {
+        const hydrator = this.orgRelationshipMetadata!.createHydrator(relationshipMap);
+        await boundedMap(queries, async (query) => {
+          const firstPass = collectQueryFields(query, relationshipMap);
+          if (firstPass.unresolved.length) {
+            await hydrator.hydrateQuery(query,
+              firstPass.unresolvedEntries.map((item) => `${item.baseObject}.${item.fieldPath}`));
+          }
+        });
       });
     }
     const unresolvedFields: UnresolvedSoqlField[] = [];
     const parserLimitations: Array<{ query: SoqlQuery; message: string }> = [];
-    const inventory = buildSoqlFieldInventory(queries, relationshipMap,
+    const inventory = timeSoqlSync("fields.inventory", () => buildSoqlFieldInventory(queries, relationshipMap,
       (entry) => unresolvedFields.push(entry),
-      (query, message) => parserLimitations.push({ query, message }));
+      (query, message) => parserLimitations.push({ query, message })));
     this.executionModeResolver.clearCache();
     // Version lookup is cached per class, so hundreds of queries do not trigger
     // hundreds of metadata reads. The same resolver serves Stack Trace analysis.
-    const modeResults = await Promise.all(queries.map((query) =>
+    const modeResults = await timeSoqlPhase("execution.modes", () => Promise.all(queries.map((query) =>
       this.executionModeResolver.resolve(query.query, query.filePath)
-    ));
+    )));
     const queryByLocation = new Map<string, { query: SoqlQuery; execution: SoqlExecutionMode }>(queries.map((query, index) => [
       `${query.filePath}|${query.lineNumber}`, { query, execution: modeResults[index] },
     ]));
@@ -162,8 +165,10 @@ export class SoqlSecurityAnalyzer {
     // Resolve each distinct object only once. One object failure is represented
     // once per referencing SOQL query, NOT duplicated across all fields.
     const objects = [...inventory.entries()];
+    recordSoqlCount("inventory.objects", objects.length);
+    recordSoqlCount("inventory.unique_fields", objects.reduce((total, [, fields]) => total + fields.size, 0));
     const results = new Map<string, SoqlSecurityFinding[]>();
-    await boundedMap(objects, async ([object, fields]) => {
+    await timeSoqlPhase("access.evaluate", () => boundedMap(objects, async ([object, fields]) => {
       const repositoryObject = evaluator.evaluateObject(object).access;
       const objectDecision = this.readVerification
         ? await this.readVerification.resolve(persona, object, repositoryObject.read)
@@ -199,6 +204,10 @@ export class SoqlSecurityAnalyzer {
       await boundedMap(uniqueFields, async ([fieldKey, references]) => {
         const fieldName = references[0]?.field ?? fieldKey;
         const grant = evaluator.evaluateField(`${object}.${fieldName}`);
+        // An explicit repository grant (or schema-required Read) has already
+        // established FLS. EntityParticle metadata cannot change that verdict;
+        // avoid an unnecessary live-org lookup when all fields are granted.
+        if (grant.schemaRequired === true || grant.readGrantedBy.length > 0) return;
         // Current-org metadata overrides the curated snapshot. Never
         // infer a grant from an unknown field in a successful live lookup.
         const metadata = await this.fieldMetadata?.getField(object, fieldName);
@@ -217,7 +226,7 @@ export class SoqlSecurityAnalyzer {
       });
       for (const [key] of uniqueFields) objectFindings.push(...(fieldFindings.get(key) ?? []));
       results.set(object, objectFindings);
-    });
+    }));
 
     for (const [object] of objects) findings.push(...(results.get(object) ?? []));
 
