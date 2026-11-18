@@ -140,7 +140,10 @@ test("Windows desktop uses the blue Analyzer brand icon rather than Electron", (
   assert.match(appStyles, /\.brand-mark\{[^}]*background:#2268eb/);
   assert.equal(icon.readUInt16LE(0), 0);
   assert.equal(icon.readUInt16LE(2), 1);
-  assert.ok(icon.readUInt16LE(4) >= 3, "ICO must have multiple image sizes");
+  const imageCount = icon.readUInt16LE(4);
+  assert.ok(imageCount >= 3, "ICO must have multiple image sizes");
+  const iconSizes = Array.from({ length: imageCount }, (_, i) => icon.readUInt8(6 + i * 16) || 256);
+  assert.ok(iconSizes.includes(256), "Windows builder requires a 256x256 icon image");
   assert.ok(icon.length > 1000);
 });
 
