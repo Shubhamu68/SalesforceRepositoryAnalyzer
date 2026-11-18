@@ -206,6 +206,7 @@ async function startBackend() {
   function recordBackendExit(reason) {
     if (shuttingDown || backendFailure) return;
     backendFailure = reason;
+    startupTrace.mark("backend-exited");
     startupTrace.backendExit(reason);
     startupTrace.failure("backend", { code: reason.category });
     if (backendWasReady) reportBackendFailure();
@@ -255,7 +256,9 @@ if (primaryInstance) app.whenReady().then(async () => {
     startupStage = "ui";
     await showWorkspace(origin);
   } catch (error) {
-    startupTrace.failure(backendFailure ? "backend" : startupStage, error);
+    // recordBackendExit already persisted a more useful, safe category. Do
+    // not overwrite it with the generic API-readiness failure.
+    if (!backendFailure) startupTrace.failure(startupStage, error);
     startupTrace.mark("startup-failed");
     if (!shuttingDown && !errorDialogShown) {
       if (backendFailure) reportBackendFailure();
