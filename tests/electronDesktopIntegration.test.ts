@@ -86,7 +86,7 @@ test("desktop displays a startup screen without waiting for the Analyzer API", (
   assert.match(main, /startupTrace\.mark\("settings-loaded"\)/);
   assert.match(main, /startupTrace\.mark\("port-selected"\)/);
   assert.match(main, /startupTrace\.mark\("splash-load-failed"\)/);
-  assert.match(main, /startupTrace\.failure\(startupStage, error\)/);
+  assert.match(main, /startupTrace\.failure\(backendFailure \? "backend" : startupStage, error\)/);
   assert.match(main, /fetch\(origin \+ "\/api\/health\/live"/);
   assert.match(api, /app\.get\("\/api\/health\/live"/);
   assert.match(splash, /Starting your local workspace/);
