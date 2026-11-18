@@ -7,6 +7,11 @@ import { classifySoqlMode } from "../analyzer/soqlExecutionMode.js";
 import { parseNestedSoql, maskSoql } from "../analyzer/nestedSoqlScopes.js";
 
 import type { SoqlQuery } from "../models/SoqlQuery.js";
+import { recordSoqlCount } from "../services/SoqlPerformanceMetrics.js";
+
+// Bound filesystem concurrency: improve cold scans without opening hundreds of
+// Apex files simultaneously or changing deterministic query ordering.
+const READ_BATCH_SIZE = 12;
 
 export async function scanApexSoql(
   repositoryPath: string
@@ -16,24 +21,18 @@ export async function scanApexSoql(
       repositoryPath
     );
 
+  recordSoqlCount("scanner.apex_files", apexFiles.length);
   const queries: SoqlQuery[] = [];
 
-  for (const filePath of apexFiles) {
-    const source =
-      await readFile(
-        filePath,
-        "utf-8"
-      );
-
-    const fileQueries =
-      extractSoqlQueries(
-        source,
-        filePath
-      );
-
-    queries.push(
-      ...fileQueries
-    );
+  // Promise.all retains input order, so parallel reads cannot reorder findings.
+  // Using a fixed-size batch also bounds memory and file-handle usage.
+  for (let start = 0; start < apexFiles.length; start += READ_BATCH_SIZE) {
+    const batch = apexFiles.slice(start, start + READ_BATCH_SIZE);
+    const parsed = await Promise.all(batch.map(async (filePath) => {
+      const source = await readFile(filePath, "utf-8");
+      return extractSoqlQueries(source, filePath);
+    }));
+    for (const fileQueries of parsed) queries.push(...fileQueries);
   }
 
   return queries.sort(
