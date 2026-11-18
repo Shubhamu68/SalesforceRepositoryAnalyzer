@@ -160,7 +160,12 @@ test("browser login invalidates cached org discovery after a new authorization",
 test("the UI Refresh orgs action explicitly bypasses the server cache", () => {
   const ui = readFileSync("web/src/components/SalesforceCliLogin.tsx", "utf8");
   const routes = readFileSync("src/api/salesforceRoutes.ts", "utf8");
-  assert.match(ui, /refresh\(true\)/);
+  assert.match(ui, /loadSavedOrgs\(savedOrgsLoaded\)/);
+  assert.match(ui, /Saved orgs load on demand/);
+  assert.match(ui, /requestJson\("\/api\/salesforce\/status"\)/);
+  // The login mount effect must not start the optional CLI org enumeration.
+  const mountEffect = ui.slice(ui.indexOf("  useEffect(() => {"), ui.indexOf("  const loadSavedOrgs = useCallback"));
+  assert.doesNotMatch(mountEffect, /\/api\/salesforce\/orgs/);
   assert.match(ui, /\/api\/salesforce\/orgs\?refresh=1/);
   assert.match(routes, /req\.query\.refresh === "1"/);
 });
