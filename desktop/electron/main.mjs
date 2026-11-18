@@ -20,6 +20,7 @@ let backend = null;
 let window = null;
 let allowedAppOrigin = null;
 let shuttingDown = false;
+let startupStage = "window";
 
 const primaryInstance = app.requestSingleInstanceLock();
 if (!primaryInstance) app.quit();
@@ -105,13 +106,14 @@ function openWindow() {
     }
   });
   window.on("closed", () => { window = null; app.quit(); });
-  return window.loadFile(splashFile).then(() => true).catch(() => {
-    startupTrace.mark("startup-failed");
-    if (!shuttingDown) {
-      dialog.showErrorBox("Unable to show startup screen",
-        "The desktop application resources are incomplete.");
-      app.quit();
-    }
+  startupTrace.mark("window-handlers-ready");
+  startupTrace.mark("splash-load-started");
+  // An optional splash must never prevent the working Analyzer from opening.
+  // If loading the packaged HTML fails, keep the window and open React as
+  // soon as the API is ready instead of terminating the entire application.
+  return window.loadFile(splashFile).then(() => true).catch(error => {
+    startupTrace.failure("window", error);
+    startupTrace.mark("splash-load-failed");
     return false;
   });
 }
@@ -123,12 +125,27 @@ async function showWorkspace(origin) {
 }
 
 async function startBackend() {
+  startupStage = "resources";
+  startupTrace.mark("backend-entered");
   const paths = resolveDesktopPaths(desktopRoot);
-  for (const required of [paths.node, paths.backend, paths.frontendIndex, paths.template]) {
-    if (!existsSync(required)) throw new Error("Desktop package is incomplete. Reinstall the application.");
+  for (const [name, file] of [
+    ["runtime", paths.node],
+    ["backend", paths.backend],
+    ["frontend", paths.frontendIndex],
+    ["settings-template", paths.template],
+  ]) {
+    if (!existsSync(file)) {
+      const missing = new Error("Missing desktop resource: " + name);
+      missing.code = "RESOURCE_MISSING";
+      throw missing;
+    }
   }
+  startupTrace.mark("resources-verified");
+  startupStage = "settings";
   prepareLocalSettings(paths.template);
+  startupTrace.mark("settings-ready");
   const saved = parseEnv(readFileSync(localSettings, "utf8"));
+  startupTrace.mark("settings-loaded");
   const environment = { ...process.env };
   // The app has no OAuth client secret; CLI owns authorization.
   for (const key of ["SALESFORCE_CLIENT_ID", "SALESFORCE_CLIENT_SECRET", "SALESFORCE_LOGIN_URL"]) {
@@ -140,8 +157,11 @@ async function startBackend() {
       environment[key] = value;
     }
   }
+  startupStage = "port";
   const port = await pickUnusedPort();
+  startupTrace.mark("port-selected");
   const origin = "http://127.0.0.1:" + port;
+  startupStage = "backend";
   backend = spawn(paths.node, [paths.backend], {
     cwd: desktopRoot,
     windowsHide: true,
@@ -161,8 +181,9 @@ async function startBackend() {
   backend.stderr.on("data", chunk => {
     if (!app.isPackaged) process.stderr.write(chunk);
   });
-  backend.once("error", () => {
+  backend.once("error", error => {
     if (!shuttingDown) {
+      startupTrace.failure("backend", error);
       dialog.showErrorBox("Analyzer could not start", "The local Analyzer service could not be started.");
       app.quit();
     }
@@ -174,6 +195,7 @@ async function startBackend() {
     }
   });
 
+  startupStage = "api";
   for (let attempt = 0; attempt < 100; attempt++) {
     if (backend.exitCode !== null || backend.killed) break;
     try {
@@ -199,17 +221,22 @@ if (primaryInstance) app.whenReady().then(async () => {
   // The UI is local, but still sandbox its renderer and deny sensitive privileges.
   session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
   try {
+    startupStage = "window";
     const splashReady = openWindow();
     const origin = await startBackend();
-    // Preserve the startup view until its local file load completes; otherwise
-    // a very fast backend could race the first page navigation.
-    if (await splashReady) await showWorkspace(origin);
-  } catch {
+    // Always open the workspace, even if the optional splash failed to load.
+    // Wait for its navigation to settle so a late splash cannot overwrite React.
+    await splashReady;
+    startupStage = "ui";
+    await showWorkspace(origin);
+  } catch (error) {
+    startupTrace.failure(startupStage, error);
     startupTrace.mark("startup-failed");
     if (!shuttingDown) {
       stopBackend();
       dialog.showErrorBox("Unable to open Analyzer",
-        "The desktop service could not start. See startup-timing.log in the app data folder.");
+        "Startup failed during: " + startupStage +
+        ". See startup-timing.log in the app data folder for a safe error category.");
       app.quit();
     }
   }
