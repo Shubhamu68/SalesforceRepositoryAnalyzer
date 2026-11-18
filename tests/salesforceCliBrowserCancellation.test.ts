@@ -102,3 +102,45 @@ test("an already-aborted browser sign-in never starts a CLI command", async () =
     error => error instanceof SalesforceCliLoginCancelledError);
   assert.deepEqual(seen, []);
 });
+
+test("cancelling a new Production login preserves the previously verified Sandbox connection", async () => {
+  const started = deferred<void>();
+  const runner: CliRunner = async (args, _timeout, signal) => {
+    if (args[0] === "--version") return "@salesforce/cli/2.158.7";
+    if (args[1] === "list") return success({ nonScratchOrgs: [{
+      username: USERNAME, alias: "qa", isSandbox: true,
+      orgId: ORG_ID, instanceUrl: INSTANCE,
+    }] });
+    if (args[1] === "login") return new Promise<string>((_resolve, reject) => {
+      const abort = () => reject(new SalesforceCliLoginCancelledError());
+      if (signal?.aborted) abort();
+      else signal?.addEventListener("abort", abort, { once: true });
+      started.resolve();
+    });
+    if (args.includes("show-access-token")) return success({ accessToken: "unexposed-secret" });
+    if (args[1] === "display") return success({
+      orgId: ORG_ID, username: USERNAME, instanceUrl: INSTANCE,
+    });
+    throw new Error("Unexpected CLI command");
+  };
+  const conn = new SalesforceOrgConnection(new SalesforceCliAuthProvider(runner));
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(
+    JSON.stringify({ organization_id: ORG_ID, user_id: USER_ID }), { status: 200 });
+  try {
+    await conn.selectOrg(USERNAME);
+    assert.equal(conn.status.connected, true);
+    const connectedAt = conn.status.connectedAt;
+    const pending = conn.loginWeb("production");
+    const rejected = assert.rejects(pending, /cancelled/i);
+    await started.promise;
+    assert.equal(await conn.cancelLoginWeb(), true);
+    await rejected;
+    assert.equal(conn.status.connected, true);
+    assert.equal(conn.status.environment, "sandbox");
+    assert.equal(conn.status.username, USERNAME);
+    assert.equal(conn.status.connectedAt, connectedAt);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
