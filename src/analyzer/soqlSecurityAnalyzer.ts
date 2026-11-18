@@ -213,9 +213,7 @@ export class SoqlSecurityAnalyzer {
         const metadata = await this.fieldMetadata?.getField(object, fieldName);
         const permissionable = this.fieldMetadata ? metadata?.permissionable : grant.permissionable;
         // A non-permissionable component needs object Read, not separate FLS.
-        const repositoryFieldRead = grant.schemaRequired === true ||
-          permissionable === false || grant.readGrantedBy.length > 0 ||
-          repositoryObject.viewAllFields;
+        const repositoryFieldRead = permissionable === false;
         if (repositoryFieldRead) return;
 
         const fieldDecision = this.readVerification
