@@ -1,4 +1,5 @@
 import { isDataAccessAnalysisObject } from "../config/fieldSecurityPolicy.js";
+import { countDeclaredSoqlModes, type DeclaredSoqlModeCounts } from "../analyzer/soqlDeclaredModeSummary.js";
 
 import { Persona } from "../models/Persona.js";
 import { SoqlQuery } from "../models/SoqlQuery.js";
@@ -7,14 +8,12 @@ import { SoqlSecurityAnalyzer } from "../analyzer/soqlSecurityAnalyzer.js";
 import { scanApexSoql } from "../scanner/apexSoqlScanner.js";
 import { writeSoqlReport } from "../reporter/soqlReportWriter.js";
 
-export interface SoqlAnalysisSummary {
+export interface SoqlAnalysisSummary extends DeclaredSoqlModeCounts {
   queriesAnalyzed: number;
   totalFindings: number;
   errors: number;
   reviews: number;
   affectedApexClasses: number;
-  userModeQueries: number;
-  noUserModeQueries: number;
 }
 
 export interface SoqlAnalysisReports {
@@ -68,6 +67,8 @@ export class SoqlAnalysisService {
         )
       ).size;
 
+    const declaredModeCounts = countDeclaredSoqlModes(queries);
+
     return {
       personaName: persona.name,
 
@@ -88,16 +89,7 @@ export class SoqlAnalysisService {
           ).length,
 
         affectedApexClasses,
-
-        userModeQueries:
-          queries.filter(
-            (query) => query.withUserMode
-          ).length,
-
-        noUserModeQueries:
-          queries.filter(
-            (query) => !query.withUserMode
-          ).length,
+        ...declaredModeCounts,
       },
 
       findings,
