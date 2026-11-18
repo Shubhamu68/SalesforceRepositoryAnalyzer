@@ -17,6 +17,7 @@ const PHASES = new Set([
   "settings-loaded",
   "port-selected",
   "backend-spawned",
+  "backend-exited",
   "backend-ready",
   "ui-rendered",
   "startup-failed",
@@ -25,6 +26,10 @@ const STAGES = new Set(["window", "resources", "settings", "port", "backend", "a
 const ERROR_CODES = new Set([
   "ENOENT", "EACCES", "EPERM", "EINVAL", "EADDRINUSE", "EADDRNOTAVAIL",
   "RESOURCE_MISSING", "UNKNOWN",
+  "MODULE_NOT_FOUND", "PORT_UNAVAILABLE", "ACCESS_DENIED",
+  "RESOURCE_NOT_FOUND", "INVALID_CONFIGURATION", "DLL_LOAD_FAILED",
+  "JS_SYNTAX_ERROR", "WINDOWS_INITIALIZATION_FAILED", "PROCESS_CRASH",
+  "BACKEND_SIGNALLED", "BACKEND_EXIT",
 ]);
 
 /**
@@ -37,6 +42,25 @@ export function createDesktopStartupTrace(userData) {
   const start = performance.now();
   return {
     file,
+    backendExit(result) {
+      // Only a numeric process exit code, an allowlisted signal/category,
+      // and timing are recorded. No stderr, paths or process arguments.
+      const exitCode = Number.isInteger(result?.exitCode) &&
+        result.exitCode >= -2147483648 && result.exitCode <= 4294967295
+        ? String(result.exitCode) : "unknown";
+      const signal = ["SIGTERM", "SIGKILL", "SIGINT", "SIGBREAK"].includes(result?.signal)
+        ? result.signal : "none";
+      const category = ERROR_CODES.has(result?.category) ? result.category : "UNKNOWN";
+      try {
+        mkdirSync(userData, { recursive: true });
+        if ((statSync(file, { throwIfNoEntry: false })?.size ?? 0) > MAX_LOG_SIZE) {
+          writeFileSync(file, "", { mode: 0o600 });
+        }
+        appendFileSync(file,
+          `${new Date().toISOString()} backend-exit elapsedMs=${Math.round(performance.now()-start)} processUptimeMs=${Math.round(process.uptime()*1000)} exitCode=${exitCode} signal=${signal} category=${category}\n`,
+          { mode: 0o600 });
+      } catch { /* Diagnostics must never block launch or shutdown. */ }
+    },
     failure(stage, error) {
       if (!STAGES.has(stage)) throw new Error("Invalid startup failure stage.");
       const untrustedCode = typeof error === "object" && error !== null && "code" in error

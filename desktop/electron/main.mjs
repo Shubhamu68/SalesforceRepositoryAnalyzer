@@ -7,6 +7,7 @@ import { parseEnv } from "node:util";
 import path from "node:path";
 import { isAllowedExternalUrl, resolveDesktopPaths } from "./runtimePaths.mjs";
 import { createDesktopStartupTrace } from "./startupTrace.mjs";
+import { createBackendExitClassifier } from "./backendExitDiagnostics.mjs";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const windowIcon = path.join(dirname, "assets", "analyzer.ico");
@@ -23,6 +24,20 @@ let window = null;
 let allowedAppOrigin = null;
 let shuttingDown = false;
 let startupStage = "window";
+let backendFailure = null;
+let backendWasReady = false;
+let errorDialogShown = false;
+
+function reportBackendFailure() {
+  if (shuttingDown || errorDialogShown) return;
+  errorDialogShown = true;
+  const category = backendFailure?.category ?? "UNKNOWN";
+  stopBackend();
+  dialog.showErrorBox("Analyzer stopped",
+    "The local Analyzer service exited (" + category +
+    "). See startup-timing.log in the app data folder for the exit code and safe error category.");
+  app.quit();
+}
 
 const primaryInstance = app.requestSingleInstanceLock();
 if (!primaryInstance) app.quit();
@@ -181,26 +196,30 @@ async function startBackend() {
     if (!app.isPackaged) process.stdout.write(chunk);
   });
   // Do not write CLI output, Salesforce tokens or user data to persistent logs.
+  const classifier = createBackendExitClassifier();
   backend.stderr.on("data", chunk => {
+    // Read only enough to classify the failure; stderr can contain secrets.
+    // We never persist raw backend logs in the desktop distribution.
+    classifier.inspect(chunk);
     if (!app.isPackaged) process.stderr.write(chunk);
   });
+  function recordBackendExit(reason) {
+    if (shuttingDown || backendFailure) return;
+    backendFailure = reason;
+    startupTrace.backendExit(reason);
+    startupTrace.failure("backend", { code: reason.category });
+    if (backendWasReady) reportBackendFailure();
+  }
   backend.once("error", error => {
-    if (!shuttingDown) {
-      startupTrace.failure("backend", error);
-      dialog.showErrorBox("Analyzer could not start", "The local Analyzer service could not be started.");
-      app.quit();
-    }
+    recordBackendExit(classifier.result(null, null, error));
   });
-  backend.once("exit", () => {
-    if (!shuttingDown) {
-      dialog.showErrorBox("Analyzer stopped", "The local Analyzer service stopped unexpectedly.");
-      app.quit();
-    }
+  backend.once("exit", (code, signal) => {
+    recordBackendExit(classifier.result(code, signal));
   });
 
   startupStage = "api";
   for (let attempt = 0; attempt < 100; attempt++) {
-    if (backend.exitCode !== null || backend.killed) break;
+    if (backendFailure || backend.exitCode !== null || backend.killed) break;
     try {
       // Liveness does not rescan the user's Salesforce repository. Detailed
       // setup status is still returned by the existing /api/health endpoint.
@@ -208,6 +227,9 @@ async function startBackend() {
         signal: AbortSignal.timeout(800),
       });
       if (response.ok && (await response.json()).status === "ok") {
+        // A service that exited just as health responded is not ready.
+        if (backendFailure || backend.exitCode !== null || backend.killed) break;
+        backendWasReady = true;
         startupTrace.mark("backend-ready");
         return origin;
       }
@@ -233,14 +255,18 @@ if (primaryInstance) app.whenReady().then(async () => {
     startupStage = "ui";
     await showWorkspace(origin);
   } catch (error) {
-    startupTrace.failure(startupStage, error);
+    startupTrace.failure(backendFailure ? "backend" : startupStage, error);
     startupTrace.mark("startup-failed");
-    if (!shuttingDown) {
-      stopBackend();
-      dialog.showErrorBox("Unable to open Analyzer",
-        "Startup failed during: " + startupStage +
-        ". See startup-timing.log in the app data folder for a safe error category.");
-      app.quit();
+    if (!shuttingDown && !errorDialogShown) {
+      if (backendFailure) reportBackendFailure();
+      else {
+        errorDialogShown = true;
+        stopBackend();
+        dialog.showErrorBox("Unable to open Analyzer",
+          "Startup failed during: " + startupStage +
+          ". See startup-timing.log in the app data folder for a safe error category.");
+        app.quit();
+      }
     }
   }
 }).catch(() => app.quit());

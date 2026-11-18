@@ -43,6 +43,7 @@ jobs:
           node --check desktop/electron/stage.mjs
           node --check desktop/electron/runtimePaths.mjs
           node --check desktop/electron/startupTrace.mjs
+          node --check desktop/electron/backendExitDiagnostics.mjs
       - name: Smoke-test staged API and frontend
         run: node desktop/electron/smoke.mjs
       - name: Install Electron build tools
@@ -53,6 +54,8 @@ jobs:
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
         run: npm run build:folder
+      - name: Smoke-test backend from final packaged folder
+        run: node desktop/electron/smoke.mjs release/electron-desktop/win-unpacked/resources/analyzer
       - name: Package unpacked desktop folder as ZIP
         shell: pwsh
         run: |

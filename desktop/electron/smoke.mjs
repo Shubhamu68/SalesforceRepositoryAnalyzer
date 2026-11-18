@@ -7,7 +7,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const root = path.join(here, "staging");
+// The same test runs twice in Windows CI: once against staging, then against
+// resources/analyzer inside the actual packaged win-unpacked distribution.
+const root = process.argv[2] ? path.resolve(process.argv[2]) : path.join(here, "staging");
 for (const name of ["runtime/node.exe", "app/dist/api/server.js", "app/web/dist/index.html",
   "app/node_modules/express/package.json", "config/personas.json", ".env.example"]) {
   assert.ok(existsSync(path.join(root, name)), "Missing desktop staged file: " + name);

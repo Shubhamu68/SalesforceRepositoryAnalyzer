@@ -25,6 +25,7 @@
       "main.mjs",
       "runtimePaths.mjs",
       "startupTrace.mjs",
+      "backendExitDiagnostics.mjs",
       "splash.html",
       "assets/analyzer.ico",
       "package.json"

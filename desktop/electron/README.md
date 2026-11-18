@@ -30,3 +30,5 @@ The blue hexagon used in the existing Analyzer header is now also the desktop ex
 **Settings and diagnostics:** Per-user settings stay in Electron's userData folder, never in the shared ZIP. `startup-timing.log` records fixed phases and safe error categories only. No developer `.env`, Salesforce tokens or CLI auth files are packaged.
 
 The browser-based Windows portable ZIP (`Start Analyzer.cmd`) remains a separate fallback.
+
+**Startup troubleshooting:** The packaged backend is smoke-tested from inside the final `win-unpacked/resources/analyzer` folder. If it stops on a particular PC, `startup-timing.log` records a safe `backend-exit` entry with a numeric exit code, signal and allowlisted category. It never stores raw stderr, local paths or credentials. Share those lines to distinguish incomplete extraction, missing modules, Windows runtime failures, and local security restrictions.

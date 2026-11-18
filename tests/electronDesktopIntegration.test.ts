@@ -56,6 +56,8 @@ test("Desktop build is isolated from the current Windows browser portable workfl
   const legacy = readFileSync(".github/workflows/windows-portable.yml", "utf8");
   assert.match(workflow, /desktop\/electron\/stage\.mjs/);
   assert.match(workflow, /desktop\/electron\/smoke\.mjs/);
+  assert.match(workflow, /smoke\.mjs release\/electron-desktop\/win-unpacked\/resources\/analyzer/);
+  assert.match(workflow, /Smoke-test backend from final packaged folder/);
   assert.match(workflow, /build:folder/);
   assert.match(workflow, /Build unpacked Windows desktop folder/);
   assert.doesNotMatch(workflow, /Build portable Windows EXE/);
@@ -91,6 +93,10 @@ test("desktop displays a startup screen without waiting for the Analyzer API", (
   assert.match(splash, /Content-Security-Policy/);
   assert.match(pkg, /"splash\.html"/);
   assert.match(pkg, /"startupTrace\.mjs"/);
+  assert.match(pkg, /"backendExitDiagnostics\.mjs"/);
+  assert.match(main, /startupTrace\.backendExit\(reason\)/);
+  assert.match(main, /backendFailure \|\| backend\.exitCode/);
+  assert.doesNotMatch(main, /The local Analyzer service stopped unexpectedly/);
 });
 
 test("startup log uses only approved fixed event names and durations", async () => {
@@ -154,4 +160,35 @@ test("Change org button is visible on the dark navy navigation bar", () => {
   assert.match(css, /\.sf-cli-topbar-change\{[^}]*background:#eaf2ff/s);
   assert.match(css, /\.sf-cli-topbar-change\{[^}]*color:#163f83/s);
   assert.match(css, /\.sf-cli-topbar-change:focus-visible\{outline:3px solid #80bbff/);
+});
+
+test("Backend exit logging distinguishes failure categories without leaking stderr", async () => {
+  const { createBackendExitClassifier } = await import("../desktop/electron/backendExitDiagnostics.mjs");
+  const moduleError = createBackendExitClassifier();
+  moduleError.inspect("node:internal/modules/esm/resolve: Cannot find mod");
+  moduleError.inspect("ule '/Users/a/private/Salesforce-secret.js'\nAccessToken=secret123");
+  assert.deepEqual(moduleError.result(1, null), { category: "MODULE_NOT_FOUND", exitCode: 1, signal: null });
+  const windowsError = createBackendExitClassifier();
+  assert.equal(windowsError.result(3221225781, null).category, "DLL_LOAD_FAILED");
+  assert.equal(windowsError.result(-1073741515, null).category, "DLL_LOAD_FAILED");
+  const permission = createBackendExitClassifier();
+  assert.equal(permission.result(null, null, { code: "EPERM", message: "user-secret" }).category, "ACCESS_DENIED");
+  const exit = createBackendExitClassifier();
+  assert.equal(exit.result(1, null).category, "BACKEND_EXIT");
+  assert.equal(exit.result(null, "SIGTERM").category, "BACKEND_SIGNALLED");
+
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const { createDesktopStartupTrace } = await import("../desktop/electron/startupTrace.mjs");
+  const dir = mkdtempSync(path.join(os.tmpdir(), "analyzer-backend-exit-"));
+  try {
+    const trace = createDesktopStartupTrace(dir);
+    trace.backendExit({ exitCode: 3221225781, signal: "user-token", category: "DLL_LOAD_FAILED" });
+    trace.backendExit({ exitCode: NaN, signal: "SIGTERM", category: "Bearer secret" });
+    const entries = readFileSync(trace.file, "utf8");
+    assert.match(entries, /backend-exit .*exitCode=3221225781 signal=none category=DLL_LOAD_FAILED/);
+    assert.match(entries, /backend-exit .*exitCode=unknown signal=SIGTERM category=UNKNOWN/);
+    assert.doesNotMatch(entries, /user-token|secret123|Salesforce-secret|Bearer/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
