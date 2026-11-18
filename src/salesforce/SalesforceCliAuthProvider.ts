@@ -65,28 +65,38 @@ export const runSalesforceCli: CliRunner = async (args, timeoutMs, signal) => {
     let output = "";
     let stderrSeen = false;
     let finished = false;
+    let terminating = false;
 
-    function terminateProcessTree() {
-      // On Windows sf.cmd is a wrapper process. Killing only the wrapper
-      // leaves the CLI OAuth listener alive; terminate its entire child tree.
-      if (process.platform === "win32" && child.pid) {
-        const killer = spawn("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
-          shell: false, windowsHide: true, stdio: "ignore",
-        });
-        killer.on("error", () => { child.kill(); });
-      } else child.kill();
+    function terminateProcessTree(): Promise<void> {
+      return new Promise(resolveTermination => {
+        // sf.cmd launches another process. Wait for taskkill to finish before
+        // allowing a replacement login, or both can compete for OAuth ports.
+        if (process.platform === "win32" && child.pid) {
+          const killer = spawn("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
+            shell: false, windowsHide: true, stdio: "ignore",
+          });
+          killer.once("error", () => { child.kill(); resolveTermination(); });
+          killer.once("close", () => resolveTermination());
+        } else {
+          child.kill();
+          resolveTermination();
+        }
+      });
     }
 
     const onAbort = () => {
-      terminateProcessTree();
-      finish(new SalesforceCliLoginCancelledError());
+      if (finished || terminating) return;
+      terminating = true;
+      void terminateProcessTree().then(() => finish(new SalesforceCliLoginCancelledError()));
     };
     const timer = setTimeout(() => {
-      terminateProcessTree();
+      if (finished || terminating) return;
+      terminating = true;
       const action = args[0] === "org" && args[1] === "login" ? "Salesforce browser login"
         : args[0] === "org" && args[1] === "list" ? "Reading saved Salesforce CLI orgs"
         : "Salesforce CLI command";
-      finish(new Error(action + " timed out. Retry or check CLI availability."));
+      void terminateProcessTree().then(() =>
+        finish(new Error(action + " timed out. Retry or check CLI availability.")));
     }, timeoutMs);
 
     function finish(error?: Error) {
@@ -110,9 +120,10 @@ export const runSalesforceCli: CliRunner = async (args, timeoutMs, signal) => {
     // Do not echo stdout or stderr: CLI output can include OAuth tokens.
     child.stderr.on("data", () => { stderrSeen = true; });
     child.on("error", () => {
-      finish(new Error("Salesforce CLI is unavailable. Install or update Salesforce CLI and ensure 'sf' is on PATH."));
+      if (!terminating) finish(new Error("Salesforce CLI is unavailable. Install or update Salesforce CLI and ensure 'sf' is on PATH."));
     });
     child.on("close", code => {
+      if (terminating) return;
       if (code !== 0) {
         finish(new Error(stderrSeen
           ? "Salesforce CLI could not complete authentication. Check the org authorization or reauthenticate in the browser."
