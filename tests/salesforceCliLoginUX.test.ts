@@ -19,8 +19,9 @@ test("outdated Salesforce CLI is blocked with a useful upgrade error", async () 
     if (args.includes("show-access-token")) throw new Error("Secure token command unavailable; update Salesforce CLI");
     throw new Error("Unexpected CLI command");
   });
-  assert.deepEqual((await other.loginWeb("sandbox")).username, "admin@example.com");
-  await assert.rejects(other.showToken("admin@example.com"), /update Salesforce CLI/);
+  const completedLogin = await other.loginWeb("sandbox");
+  assert.equal(completedLogin.username, "admin@example.com");
+  await assert.rejects(other.showToken("admin@example.com", completedLogin), /update Salesforce CLI/);
 });
 
 test("refreshing CLI after upgrade succeeds without clearing existing Analyzer settings", async () => {
