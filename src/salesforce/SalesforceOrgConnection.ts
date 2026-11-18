@@ -142,7 +142,23 @@ export class SalesforceOrgConnection {
     orgs: CliOrg[];
     warning?: string;
   }> {
-    const cliVersion = await this.cli.version();
+    let cliVersion: string;
+    try {
+      cliVersion = await this.cli.version();
+    } catch (error) {
+      // A slow CLI version check is not proof that Salesforce is unavailable
+      // or that a saved session is invalid. Keep browser login available;
+      // its own version and token checks still enforce minimum CLI support.
+      if (error instanceof Error && /timed out/i.test(error.message)) {
+        return {
+          cliVersion: "",
+          orgs: [],
+          warning: "Salesforce CLI is taking longer than expected to respond. You can try Sandbox/Production login or Refresh orgs to retry.",
+        };
+      }
+      // A genuinely missing or outdated CLI still reports an actionable error.
+      throw error;
+    }
     try {
       return { cliVersion, orgs: await this.cli.listOrgs(refresh) };
     } catch {

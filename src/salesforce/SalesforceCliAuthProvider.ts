@@ -28,8 +28,12 @@ const ARG_SAFE = /^[a-zA-Z0-9_@.+:/-]+$/;
 const ORG_NAME_SAFE = /^[a-zA-Z0-9_.@+-]{1,255}$/;
 const MAX_JSON_BYTES = 2 * 1024 * 1024;
 const CLI_TIMEOUT = 60000;
-// Local-only org discovery must not wait for a refresh from every sandbox.
-const LOCAL_DISCOVERY_TIMEOUT = 15000;
+// Windows CLI process launch may exceed the original 10-second version
+// budget, especially when a packaged app or security tools are starting.
+// The UI discovers orgs in the background; longer budgets do not block login
+// controls. OAuth and token checks remain mandatory for real connections.
+const CLI_VERSION_TIMEOUT = 45000;
+const LOCAL_DISCOVERY_TIMEOUT = 30000;
 // Saved orgs are only a UI hint; every selected session is still validated.
 const SAVED_ORGS_CACHE_MS = 120000;
 const WEB_LOGIN_TIMEOUT = 300000;
@@ -189,7 +193,7 @@ export class SalesforceCliAuthProvider {
     if (this.pendingVersion) return this.pendingVersion;
     // Concurrent /orgs calls must not spawn two expensive sf --version processes.
     const pending = (async () => {
-      const output = (await this.run(["--version"], 10000)).trim().slice(0, 120);
+      const output = (await this.run(["--version"], CLI_VERSION_TIMEOUT)).trim().slice(0, 120);
       const match = output.match(/@salesforce\/cli\/(\d+)\.(\d+)\.(\d+)/);
       if (!match) throw new Error("Cannot determine Salesforce CLI version. Update Salesforce CLI with 'sf update'.");
       const major = Number(match[1]);

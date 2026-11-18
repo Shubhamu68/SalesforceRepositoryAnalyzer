@@ -11,14 +11,13 @@ test("startup auto-enters workspace when an existing backend CLI org is connecte
   assert.equal(shouldShowOrgChooser(true, "manual", true), false);
 });
 
-test("Sandbox and Production sign-in are enabled after CLI discovery, even with an active org", () => {
-  const ready = { checking: false, busy: false };
+test("Sandbox and Production sign-in are available during slow CLI discovery", () => {
+  const ready = { busy: false };
   assert.equal(canStartBrowserLogin(ready), true);
-  assert.equal(canStartBrowserLogin({ checking: true, busy: false }), false);
-  assert.equal(canStartBrowserLogin({ checking: false, busy: true }), false);
-  // Neither active nor saved orgs are inputs to the browser-login policy.
-  // Change org must offer a fresh browser authorization without disconnecting.
-  assert.deepEqual(Object.keys(ready).sort(), ["busy", "checking"]);
+  assert.equal(canStartBrowserLogin({ busy: true }), false);
+  // CLI org discovery, prior selection and connection status are not gates.
+  // Only a conflicting action disables browser login.
+  assert.deepEqual(Object.keys(ready), ["busy"]);
 });
 
 test("main app auto-enters on connected startup, but keeps explicit Change org open", () => {
@@ -29,7 +28,7 @@ test("main app auto-enters on connected startup, but keeps explicit Change org o
   assert.match(app, /autoContinueConnected=\{orgChooserMode === "startup"\}/);
   assert.match(app, /onBack=\{orgChooserMode === "manual"/);
   assert.match(app, /onSkip=\{orgChooserMode === "startup"/);
-  assert.match(login, /if \(autoContinueConnected && session.connected\) \{/);
+  assert.match(login, /if \(autoContinueConnected && session.connected && loginAttempt.current === 0\) \{/);
   assert.match(login, /onComplete\(session\)/);
   assert.match(login, /next\.some\(org => org\.username === session\.username\)/);
   assert.match(login, /Back to workspace/);
@@ -41,7 +40,9 @@ test("Change org always offers Sandbox and Production login after CLI discovery"
   const css = readFileSync("web/src/components/SalesforceCliLogin.css", "utf8");
   assert.match(login, /disabled=\{!canLogInWithBrowser \|\| busy === "sandbox"\}/);
   assert.match(login, /disabled=\{!canLogInWithBrowser \|\| busy === "production"\}/);
-  assert.match(login, /checking: loading/);
+  assert.doesNotMatch(login, /checking: loading/);
+  assert.match(login, /Discovering saved orgs/);
+  assert.match(login, /Loading saved CLI orgs/);
   assert.match(login, /busy: busy === "select" \|\| busy === "switching" \|\| busy === "cancelling"/);
   assert.match(login, /Cancel login/);
   assert.match(login, /\/api\/salesforce\/login-web\/cancel/);

@@ -2,7 +2,6 @@
 export type OrgChooserMode = "startup" | "manual";
 
 export type CliLoginAvailability = {
-  checking: boolean;
   busy: boolean;
 };
 
@@ -17,9 +16,10 @@ export function shouldShowOrgChooser(
 
 /**
  * Existing Salesforce orgs are never a reason to disable another login.
- * Disable both login actions only during CLI discovery or an in-flight action.
+ * Saved-org discovery may take time on Windows and is not an auth gate.
+ * Disable new browser login only while a conflicting action is in flight.
  * The backend independently validates CLI version and authentication.
  */
 export function canStartBrowserLogin(state: CliLoginAvailability): boolean {
-  return !state.checking && !state.busy;
+  return !state.busy;
 }

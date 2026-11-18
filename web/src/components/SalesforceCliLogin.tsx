@@ -47,12 +47,12 @@ export default function SalesforceCliLogin({
   // the user's newer Sandbox/Production choice.
   const browserRequest = useRef<AbortController | null>(null);
   const loginAttempt = useRef(0);
-  // Discovery, not the presence of another org, controls button availability.
-  // The backend remains responsible for CLI version and OAuth validation.
+  // Saved-org discovery is optional UI data. Never block direct sign-in
+  // while Salesforce CLI startup/discovery runs in the background.
+  // The backend still validates the CLI version and OAuth session.
   const cliOutdated = /Salesforce CLI [\d.]+ is too old for secure token retrieval/i.test(error);
   const detectedVersion = error.match(/Salesforce CLI (\d+\.\d+\.\d+) is too old/i)?.[1];
   const canLogInWithBrowser = canStartBrowserLogin({
-    checking: loading,
     // The other environment remains clickable during a browser login.
     busy: busy === "select" || busy === "switching" || busy === "cancelling",
   });
@@ -67,7 +67,7 @@ export default function SalesforceCliLogin({
       const status = await requestJson("/api/salesforce/status");
       const session = status as AuthStatus;
       setCurrent(session);
-      if (autoContinueConnected && session.connected) {
+      if (autoContinueConnected && session.connected && loginAttempt.current === 0) {
         onComplete(session);
         return;
       }
@@ -189,7 +189,7 @@ export default function SalesforceCliLogin({
           <select id="sf-cli-org" className="sf-cli-select" value={selected}
             onChange={event => setSelected(event.target.value)}
             disabled={loading || Boolean(busy) || orgs.length === 0}>
-            {orgs.length === 0 && <option value="">{cliOutdated ? "Update Salesforce CLI to load saved orgs" : discoveryWarning ? "Saved CLI orgs unavailable" : error ? "Cannot load CLI orgs" : "No saved orgs found"}</option>}
+            {orgs.length === 0 && <option value="">{loading ? "Loading saved CLI orgs…" : cliOutdated ? "Update Salesforce CLI to load saved orgs" : discoveryWarning ? "Saved CLI orgs unavailable" : error ? "Cannot load CLI orgs" : "No saved orgs found"}</option>}
             {orgs.map(org => (
               <option key={org.username} value={org.username}>
                 {org.alias || org.username} ({org.environment})
@@ -203,7 +203,7 @@ export default function SalesforceCliLogin({
           </button>
         </div>
         <div className="sf-cli-smallrow">
-          <span>{loading ? "Checking CLI…" : cliVersion ? "CLI " + (cliVersion.match(/@salesforce\/cli\/(\d+\.\d+\.\d+)/)?.[1] ?? cliVersion) : detectedVersion ? "CLI " + detectedVersion + " · update required" : "CLI status unavailable"}</span>
+          <span>{loading ? "Discovering saved orgs… (sign-in is available)" : cliVersion ? "CLI " + (cliVersion.match(/@salesforce\/cli\/(\d+\.\d+\.\d+)/)?.[1] ?? cliVersion) : detectedVersion ? "CLI " + detectedVersion + " · update required" : "CLI status unavailable"}</span>
           <button type="button" className="sf-cli-link" disabled={loading || Boolean(busy)}
             onClick={() => void refresh(true)}>Refresh orgs</button>
         </div>
@@ -241,7 +241,7 @@ export default function SalesforceCliLogin({
           Salesforce handles sign-in. Your password is not stored in the Analyzer.
         </p>
         {onSkip && (
-          <button type="button" className="sf-cli-skip" disabled={loading || Boolean(busy) || Boolean(current?.connected)} onClick={onSkip}>
+          <button type="button" className="sf-cli-skip" disabled={Boolean(busy) || Boolean(current?.connected)} onClick={onSkip}>
             Use repository-only analysis
           </button>
         )}

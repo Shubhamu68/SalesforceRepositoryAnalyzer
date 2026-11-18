@@ -36,6 +36,9 @@ test("login UI does not silently disable sandbox and production buttons after CL
   assert.match(ui, /disabled=\{!canLogInWithBrowser \|\| busy === "production"\}/);
   assert.match(ui, /Cancel login/);
   assert.match(ui, /loginAttempt\.current/);
+  assert.match(ui, /Discovering saved orgs/);
+  assert.match(ui, /Loading saved CLI orgs/);
+  assert.doesNotMatch(ui, /checking: loading/);
   assert.match(ui, /previous\?\.abort\(\)/);
   assert.doesNotMatch(ui, /disabled=\{[^\n]*error\s*&&\s*!cliVersion/);
   assert.match(ui, /Salesforce CLI update required/);
