@@ -75,7 +75,9 @@ export async function timeSoqlOrgQuery<T>(soql: string, work: () => Promise<T>):
 }
 
 export async function withSoqlPerformance<T>(work: () => Promise<T>): Promise<T> {
-  if (!enabled()) return work();
+  // Join an existing API-level scope rather than generating two reports for
+  // the same request (one for preflight and another for analysis).
+  if (!enabled() || scope.getStore()) return work();
   const context: SoqlPerfScope = { timings: new Map(), counts: new Map(), errors: 0 };
   return scope.run(context, async () => {
     const started = performance.now();
