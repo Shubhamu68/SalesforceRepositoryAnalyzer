@@ -129,38 +129,28 @@ test("fresh browser login never sends the retrieved token to an unapproved CLI U
   }
 });
 
-test("a slow CLI version check no longer blocks launching the Salesforce browser command", async () => {
-  let completeVersion!: (version: string) => void;
-  const versionGate = new Promise<string>(resolve => { completeVersion = resolve; });
+test("fresh browser login uses OAuth result without launching a separate CLI version process", async () => {
   const commands: string[] = [];
   const cli = new SalesforceCliAuthProvider(async args => {
     commands.push(args.join(" "));
-    if (args[0] === "--version") return versionGate;
     if (args[1] === "login") return success({ username: USER, orgId: ORG, instanceUrl: INSTANCE });
-    throw new Error("Unexpected command");
+    throw new Error("Only the browser login command should run");
   });
-  const pending = cli.loginWeb("sandbox");
-  assert.equal(commands[0], "org login web --instance-url https://test.salesforce.com --json",
-    "start the browser CLI process without first waiting for sf --version");
-  await new Promise<void>(resolve => setImmediate(resolve));
-  assert.equal(commands[1], "--version", "minimum CLI version remains required");
-  let settled = false;
-  void pending.then(() => { settled = true; }, () => { settled = true; });
-  assert.equal(settled, false, "do not accept OAuth login before version check completes");
-  completeVersion("@salesforce/cli/2.158.7");
-  assert.deepEqual(await pending, { username: USER, orgId: ORG, instanceUrl: INSTANCE });
+  assert.deepEqual(await cli.loginWeb("sandbox"), { username: USER, orgId: ORG, instanceUrl: INSTANCE });
+  assert.deepEqual(commands, ["org login web --instance-url https://test.salesforce.com --json"]);
 });
 
-test("unsupported CLI cannot activate an Analyzer session even if browser OAuth completes", async () => {
+test("unsupported token retrieval cannot establish a connected Analyzer session", async () => {
   const commands: string[] = [];
   const cli = new SalesforceCliAuthProvider(async args => {
     commands.push(args.join(" "));
     if (args[1] === "login") return success({ username: USER, orgId: ORG, instanceUrl: INSTANCE });
-    if (args[0] === "--version") return "@salesforce/cli/2.50.1";
-    throw new Error("Token commands must never run on unsupported CLI");
+    if (args.includes("show-access-token")) throw new Error("Required secure CLI token command is unavailable");
+    throw new Error("Unexpected operation");
   });
   const conn = new SalesforceOrgConnection(cli);
-  await assert.rejects(conn.loginWeb("sandbox"), /too old/);
+  await assert.rejects(conn.loginWeb("sandbox"), /token command is unavailable/);
   assert.equal(conn.status.connected, false);
-  assert.equal(commands.some(cmd => cmd.includes("show-access-token")), false);
+  assert.equal(commands.some(cmd => cmd === "--version"), false);
+  assert.equal(commands.filter(cmd => cmd.includes("show-access-token")).length, 1);
 });
