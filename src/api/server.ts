@@ -5,6 +5,7 @@ import { existsSync } from "node:fs";
 
 import { createMetadataRouter } from "./metadataRoutes.js";
 import { createSalesforceRouter } from "./salesforceRoutes.js";
+import { timeSoqlPhase, withSoqlPerformance } from "../services/SoqlPerformanceMetrics.js";
 import { createReportOutputRouter } from "./reportOutputRoutes.js";
 import { createRepositoryRouter } from "./repositoryRoutes.js";
 import { SalesforceOrgConnection } from "../salesforce/SalesforceOrgConnection.js";
@@ -146,20 +147,24 @@ app.post("/api/soql-analysis", async (req, res) => {
     const personaName = typeof req.body?.personaName === "string" ? req.body.personaName.trim() : "";
     if (!personaName) { res.status(400).json({ error: "personaName is required" }); return; }
 
-    const verdict = await orgPreflight.authorize(req.body?.acknowledgeRepoOnly === true);
-    const outputStatus = await reportOutputConfiguration.getStatus();
-    if (!outputStatus.configured || !outputStatus.directory) {
-      res.status(409).json({ code: "REPORT_OUTPUT_NOT_CONFIGURED", error: outputStatus.message });
-      return;
-    }
-    const persona = await runtime.personas.getPersona(personaName);
-    const analyzer = await runtime.get(verdict.mode === "ORG_AND_REPOSITORY");
-    const result = await analyzer.soqlAnalysisService.analyze(persona);
-    res.json({
-      personaName: result.personaName,
-      summary: result.summary,
-      outputFolder: outputStatus.directory,
-      verificationMode: verdict.mode,
+    await withSoqlPerformance(async () => {
+      const verdict = await timeSoqlPhase("api.preflight", () =>
+        orgPreflight.authorize(req.body?.acknowledgeRepoOnly === true));
+      const outputStatus = await reportOutputConfiguration.getStatus();
+      if (!outputStatus.configured || !outputStatus.directory) {
+        res.status(409).json({ code: "REPORT_OUTPUT_NOT_CONFIGURED", error: outputStatus.message });
+        return;
+      }
+      const persona = await runtime.personas.getPersona(personaName);
+      const analyzer = await timeSoqlPhase("api.runtime", () =>
+        runtime.get(verdict.mode === "ORG_AND_REPOSITORY"));
+      const result = await analyzer.soqlAnalysisService.analyze(persona);
+      res.json({
+        personaName: result.personaName,
+        summary: result.summary,
+        outputFolder: outputStatus.directory,
+        verificationMode: verdict.mode,
+      });
     });
   } catch (error) { handleApiError(error, res); }
 });
