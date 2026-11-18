@@ -8,7 +8,19 @@ test("outdated Salesforce CLI is blocked with a useful upgrade error", async () 
     args[0] === "--version" ? "@salesforce/cli/2.51.6" :
       JSON.stringify({ status: 0, result: { nonScratchOrgs: [] } }));
   await assert.rejects(cli.listOrgs(), /2\.51\.6 is too old.*sf update/i);
-  await assert.rejects(cli.loginWeb("sandbox"), /2\.136 or newer/i);
+  // Browser authorization can open even when a legacy CLI is installed; the
+  // required secure token command still gates any real Analyzer connection.
+  // This avoids launching a separate 4-9 second sf --version process first.
+  const other = new SalesforceCliAuthProvider(async args => {
+    if (args[1] === "login") return JSON.stringify({ status: 0, result: {
+      username: "admin@example.com", orgId: "00D000000000001",
+      instanceUrl: "https://qa--dev.sandbox.my.salesforce.com",
+    } });
+    if (args.includes("show-access-token")) throw new Error("Secure token command unavailable; update Salesforce CLI");
+    throw new Error("Unexpected CLI command");
+  });
+  assert.deepEqual((await other.loginWeb("sandbox")).username, "admin@example.com");
+  await assert.rejects(other.showToken("admin@example.com"), /update Salesforce CLI/);
 });
 
 test("refreshing CLI after upgrade succeeds without clearing existing Analyzer settings", async () => {
