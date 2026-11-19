@@ -3,7 +3,6 @@ import type { OrgCheckedUser } from "../models/StackTraceImpact.js";
 import { SalesforceOrgConnection } from "./SalesforceOrgConnection.js";
 import { matchPersonaUsers, selectMostRecentlyLoggedInMatchedUser, type OrgAssignment, type OrgProfile, type OrgUser } from "./OrgPersonaMatcher.js";
 import { SalesforceUserFieldAccessGateway } from "./SalesforceUserFieldAccessGateway.js";
-import { SalesforceFieldMetadataService } from "./SalesforceFieldMetadataService.js";
 import { noteSoqlUserMatching } from "../services/SoqlAnalysisProgress.js";
 
 export type OrgAccessOutcome = "VERIFIED" | "DENIED" | "UNVERIFIED";
@@ -104,8 +103,7 @@ export class SalesforcePersonaAccessVerifier {
   private readonly matchingCache = new WeakMap<Inventory, Map<string, Promise<MatchedUsers>>>();
   constructor(
     private readonly connection: SalesforceOrgConnection,
-    private readonly userFieldAccess = new SalesforceUserFieldAccessGateway(
-      connection, new SalesforceFieldMetadataService(connection)),
+    private readonly userFieldAccess = new SalesforceUserFieldAccessGateway(connection),
   ) {}
 
   /** Cache isolation across Salesforce orgs and reconnects. */
