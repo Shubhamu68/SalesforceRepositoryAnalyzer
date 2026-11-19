@@ -306,7 +306,11 @@ export class StackTraceImpactService {
           // parent, not to a fictitious direct component denial. Keep the
           // original queried components in query.checkedFields.
           remaining.push({ ...missing,
-            ...(result?.deniedCompoundParent ? { field: result.deniedCompoundParent } : {}),
+            ...(result?.deniedCompoundParent ? {
+              field: result.deniedCompoundParent,
+              deniedCompoundParent: result.deniedCompoundParent,
+              ...(missing.field ? { dependentComponents: [missing.field] } : {}),
+            } : {}),
             orgOutcome: result?.outcome ?? "UNVERIFIED",
             orgMessage: result?.message ?? "Salesforce org verification is unavailable.",
             ...(result?.unverifiedReason ? { orgReason: result.unverifiedReason } : {}) });
@@ -317,7 +321,14 @@ export class StackTraceImpactService {
       const groupedMissing = new Map<string, MissingReadPermission>();
       for (const item of remaining) {
         const key = `${item.object}|${item.field ?? ""}|${item.reason}|${item.orgOutcome ?? ""}`.toLowerCase();
-        if (!groupedMissing.has(key)) groupedMissing.set(key, item);
+        const prior = groupedMissing.get(key);
+        if (!prior) groupedMissing.set(key, item);
+        else if (item.deniedCompoundParent) {
+          prior.deniedCompoundParent = item.deniedCompoundParent;
+          prior.dependentComponents = [...new Set([
+            ...(prior.dependentComponents ?? []), ...(item.dependentComponents ?? []),
+          ])];
+        }
       }
       impact.missing = [...groupedMissing.values()];
       if (verified.length) impact.verifiedFromOrg = verified;
