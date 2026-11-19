@@ -31,11 +31,9 @@ export function isIgnoredField(
   fieldName: string,
   objectName?: string
 ): boolean {
-  // Only universally special identifiers / generated compound components
-  // are excluded without org metadata. Other standard fields (including
-  // Name, OwnerId, CreatedDate) may have org-specific permissionability and
-  // must reach the shared FLS verifier rather than be silently discarded.
+  // Id is intrinsic to every SObject and does not require an independent
+  // FLS grant. Other fields, including compound components and standard
+  // fields, need actual Salesforce/declared repository evidence.
   void objectName;
-  const normalized = fieldName.trim().toLowerCase();
-  return normalized === "id" || normalized.endsWith("__s");
+  return fieldName.trim().toLowerCase() === "id";
 }
