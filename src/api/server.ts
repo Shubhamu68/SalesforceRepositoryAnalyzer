@@ -6,6 +6,7 @@ import { existsSync } from "node:fs";
 import { createMetadataRouter } from "./metadataRoutes.js";
 import { createSalesforceRouter } from "./salesforceRoutes.js";
 import { timeSoqlPhase, withSoqlPerformance } from "../services/SoqlPerformanceMetrics.js";
+import { SoqlProgressRegistry, withSoqlProgress, type SoqlAnalysisProgress } from "../services/SoqlAnalysisProgress.js";
 import { createReportOutputRouter } from "./reportOutputRoutes.js";
 import { createRepositoryRouter } from "./repositoryRoutes.js";
 import { SalesforceOrgConnection } from "../salesforce/SalesforceOrgConnection.js";
@@ -145,6 +146,17 @@ app.get("/api/personas/:personaName/objects/:objectName/fields/:fieldName", asyn
 // The desktop API uses one process. Reject conflicting analyses even when two
 // browser tabs or direct API callers bypass disabled frontend buttons.
 let soqlAnalysisInProgress = false;
+const soqlProgressRegistry = new SoqlProgressRegistry();
+
+// The opaque UUID is created by the browser before starting the existing POST.
+// Progress polling never returns usernames, repo paths, SOQL or permission data.
+app.get("/api/soql-analysis/progress/:id", (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  const snapshot = soqlProgressRegistry.get(req.params.id);
+  if (!snapshot) { res.status(404).json({ error: "Progress not found." }); return; }
+  res.json(snapshot);
+});
+
 async function runSoqlAnalysisRequest(
   req: express.Request,
   res: express.Response,
@@ -158,16 +170,33 @@ async function runSoqlAnalysisRequest(
     return;
   }
   soqlAnalysisInProgress = true;
+  let progress: SoqlAnalysisProgress | undefined;
+  let progressId: string | undefined;
   try {
+    // Optional, for backward compatibility with existing API/desktop callers.
+    if (req.body?.progressId !== undefined) {
+      if (typeof req.body.progressId !== "string") {
+        res.status(400).json({ error: "Invalid progress request identifier." });
+        return;
+      }
+      progressId = req.body.progressId;
+      try {
+        progress = soqlProgressRegistry.start(progressId!, allPersonas ? "all" : "single");
+      } catch {
+        res.status(400).json({ error: "Invalid or duplicate progress request identifier." });
+        return;
+      }
+    }
     const personaName = typeof req.body?.personaName === "string" ? req.body.personaName.trim() : "";
     if (!allPersonas && !personaName) {
       res.status(400).json({ error: "personaName is required" });
       return;
     }
 
-    await withSoqlPerformance(async () => {
+    await withSoqlProgress(progress, () => withSoqlPerformance(async () => {
       const verdict = await timeSoqlPhase("api.preflight", () =>
         orgPreflight.authorize(req.body?.acknowledgeRepoOnly === true));
+      progress?.setMode(verdict.mode);
       const outputStatus = await reportOutputConfiguration.getStatus();
       if (!outputStatus.configured || !outputStatus.directory) {
         res.status(409).json({ code: "REPORT_OUTPUT_NOT_CONFIGURED", error: outputStatus.message });
@@ -179,7 +208,8 @@ async function runSoqlAnalysisRequest(
         // Always load from the canonical config on the server. Never trust the
         // selected dropdown or a client-supplied list of personas.
         const personas = await runtime.personas.getAllPersonas();
-        const result = await analyzer.soqlAnalysisService.analyzeAllHighPriority(personas, verdict.mode);
+        const result = await analyzer.soqlAnalysisService.analyzeAllHighPriority(personas, verdict.mode, progress);
+        progress?.complete();
         res.json({
           personaCount: result.personaCount,
           queryCount: result.queryCount,
@@ -193,17 +223,20 @@ async function runSoqlAnalysisRequest(
         return;
       }
       const persona = await runtime.personas.getPersona(personaName);
-      const result = await analyzer.soqlAnalysisService.analyze(persona);
+      const result = await analyzer.soqlAnalysisService.analyze(persona, progress);
+      progress?.complete();
       res.json({
         personaName: result.personaName,
         summary: result.summary,
         outputFolder: outputStatus.directory,
         verificationMode: verdict.mode,
       });
-    });
+    }));
   } catch (error) {
+    progress?.fail();
     handleApiError(error, res);
   } finally {
+    if (progressId && progress) soqlProgressRegistry.finish(progressId);
     soqlAnalysisInProgress = false;
   }
 }
