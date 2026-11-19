@@ -104,6 +104,9 @@ test('Stack Trace consolidates inaccessible compound components under the proven
     assert.equal(impact.missing.length, 1, 'both address components depend on one denied parent');
     assert.equal(impact.missing[0].field, parent);
     assert.equal(impact.missing[0].orgOutcome, 'DENIED');
+    assert.equal(impact.missing[0].deniedCompoundParent, parent);
+    assert.deepEqual((impact.missing[0].dependentComponents ?? []).sort(),
+      ['Delivery_Address__City__s', 'Delivery_Address__Street__s'].sort());
     assert.match(impact.missing[0].orgMessage ?? '', /compound parent/i);
     assert.ok(result.queries[0].checkedFields.some((field) => field.field === 'Delivery_Address__City__s'));
     assert.ok(result.queries[0].checkedFields.some((field) => field.field === 'Delivery_Address__Street__s'));
