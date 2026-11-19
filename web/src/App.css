@@ -174,3 +174,12 @@
   .soql-all-personas-copy { max-width: 100%; }
   .soql-high-priority-button { width: 100%; white-space: normal; }
 }
+
+.soql-high-priority-warning {
+  padding: 11px 13px;
+  border-left: 3px solid #b97f1b;
+  background: #fff9ed;
+  color: #795618;
+  font-size: 12px;
+  line-height: 1.6;
+}
