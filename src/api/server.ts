@@ -63,6 +63,18 @@ app.get("/api/health", async (_req, res) => {
   });
 });
 
+const soqlProgressRegistry = new SoqlProgressRegistry();
+
+// The opaque UUID is created by the browser before starting the existing POST.
+// Progress polling never returns usernames, repo paths, SOQL or permission data.
+// Serve directly: this read-only lookup must not revalidate repository paths.
+app.get("/api/soql-analysis/progress/:id", (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  const snapshot = soqlProgressRegistry.get(req.params.id);
+  if (!snapshot) { res.status(404).json({ error: "Progress not found." }); return; }
+  res.json(snapshot);
+});
+
 // All metadata lookups and analysis actions are gated centrally, including
 // direct API calls that bypass the frontend's setup modal.
 app.use("/api", async (_req, res, next) => {
@@ -146,17 +158,6 @@ app.get("/api/personas/:personaName/objects/:objectName/fields/:fieldName", asyn
 // The desktop API uses one process. Reject conflicting analyses even when two
 // browser tabs or direct API callers bypass disabled frontend buttons.
 let soqlAnalysisInProgress = false;
-const soqlProgressRegistry = new SoqlProgressRegistry();
-
-// The opaque UUID is created by the browser before starting the existing POST.
-// Progress polling never returns usernames, repo paths, SOQL or permission data.
-app.get("/api/soql-analysis/progress/:id", (req, res) => {
-  res.setHeader("Cache-Control", "no-store");
-  const snapshot = soqlProgressRegistry.get(req.params.id);
-  if (!snapshot) { res.status(404).json({ error: "Progress not found." }); return; }
-  res.json(snapshot);
-});
-
 async function runSoqlAnalysisRequest(
   req: express.Request,
   res: express.Response,
