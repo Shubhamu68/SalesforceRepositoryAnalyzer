@@ -34,8 +34,8 @@ export class OptionalFieldMetadataCache {
   private warningEmitted = false;
 
   constructor(
-    private readonly filePath: string | undefined = process.env.FIELD_PERMISSIONABILITY_SNAPSHOT_PATH?.trim(),
-    private readonly offlineOrgId: string | undefined = process.env.FIELD_METADATA_OFFLINE_ORG_ID?.trim(),
+    private readonly filePath?: string,
+    private readonly offlineOrgId?: string,
     private readonly now: () => number = Date.now,
   ) {}
 
