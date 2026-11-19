@@ -142,10 +142,28 @@ app.get("/api/personas/:personaName/objects/:objectName/fields/:fieldName", asyn
   } catch (error) { handleApiError(error, res); }
 });
 
-app.post("/api/soql-analysis", async (req, res) => {
+// The desktop API uses one process. Reject conflicting analyses even when two
+// browser tabs or direct API callers bypass disabled frontend buttons.
+let soqlAnalysisInProgress = false;
+async function runSoqlAnalysisRequest(
+  req: express.Request,
+  res: express.Response,
+  allPersonas: boolean,
+): Promise<void> {
+  if (soqlAnalysisInProgress) {
+    res.status(409).json({
+      code: "ANALYSIS_IN_PROGRESS",
+      error: "A SOQL analysis is already running. Wait for it to finish before starting another.",
+    });
+    return;
+  }
+  soqlAnalysisInProgress = true;
   try {
     const personaName = typeof req.body?.personaName === "string" ? req.body.personaName.trim() : "";
-    if (!personaName) { res.status(400).json({ error: "personaName is required" }); return; }
+    if (!allPersonas && !personaName) {
+      res.status(400).json({ error: "personaName is required" });
+      return;
+    }
 
     await withSoqlPerformance(async () => {
       const verdict = await timeSoqlPhase("api.preflight", () =>
@@ -155,9 +173,26 @@ app.post("/api/soql-analysis", async (req, res) => {
         res.status(409).json({ code: "REPORT_OUTPUT_NOT_CONFIGURED", error: outputStatus.message });
         return;
       }
-      const persona = await runtime.personas.getPersona(personaName);
       const analyzer = await timeSoqlPhase("api.runtime", () =>
         runtime.get(verdict.mode === "ORG_AND_REPOSITORY"));
+      if (allPersonas) {
+        // Always load from the canonical config on the server. Never trust the
+        // selected dropdown or a client-supplied list of personas.
+        const personas = await runtime.personas.getAllPersonas();
+        const result = await analyzer.soqlAnalysisService.analyzeAllHighPriority(personas);
+        res.json({
+          personaCount: result.personaCount,
+          queryCount: result.queryCount,
+          totalHighPriorityFindings: result.totalHighPriorityFindings,
+          totalHighPriorityOccurrences: result.totalHighPriorityOccurrences,
+          personas: result.personas,
+          reportFileName: path.basename(result.reportPath),
+          outputFolder: outputStatus.directory,
+          verificationMode: verdict.mode,
+        });
+        return;
+      }
+      const persona = await runtime.personas.getPersona(personaName);
       const result = await analyzer.soqlAnalysisService.analyze(persona);
       res.json({
         personaName: result.personaName,
@@ -166,7 +201,17 @@ app.post("/api/soql-analysis", async (req, res) => {
         verificationMode: verdict.mode,
       });
     });
-  } catch (error) { handleApiError(error, res); }
+  } catch (error) {
+    handleApiError(error, res);
+  } finally {
+    soqlAnalysisInProgress = false;
+  }
+}
+app.post("/api/soql-analysis", (req, res) => {
+  void runSoqlAnalysisRequest(req, res, false);
+});
+app.post("/api/soql-analysis/high-priority", (req, res) => {
+  void runSoqlAnalysisRequest(req, res, true);
 });
 
 function handleApiError(error: unknown, res: express.Response): void {
