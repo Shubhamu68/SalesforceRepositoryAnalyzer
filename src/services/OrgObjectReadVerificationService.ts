@@ -1,4 +1,5 @@
 import type { Persona } from "../models/Persona.js";
+import { recordSoqlCount, timeSoqlPhase } from "./SoqlPerformanceMetrics.js";
 import type { OrgVerificationStatusPolicy } from "../config/orgVerificationStatusPolicy.js";
 import { isStatusNeutralOrgObjectRead } from "../config/orgVerificationStatusPolicy.js";
 import { isFieldLevelSecurityApplicable, PLATFORM_EVENT_FLS_REASON } from "../config/fieldSecurityPolicy.js";
@@ -86,7 +87,12 @@ export class OrgObjectReadVerificationService {
 
   private cached<T>(cache: Map<string, CacheEntry<T>>, key: string, lookup: () => Promise<T>): Promise<T> {
     const hit = cache.get(key);
-    if (hit && hit.until > Date.now()) return hit.value;
+    const prefix = cache === this.objectChecks ? "org.object_checks" : "org.field_checks";
+    if (hit && hit.until > Date.now()) {
+      recordSoqlCount(prefix + ".cache_hits");
+      return hit.value;
+    }
+    recordSoqlCount(prefix + ".cache_misses");
     if (cache.size >= MAX_CACHE_ENTRIES) cache.clear();
     const promise = lookup();
     cache.set(key, { until: Date.now() + CACHE_MS, value: promise });
@@ -96,10 +102,12 @@ export class OrgObjectReadVerificationService {
   /** Bound Salesforce verification calls across ALL analyzers, not per feature. */
   private async limited<T>(work: () => Promise<T>): Promise<T> {
     if (this.inflight >= MAX_INFLIGHT_ORG_CHECKS) {
-      await new Promise<void>((resume) => this.waiting.push(resume));
+      recordSoqlCount("org.verification.queue_waits");
+      await timeSoqlPhase("org.verification.queue_cumulative_ms",
+        () => new Promise<void>((resume) => this.waiting.push(resume)));
     }
     this.inflight++;
-    try { return await work(); }
+    try { return await timeSoqlPhase("org.verification.work_cumulative_ms", work); }
     finally {
       this.inflight--;
       this.waiting.shift()?.();
