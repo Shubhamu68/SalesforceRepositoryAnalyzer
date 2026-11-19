@@ -9,7 +9,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { test } from "node:test";
-import { SalesforceFieldMetadataService, compoundNameParentFromMetadata } from "../src/salesforce/SalesforceFieldMetadataService.js";
+import { SalesforceFieldMetadataService, compoundNameParentFromMetadata, compoundParentFromMetadata } from "../src/salesforce/SalesforceFieldMetadataService.js";
 import { SalesforceUserFieldAccessGateway } from "../src/salesforce/SalesforceUserFieldAccessGateway.js";
 import { OrgObjectReadVerificationService } from "../src/services/OrgObjectReadVerificationService.js";
 import type { SalesforceOrgConnection } from "../src/salesforce/SalesforceOrgConnection.js";
@@ -31,7 +31,8 @@ const rows = (name: string) => [
 function makeOrg(settings: {
   denyMetadata?: boolean;
   metadataRows?: ReturnType<typeof rows>;
-  userRows?: Array<{ UserId: string; IsAccessible: boolean; FieldDefinition: { QualifiedApiName: string } }>;
+  userRows?: Array<{ UserId: string; IsAccessible: boolean | null; FieldDefinition: { QualifiedApiName: string } }>;
+  describeFields?: Array<{ name: string; type: string; compoundFieldName?: string }>;
 } = {}) {
   let orgId = "00D000000000001";
   let queriedMetadata = 0;
@@ -58,7 +59,7 @@ function makeOrg(settings: {
       described++;
       return {
         name,
-        fields: [
+        fields: settings.describeFields ?? [
           { name: "Name", type: "string" },
           { name: "FirstName", type: "string", compoundFieldName: "Name" },
           { name: "LastName", type: "string", compoundFieldName: "Name" },
@@ -168,6 +169,61 @@ test("permissionable field never inherits a grant from Name unless component/par
   const found = await gateway.verifyUserField(user, "User", "FirstName");
   assert.deepEqual(found, { read: true, edit: null, readFromCompoundParent: "Name" });
   assert.ok(org.accessCalls > 0);
+});
+
+test("live custom Address components inherit parent Read when Describe omits compound metadata", async () => {
+  const parent = "Bill_Ship_Address__c";
+  const component = "Bill_Ship_Address__City__s";
+  const org = makeOrg({
+    metadataRows: [
+      { QualifiedApiName: parent, DataType: "address", IsPermissionable: true, IsComponent: false, IsCompound: true },
+      { QualifiedApiName: component, DataType: "string", IsPermissionable: true, IsComponent: true, IsCompound: false },
+    ],
+    userRows: [{ UserId: user, IsAccessible: true, FieldDefinition: { QualifiedApiName: parent } }],
+    // Salesforce may omit a useful compoundFieldName and parent from Describe.
+    describeFields: [{ name: component, type: "string" }],
+  });
+  const metadata = new SalesforceFieldMetadataService(org.connection);
+  const gateway = new SalesforceUserFieldAccessGateway(org.connection, metadata);
+  assert.equal(await metadata.getCompoundParent("Order_Changes__c", component), parent);
+  assert.deepEqual(await gateway.verifyUserField(user, "Order_Changes__c", component),
+    { read: true, edit: null, readFromCompoundParent: parent });
+  assert.equal(org.metadataCalls, 1, "object metadata should be fetched once");
+});
+
+test("custom Address parent Read resolves a null direct component row but never overrides direct denial", async () => {
+  const parent = "Bill_To_Address__c";
+  const component = "Bill_To_Address__CountryCode__s";
+  const metadataRows = [
+    { QualifiedApiName: parent, DataType: "address", IsPermissionable: true, IsComponent: false, IsCompound: true },
+    { QualifiedApiName: component, DataType: "string", IsPermissionable: true, IsComponent: true, IsCompound: false },
+  ];
+  for (const directAccess of [null, false]) {
+    const org = makeOrg({
+      metadataRows,
+      userRows: [
+        { UserId: user, IsAccessible: directAccess, FieldDefinition: { QualifiedApiName: component } },
+        { UserId: user, IsAccessible: true, FieldDefinition: { QualifiedApiName: parent } },
+      ],
+      describeFields: [{ name: component, type: "string", compoundFieldName: parent },
+        { name: parent, type: "address" }],
+    });
+    const gateway = new SalesforceUserFieldAccessGateway(org.connection,
+      new SalesforceFieldMetadataService(org.connection));
+    const effective = await gateway.verifyUserField(user, "Order_Changes__c", component);
+    assert.equal(effective.read, directAccess === null ? true : false);
+    assert.equal(effective.readFromCompoundParent, directAccess === null ? parent : undefined);
+  }
+});
+
+test("address-like field names alone never authorize compound Read", () => {
+  const parent = "Bill_To_Address__c";
+  const component = "Bill_To_Address__City__s";
+  const fields = new Map([
+    [parent.toLowerCase(), { source: "LIVE" as const, permissionable: true, isCompound: true, dataType: "address" }],
+    [component.toLowerCase(), { source: "LIVE" as const, permissionable: true, isComponent: false }],
+  ]);
+  assert.equal(compoundParentFromMetadata(fields, component), null);
 });
 
 test("parent Name denial cannot establish component FLS denial", async () => {
