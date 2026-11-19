@@ -52,11 +52,10 @@ const isCompoundType = (type: string | undefined): boolean =>
   ["address", "location", "name"].includes(type?.toLowerCase() ?? "");
 
 /** Only a recognized compound field in Describe may become an FLS parent. */
-export function compoundParentFromDescribe(
-  describe: Pick<SalesforceSObjectDescribe, "fields">,
+function compoundParentFromIndexedDescribe(
+  fields: ReadonlyMap<string, DescribeField>,
   requestedField: string,
 ): string | null {
-  const fields = new Map(describe.fields.filter((item) => typeof item.name === "string").map((item) => [norm(item.name), item]));
   const component = fields.get(norm(requestedField));
   if (!component) return null;
   if (typeof component.compoundFieldName === "string" && component.compoundFieldName.trim()) {
@@ -83,6 +82,16 @@ export function compoundParentFromDescribe(
     if (parent?.type?.toLowerCase() === "address") return parent.name;
   }
   return null;
+}
+
+/** Public single-field helper; the full-object path shares one index instead. */
+export function compoundParentFromDescribe(
+  describe: Pick<SalesforceSObjectDescribe, "fields">,
+  requestedField: string,
+): string | null {
+  const index = new Map(describe.fields.filter((item) => typeof item.name === "string")
+    .map((item) => [norm(item.name), item]));
+  return compoundParentFromIndexedDescribe(index, requestedField);
 }
 
 function toAccess(rows: UserAccessRow[], userId: string, field: string): DirectAccess {
@@ -181,9 +190,14 @@ export class SalesforceUserFieldAccessGateway {
     const key = this.scope() + "|" + norm(object);
     return this.cached(this.parentCache, key, async () => {
       const describe = await this.connection.describeSObject(object);
+      // The previous per-field helper rebuilt a Map of *every field* for
+      // each field in the Describe. On large objects that was O(fields²).
+      // A single shared index makes this pass O(fields).
+      const index = new Map(describe.fields.filter((item) => typeof item.name === "string")
+        .map((item) => [norm(item.name), item]));
       const parents = new Map<string, string>();
       for (const field of describe.fields) {
-        const parent = compoundParentFromDescribe(describe, field.name);
+        const parent = compoundParentFromIndexedDescribe(index, field.name);
         if (parent) parents.set(norm(field.name), parent);
       }
       return parents;
