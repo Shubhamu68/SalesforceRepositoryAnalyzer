@@ -1,5 +1,3 @@
-import { getFieldPermissionability } from "./fieldPermissionability.js";
-
 export const SOQL_SYSTEM_FIELDS = new Set([
   "id",
   "ownerid",
@@ -33,13 +31,11 @@ export function isIgnoredField(
   fieldName: string,
   objectName?: string
 ): boolean {
-  // Snapshot-backed fields are checked centrally by the effective-access
-  // evaluator. In particular, do not skip a field marked permissionable=true.
-  if (objectName && getFieldPermissionability(objectName, fieldName) !== undefined) {
-    return false;
-  }
-
-  // Legacy fallback for fields outside the current snapshot.
+  // Only universally special identifiers / generated compound components
+  // are excluded without org metadata. Other standard fields (including
+  // Name, OwnerId, CreatedDate) may have org-specific permissionability and
+  // must reach the shared FLS verifier rather than be silently discarded.
+  void objectName;
   const normalized = fieldName.trim().toLowerCase();
-  return isSystemField(normalized) || normalized.endsWith("__s");
+  return normalized === "id" || normalized.endsWith("__s");
 }
