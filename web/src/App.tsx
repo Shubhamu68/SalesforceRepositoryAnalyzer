@@ -91,7 +91,26 @@ type AllPersonasHighPriorityResult = {
 };
 
 type CheckType = "object" | "field" | "soql";
-type Page = "dashboard" | "access" | "soql" | "matrix" | "stack" | "reports" | "salesforce";
+type Page = "dashboard" | "access" | "soql" | "matrix" | "stack" | "salesforce";
+
+/** Navigation is intentionally ordered by workflow; Salesforce Org stays last. */
+const NAV_ITEMS: ReadonlyArray<{ page: Page; label: string; symbol: string }> = [
+  { page: "dashboard", label: "Dashboard", symbol: "▦" },
+  { page: "access", label: "Access Checker", symbol: "◇" },
+  { page: "soql", label: "SOQL Security Analysis", symbol: "◎" },
+  { page: "matrix", label: "Object Access Matrix", symbol: "▤" },
+  { page: "stack", label: "Stack Trace Impact", symbol: "⌁" },
+  { page: "salesforce", label: "Salesforce Org", symbol: "☁" },
+];
+
+const PAGE_COPY: Record<Page, { heading: string; description: string }> = {
+  dashboard: { heading: "Security overview", description: "Latest SOQL security findings and quick actions." },
+  access: { heading: "Access Checker", description: "Object and field permissions by persona." },
+  soql: { heading: "SOQL Security Analysis", description: "Persona-specific SOQL findings and Excel output." },
+  matrix: { heading: "Object Access Matrix", description: "Compare object permissions across personas." },
+  stack: { heading: "Stack Trace Impact Analyzer", description: "Trace SOQL queries and persona access." },
+  salesforce: { heading: "Salesforce Org Connectivity", description: "Connection status and read-only query tests." },
+};
 
 function App() {
   const [personas, setPersonas] = useState<Persona[]>([]);
@@ -144,7 +163,6 @@ function App() {
   const [allPersonasChecking, setAllPersonasChecking] = useState(false);
   const [allPersonasResult, setAllPersonasResult] = useState<AllPersonasHighPriorityResult | null>(null);
   const [allPersonasError, setAllPersonasError] = useState("");
-  const [latestSoqlReportKind, setLatestSoqlReportKind] = useState<"single" | "all" | "none">("none");
   const [reportFolderPendingAction, setReportFolderPendingAction] = useState<"single" | "all">("single");
   const [page, setPage] = useState<Page>("dashboard");
   const [repositoryName, setRepositoryName] = useState<string>("");
@@ -298,7 +316,6 @@ function App() {
       setResult(null);
       setLastSoql(null);
       setAllPersonasResult(null);
-      setLatestSoqlReportKind("none");
     } catch (cause) {
       setRepoError(cause instanceof Error ? cause.message : "Unable to configure the Salesforce repository.");
     } finally { setChoosingRepo(false); }
@@ -607,7 +624,7 @@ function App() {
       setResult(data);
       if (checkType === "soql") {
         setLastSoql(data as SoqlAnalysisResult);
-        setLatestSoqlReportKind("single");
+        setAllPersonasResult(null); // Dashboard and SOQL show only the latest completed report.
         setLastRunAt(new Date());
       }
     } catch (err) {
@@ -664,7 +681,7 @@ function App() {
       }
       const data: AllPersonasHighPriorityResult = await response.json();
       setAllPersonasResult(data);
-      setLatestSoqlReportKind("all");
+      setLastSoql(null); // Avoid displaying a stale single-persona report as the latest run.
       setLastRunAt(new Date());
     } catch (cause) {
       setAllPersonasError(cause instanceof Error ? cause.message : "Unable to generate the High Priority Summary.");
@@ -1181,7 +1198,6 @@ function App() {
         <div className="brand-mark" aria-hidden="true">⬡</div>
         <div className="brand-name"><strong>Salesforce</strong><span>Repository Analyzer</span></div>
         <div className="topbar-right">
-          <span className={apiConnected ? "connection online" : "connection offline"}><span className="connection-dot" />{apiConnected ? "API connected" : "API unavailable"}</span>
           <span className={`connection ${repositoryConnectionIndicator(apiConnected, repoChecked, repoReady).connected ? "online" : "offline"}`}
             title={repoReady ? repositoryName : "Salesforce repository setup status"}>
             <span className="connection-dot" />{repositoryConnectionIndicator(apiConnected, repoChecked, repoReady).label}
@@ -1193,27 +1209,25 @@ function App() {
             setResult(null);
             setLastSoql(null);
           }}>{salesforceConnection === "connected" ? "Change org" : "Connect org"}</button>
-          <span className="avatar">RA</span>
         </div>
       </header>
       <aside className="sidebar">
         <div className="sidebar-label">WORKSPACE</div>
         <nav className="side-links" aria-label="Main navigation">
-          <button className={page === "dashboard" ? "active" : ""} onClick={() => navigate("dashboard")}><span className="nav-symbol">▦</span>Dashboard</button>
-          <button className={page === "access" ? "active" : ""} onClick={() => navigate("access")}><span className="nav-symbol">◇</span>Access Checker</button>
-          <button className={page === "soql" ? "active" : ""} onClick={() => navigate("soql")}><span className="nav-symbol">◎</span>SOQL Security Analysis</button>
-          <button className={page === "matrix" ? "active" : ""} onClick={() => navigate("matrix")}><span className="nav-symbol">▤</span>Object Access Matrix</button>
-          <button className={page === "stack" ? "active" : ""} onClick={() => navigate("stack")}><span className="nav-symbol">⌁</span>Stack Trace Impact</button>
-          <button className={page === "reports" ? "active" : ""} onClick={() => navigate("reports")}><span className="nav-symbol">▧</span>Reports</button>
-          <button className={page === "salesforce" ? "active" : ""} onClick={() => navigate("salesforce")}><span className="nav-symbol">☁</span>Salesforce Org</button>
+          {NAV_ITEMS.map(({ page: destination, label, symbol }) => (
+            <button key={destination} className={page === destination ? "active" : ""}
+              onClick={() => navigate(destination)}>
+              <span className="nav-symbol">{symbol}</span>{label}
+            </button>
+          ))}
         </nav>
       </aside>
       <main className="main-area">
         <div className="page-heading">
           <div>
             <div className="breadcrumb">WORKSPACE / {page.toUpperCase()}</div>
-            <h1>{page === "dashboard" ? "Security overview" : page === "access" ? "Access Checker" : page === "soql" ? "SOQL Security Analysis" : page === "matrix" ? "Object Access Matrix" : page === "stack" ? "Stack Trace Impact Analyzer" : page === "salesforce" ? "Salesforce Org Connectivity" : "Generated reports"}</h1>
-            <p>{page === "dashboard" ? "Latest SOQL security findings and quick actions." : page === "access" ? "Object and field permissions by persona." : page === "soql" ? "Persona-specific SOQL findings and Excel output." : page === "matrix" ? "Compare object permissions across personas." : page === "stack" ? "Trace SOQL queries and persona access." : page === "salesforce" ? "Connection status and read-only query tests." : "Excel output from this session."}</p>
+            <h1>{PAGE_COPY[page].heading}</h1>
+            <p>{PAGE_COPY[page].description}</p>
           </div>
           {page === "dashboard" && <button className="primary-button" onClick={() => navigate("soql")}>Run SOQL Analysis</button>}
         </div>
@@ -1225,9 +1239,9 @@ function App() {
             </div>
             <div className="dashboard-grid">
               <section className="panel severity-panel"><h2>Finding severity</h2>{soqlSummary ? <><div className="severity-visual" style={{ background: `conic-gradient(#f04452 0 ${soqlSummary.totalFindings ? 100 * soqlSummary.errors / soqlSummary.totalFindings : 0}%, #f5a23c 0 100%)` }}><div><strong>{soqlSummary.totalFindings}</strong><span>Total findings</span></div></div><div className="legend"><span><i className="dot red-dot"/>Errors <strong>{soqlSummary.errors}</strong></span><span><i className="dot orange-dot"/>Reviews <strong>{soqlSummary.reviews}</strong></span></div></> : <div className="empty-visual"><span>◌</span><p>No analysis completed yet</p><small>Run SOQL Security Analysis to populate this chart.</small></div>}</section>
-              <section className="panel summary-panel"><h2>Latest analysis</h2><div className="detail-line"><span>Repository</span><strong title={repositoryName}>{repositoryName || "Not loaded"}</strong></div><div className="detail-line"><span>Last analysed</span><strong>{lastRunAt ? lastRunAt.toLocaleString() : "Not yet run"}</strong></div><div className="detail-line"><span>Persona</span><strong>{lastSoql?.personaName || "—"}</strong></div><div className="detail-line"><span>Reports folder</span><strong title={lastSoql?.outputFolder}>{lastSoql?.outputFolder || "—"}</strong></div></section>
+              <section className="panel summary-panel"><h2>Latest analysis</h2><div className="detail-line"><span>Repository</span><strong title={repositoryName}>{repositoryName || "Not loaded"}</strong></div><div className="detail-line"><span>Last analysed</span><strong>{lastRunAt ? lastRunAt.toLocaleString() : "Not yet run"}</strong></div><div className="detail-line"><span>Persona</span><strong>{lastSoql?.personaName ?? (allPersonasResult ? `All ${allPersonasResult.personaCount} personas` : "—")}</strong></div><div className="detail-line"><span>Reports folder</span><strong title={lastSoql?.outputFolder ?? allPersonasResult?.outputFolder}>{lastSoql?.outputFolder ?? allPersonasResult?.outputFolder ?? "—"}</strong></div></section>
             </div>
-            <section className="panel shortcuts-panel"><div className="panel-heading"><div><h2>Quick actions</h2></div></div><div className="quick-actions"><button onClick={() => navigate("access")}><span className="shortcut-icon">◇</span><strong>Check object or field access</strong><small>Resolve permissions for a persona</small><span className="shortcut-arrow">→</span></button><button onClick={() => navigate("soql")}><span className="shortcut-icon">◎</span><strong>Scan SOQL security</strong><small>Generate an Excel workbook</small><span className="shortcut-arrow">→</span></button><button onClick={() => navigate("reports")}><span className="shortcut-icon">▧</span><strong>View report location</strong><small>Find generated Excel reports</small><span className="shortcut-arrow">→</span></button></div></section>
+            <section className="panel shortcuts-panel"><div className="panel-heading"><div><h2>Quick actions</h2></div></div><div className="quick-actions"><button onClick={() => navigate("access")}><span className="shortcut-icon">◇</span><strong>Check object or field access</strong><small>Resolve permissions for a persona</small><span className="shortcut-arrow">→</span></button><button onClick={() => navigate("soql")}><span className="shortcut-icon">◎</span><strong>Scan SOQL security</strong><small>Generate an Excel workbook</small><span className="shortcut-arrow">→</span></button></div></section>
           </>
         )}
 
@@ -1298,36 +1312,7 @@ function App() {
             ? "Preparing SOQL once, checking each persona's permissions, and generating a single High Priority Excel worksheet…"
             : "Scanning Apex queries and generating the Excel workbook…"} />}
 
-        {page === "reports" && (
-          <section className="panel reports-panel">
-            <div className="panel-heading">
-              <div><h2>Latest Excel report</h2><p>Saved directly to your configured folder.</p></div>
-            </div>
-            {latestSoqlReportKind === "all" && allPersonasResult ? (
-              <>
-                <div className="detail-line"><span>Report type</span><strong>All Personas — High Priority Summary</strong></div>
-                <div className="detail-line"><span>Personas</span><strong>{allPersonasResult.personaCount}</strong></div>
-                <div className="detail-line"><span>High Priority Issues</span><strong>{allPersonasResult.totalHighPriorityFindings}</strong></div>
-                <div className="detail-line"><span>Excel file</span><strong>{allPersonasResult.reportFileName}</strong></div>
-                <div className="detail-line"><span>Report folder</span><strong className="path-text">{allPersonasResult.outputFolder}</strong></div>
-                <button className="secondary-button" onClick={() => navigator.clipboard.writeText(allPersonasResult.outputFolder)}>Copy folder path</button>
-              </>
-            ) : latestSoqlReportKind === "single" && lastSoql ? (
-              <>
-                <div className="detail-line"><span>Persona</span><strong>{lastSoql.personaName}</strong></div>
-                <div className="detail-line"><span>Report folder</span><strong className="path-text">{lastSoql.outputFolder}</strong></div>
-                <div className="detail-line"><span>Findings</span><strong>{lastSoql.summary.totalFindings}</strong></div>
-                <button className="secondary-button" onClick={() => navigator.clipboard.writeText(lastSoql.outputFolder)}>Copy folder path</button>
-              </>
-            ) : (
-              <div className="empty-reports">
-                <span>▧</span><h3>No report yet</h3>
-                <p>Run SOQL analysis to generate an Excel workbook.</p>
-                <button className="primary-button" onClick={() => navigate("soql")}>Run SOQL Analysis</button>
-              </div>
-            )}
-          </section>
-        )}
+
       </main>
       {repoModalOpen && (
         <RepositorySetupModal
