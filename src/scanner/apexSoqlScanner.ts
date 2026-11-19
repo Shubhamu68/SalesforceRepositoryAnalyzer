@@ -71,7 +71,13 @@ async function scanRepositoryApex(repositoryPath: string): Promise<SoqlQuery[]> 
     parallelMap(apexFiles, async (filePath): Promise<[string, CachedApexFile]> => {
       // Nanosecond mtime+ctime and size detect ordinary source edits even when
       // content length is unchanged; directory traversal detects additions/deletions.
-      const info = await stat(filePath, { bigint: true });
+      // Cold scans need both source bytes and metadata anyway. Fetch them
+      // concurrently rather than serializing thousands of stat+read pairs.
+      // Warm scans stat first, avoiding file reads when reuse is safe.
+      const cold = previous ? undefined : await Promise.all([
+        stat(filePath, { bigint: true }), readFile(filePath, "utf8"),
+      ]);
+      const info = cold ? cold[0] : await stat(filePath, { bigint: true });
       const fingerprint = `${info.size}:${info.mtimeNs}:${info.ctimeNs}`;
       const cached = previous?.get(filePath);
       const nowNs = BigInt(Date.now()) * 1_000_000n;
@@ -81,7 +87,7 @@ async function scanRepositoryApex(repositoryPath: string): Promise<SoqlQuery[]> 
         reused++;
         return [filePath, cached];
       }
-      const source = await readFile(filePath, "utf8");
+      const source = cold ? cold[1] : await readFile(filePath, "utf8");
       return [filePath, { fingerprint, queries: extractSoqlQueries(source, filePath) }];
     }));
   recordSoqlCount("scanner.reused_files", reused);
