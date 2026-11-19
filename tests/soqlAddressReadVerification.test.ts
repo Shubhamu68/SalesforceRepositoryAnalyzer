@@ -116,6 +116,44 @@ test("Repository FLS grant bypasses redundant Salesforce calls", async () => {
   assert.deepEqual(checks, []);
 });
 
+test("SOQL groups sibling address components with a denied parent into one High finding", async () => {
+  const object = "Example__c";
+  const parent = "Delivery_Address__c";
+  const components = ["Delivery_Address__City__s", "Delivery_Address__Street__s"];
+  const requests: string[] = [];
+  const verifier = {
+    verifyFieldRead: async (_persona: Persona, name: string, field: string): Promise<OrgObjectAccessEvidence> => {
+      requests.push(field);
+      const dependency = components.includes(field);
+      return {
+        object: name, field, outcome: "DENIED", checkedUsers: 1, matchedUsers: 1, sampled: false,
+        ...(dependency ? { deniedCompoundParent: parent } : {}),
+        message: dependency
+          ? `Salesforce confirmed missing Read on compound parent ${name}.${parent}; direct component decision unavailable.`
+          : "Salesforce confirmed direct parent Read denial.",
+      };
+    },
+  } as unknown as SalesforcePersonaAccessVerifier;
+  const verification = new OrgObjectReadVerificationService({ statusNeutralObjectRead: new Set() }, verifier);
+  const findings = await run(object, [...components, parent], verification);
+  assert.ok(requests.includes(parent) && components.every((field) => requests.includes(field)));
+  assert.equal(findings.length, 1, "siblings and the queried parent share one source/parent finding");
+  assert.equal(findings[0].field, parent);
+  assert.equal(findings[0].severity, "ERROR");
+  assert.equal(findings[0].criticality, "High");
+  assert.match(findings[0].reason, /compound parent/i);
+  assert.doesNotMatch(findings[0].reason, /couldn't verify access/i);
+});
+
+test("Confirmed direct component denial stays on the component rather than its parent", async () => {
+  const object = "Example__c";
+  const field = "Delivery_Address__City__s";
+  const findings = await run(object, [field], verificationService("DENIED", []));
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].field, field);
+  assert.equal(findings[0].criticality, "High");
+});
+
 test("A missing Account standard address field is checked just once across repeated SOQL queries", async () => {
   const checks: string[] = [];
   const findings = await run("Account", [], verificationService("VERIFIED", checks), [],
