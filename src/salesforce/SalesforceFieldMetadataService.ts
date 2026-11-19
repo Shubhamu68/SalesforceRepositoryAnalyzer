@@ -1,19 +1,19 @@
 import type { SalesforceOrgConnection } from "./SalesforceOrgConnection.js";
-import { getFieldPermissionability } from "../analyzer/fieldPermissionability.js";
+import { OptionalFieldMetadataCache } from "../services/OptionalFieldMetadataCache.js";
 import { recordSoqlCount } from "../services/SoqlPerformanceMetrics.js";
 
 /**
  * One metadata source for every analysis workflow:
  *  1. current-org EntityParticle (authoritative for FLS applicability);
- *  2. the optional local snapshot if online metadata cannot be retrieved;
- *  3. unknown, never an inferred permission grant.
+ *  2. an explicitly configured, org-scoped offline cache (never bundled);
+ *  3. UNKNOWN, never an inferred permission grant.
  *
  * Org metadata is cached in memory by org ID, instance and API version.
- * A successful live lookup does not silently fall back to stale snapshot
- * metadata if a field is absent from that org's EntityParticle response.
+ * A successful live lookup never falls back to offline cache metadata if
+ * the field is absent from the queried org's EntityParticle response.
  */
 type Connection = Pick<SalesforceOrgConnection, "status" | "queryAll">;
-export type FieldMetadataSource = "LIVE" | "SNAPSHOT" | "UNKNOWN";
+export type FieldMetadataSource = "LIVE" | "OPTIONAL_CACHE" | "UNKNOWN";
 
 export interface SalesforceFieldMetadata {
   permissionable: boolean | undefined;
@@ -54,7 +54,10 @@ export function compoundNameParentFromMetadata(
 export class SalesforceFieldMetadataService {
   private readonly cachedObjects = new Map<string, CacheEntry>();
 
-  constructor(private readonly connection?: Connection) {}
+  constructor(
+    private readonly connection?: Connection,
+    private readonly offlineCache = new OptionalFieldMetadataCache(),
+  ) {}
 
   private cacheKey(object: string): string {
     const state = this.connection?.status;
@@ -110,8 +113,12 @@ export class SalesforceFieldMetadataService {
     if (!VALID_NAME.test(object) || !VALID_NAME.test(field)) return unknown;
     const live = await this.getObjectMetadata(object);
     if (live !== null) return live.get(norm(field)) ?? unknown;
-    const snapshot = getFieldPermissionability(object, field);
-    return snapshot === undefined ? unknown : { permissionable: snapshot, source: "SNAPSHOT" };
+    // Only opt-in metadata from the SAME org may supplement a failed live
+    // request. Repository-only mode requires FIELD_METADATA_OFFLINE_ORG_ID.
+    const connectedOrgId = this.connection?.status.organizationId;
+    const cached = this.connection && !connectedOrgId ? undefined
+      : this.offlineCache.getField(object, field, connectedOrgId);
+    return cached === undefined ? unknown : { permissionable: cached, source: "OPTIONAL_CACHE" };
   }
 
   async getCompoundNameParent(object: string, field: string): Promise<string | null> {
