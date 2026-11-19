@@ -10,7 +10,7 @@ const organizationId = at < 0 ? "" : args[at + 1] ?? "";
 if (!/^00D[A-Za-z0-9]{12}(?:[A-Za-z0-9]{3})?$/.test(organizationId)) {
   throw new Error("Provide the source Salesforce organization ID with --org-id 00D... (15 or 18 characters).");
 }
-const positional = args.filter((argument, index) => index !== at && index !== at + 1);
+const positional = args.filter((_argument, index) => at < 0 || (index !== at && index !== at + 1));
 const input = path.resolve(positional[0] ?? "config/field-permissionability.csv");
 const output = path.resolve(positional[1] ?? "config/field-permissionability.local.json");
 const source = readFileSync(input, "utf8").replace(/^\uFEFF/, "");
