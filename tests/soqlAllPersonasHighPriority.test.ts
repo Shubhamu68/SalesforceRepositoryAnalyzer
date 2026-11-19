@@ -174,3 +174,39 @@ test("all-personas analysis fails closed on empty or duplicate persona configura
     assert.deepEqual(await readdir(root), []);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test("all-personas evaluations remain bounded to two concurrent workers and ordered", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "sf-high-parallel-"));
+  try {
+    await writeFile(path.join(root, "Simple.cls"),
+      "public class Simple { [SELECT Id FROM Account WITH USER_MODE]; }");
+    let active = 0;
+    let maxActive = 0;
+    const analyzer = {
+      prepare: async () => ({ marker: true }),
+      analyzePrepared: async (persona: Persona) => {
+        active++;
+        maxActive = Math.max(active, maxActive);
+        // Deliberately finish in a different order from persona configuration.
+        await new Promise<void>(resolve => setTimeout(resolve, persona.name === "P1" ? 25 : 5));
+        active--;
+        return [];
+      },
+    } as unknown as SoqlSecurityAnalyzer;
+    const selected = ["P1", "P2", "P3", "P4", "P5"].map(makePersona);
+    const service = new SoqlAnalysisService(root, analyzer, path.join(root, "output"));
+    const result = await service.analyzeAllHighPriority(selected);
+    assert.ok(maxActive > 1 && maxActive <= 2,
+      "performance should use bounded, overlapping persona evaluations");
+    assert.equal(active, 0);
+    assert.deepEqual(result.personas.map(persona => persona.personaName),
+      selected.map(persona => persona.name), "sections must preserve configured order");
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.readFile(result.reportPath);
+    assert.deepEqual(workbook.worksheets[0].getColumn(1).values.map(cellText)
+      .filter(t => t.startsWith("Persona ")),
+      selected.map((persona, index) => `Persona ${index + 1}: ${persona.name}`));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
