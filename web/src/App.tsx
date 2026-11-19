@@ -144,6 +144,7 @@ function App() {
   const [allPersonasChecking, setAllPersonasChecking] = useState(false);
   const [allPersonasResult, setAllPersonasResult] = useState<AllPersonasHighPriorityResult | null>(null);
   const [allPersonasError, setAllPersonasError] = useState("");
+  const [latestSoqlReportKind, setLatestSoqlReportKind] = useState<"single" | "all" | "none">("none");
   const [reportFolderPendingAction, setReportFolderPendingAction] = useState<"single" | "all">("single");
   const [page, setPage] = useState<Page>("dashboard");
   const [repositoryName, setRepositoryName] = useState<string>("");
@@ -297,6 +298,7 @@ function App() {
       setResult(null);
       setLastSoql(null);
       setAllPersonasResult(null);
+      setLatestSoqlReportKind("none");
     } catch (cause) {
       setRepoError(cause instanceof Error ? cause.message : "Unable to configure the Salesforce repository.");
     } finally { setChoosingRepo(false); }
@@ -605,6 +607,7 @@ function App() {
       setResult(data);
       if (checkType === "soql") {
         setLastSoql(data as SoqlAnalysisResult);
+        setLatestSoqlReportKind("single");
         setLastRunAt(new Date());
       }
     } catch (err) {
@@ -661,6 +664,7 @@ function App() {
       }
       const data: AllPersonasHighPriorityResult = await response.json();
       setAllPersonasResult(data);
+      setLatestSoqlReportKind("all");
       setLastRunAt(new Date());
     } catch (cause) {
       setAllPersonasError(cause instanceof Error ? cause.message : "Unable to generate the High Priority Summary.");
@@ -1283,7 +1287,36 @@ function App() {
             ? "Preparing SOQL once, checking each persona's permissions, and generating a single High Priority Excel worksheet…"
             : "Scanning Apex queries and generating the Excel workbook…"} />}
 
-        {page === "reports" && <section className="panel reports-panel"><div className="panel-heading"><div><h2>Latest Excel report</h2><p>Saved directly to your configured folder.</p></div></div>{lastSoql ? <><div className="detail-line"><span>Persona</span><strong>{lastSoql.personaName}</strong></div><div className="detail-line"><span>Report folder</span><strong className="path-text">{lastSoql.outputFolder}</strong></div><div className="detail-line"><span>Findings</span><strong>{lastSoql.summary.totalFindings}</strong></div><button className="secondary-button" onClick={() => navigator.clipboard.writeText(lastSoql.outputFolder)}>Copy folder path</button></> : <div className="empty-reports"><span>▧</span><h3>No report yet</h3><p>Run SOQL analysis to generate an Excel workbook.</p><button className="primary-button" onClick={() => navigate("soql")}>Run SOQL Analysis</button></div>}</section>}
+        {page === "reports" && (
+          <section className="panel reports-panel">
+            <div className="panel-heading">
+              <div><h2>Latest Excel report</h2><p>Saved directly to your configured folder.</p></div>
+            </div>
+            {latestSoqlReportKind === "all" && allPersonasResult ? (
+              <>
+                <div className="detail-line"><span>Report type</span><strong>All Personas — High Priority Summary</strong></div>
+                <div className="detail-line"><span>Personas</span><strong>{allPersonasResult.personaCount}</strong></div>
+                <div className="detail-line"><span>High Priority Issues</span><strong>{allPersonasResult.totalHighPriorityFindings}</strong></div>
+                <div className="detail-line"><span>Excel file</span><strong>{allPersonasResult.reportFileName}</strong></div>
+                <div className="detail-line"><span>Report folder</span><strong className="path-text">{allPersonasResult.outputFolder}</strong></div>
+                <button className="secondary-button" onClick={() => navigator.clipboard.writeText(allPersonasResult.outputFolder)}>Copy folder path</button>
+              </>
+            ) : latestSoqlReportKind === "single" && lastSoql ? (
+              <>
+                <div className="detail-line"><span>Persona</span><strong>{lastSoql.personaName}</strong></div>
+                <div className="detail-line"><span>Report folder</span><strong className="path-text">{lastSoql.outputFolder}</strong></div>
+                <div className="detail-line"><span>Findings</span><strong>{lastSoql.summary.totalFindings}</strong></div>
+                <button className="secondary-button" onClick={() => navigator.clipboard.writeText(lastSoql.outputFolder)}>Copy folder path</button>
+              </>
+            ) : (
+              <div className="empty-reports">
+                <span>▧</span><h3>No report yet</h3>
+                <p>Run SOQL analysis to generate an Excel workbook.</p>
+                <button className="primary-button" onClick={() => navigate("soql")}>Run SOQL Analysis</button>
+              </div>
+            )}
+          </section>
+        )}
       </main>
       {repoModalOpen && (
         <RepositorySetupModal
