@@ -247,7 +247,7 @@ export class SoqlSecurityAnalyzer {
         // established FLS. EntityParticle metadata cannot change that verdict;
         // avoid an unnecessary live-org lookup when all fields are granted.
         if (grant.schemaRequired === true || grant.readGrantedBy.length > 0) return;
-        // Current-org metadata overrides the curated snapshot. Never
+        // Current-org metadata overrides any explicitly selected offline cache. Never
         // infer a grant from an unknown field in a successful live lookup.
         const metadata = await this.fieldMetadata?.getField(object, fieldName);
         const permissionable = this.fieldMetadata ? metadata?.permissionable : grant.permissionable;
