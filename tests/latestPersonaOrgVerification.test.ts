@@ -28,7 +28,15 @@ const data: User[] = [
   { Id: missingGroup, Name: "No PSG", Username: "no-psg@example.com", ProfileId: profile, LastLoginDate: "2026-11-12T20:00:00.000Z", IsActive: true },
 ];
 
-type Fixtures = { users?: User[]; objectAccess?: Record<string, boolean | null>; fieldAccess?: Record<string, boolean | null>; connectFails?: boolean };
+type Fixtures = {
+  users?: User[];
+  objectAccess?: Record<string, boolean | null>;
+  fieldAccess?: Record<string, boolean | null>;
+  connectFails?: boolean;
+  frozenUsers?: string[];
+  missingUserLogin?: string[];
+  userLoginQueryFails?: boolean;
+};
 function fakeOrg(options: Fixtures = {}) {
   const users = options.users ?? data;
   const queries: string[] = [];
@@ -57,6 +65,13 @@ function fakeOrg(options: Fixtures = {}) {
           { AssigneeId: user.Id, PermissionSetId: psId, PermissionSetGroupId: null },
           { AssigneeId: user.Id, PermissionSetId: null, PermissionSetGroupId: groupId },
         ]) as T[];
+      }
+      if (soql.includes("FROM UserLogin")) {
+        if (options.userLoginQueryFails) throw new Error("UserLogin unavailable");
+        return users.filter(user => user.IsActive && soql.includes(user.Id) &&
+          !options.missingUserLogin?.includes(user.Id)).map(user => ({
+          UserId: user.Id, IsFrozen: options.frozenUsers?.includes(user.Id) ?? false,
+        })) as T[];
       }
       if (soql.includes("FROM UserEntityAccess")) {
         const id = users.map((user) => user.Id).find((candidate) => soql.includes(candidate));
@@ -136,13 +151,85 @@ test("Field-level Read also uses the SAME newest matched user", async () => {
   assert.ok(!queries.some((q) => q.includes("FROM UserFieldAccess") && q.includes(older)));
 });
 
-test("No matched user's recorded login results in UNVERIFIED, not arbitrary selection", async () => {
-  const { connection, queries } = fakeOrg({ users: data.map((user) => ({ ...user, LastLoginDate: null })) });
+test("No login history falls back to active, unfrozen persona user for object Read", async () => {
+  const { connection, queries } = fakeOrg({ users: data.map(user => ({ ...user, LastLoginDate: null })) });
   const result = await new SalesforcePersonaAccessVerifier(connection).verifyObjectRead(target, "OrderSummary");
-  assert.equal(result.outcome, "UNVERIFIED");
-  assert.equal(result.unverifiedReason, "NO_LOGGED_IN_USERS");
-  assert.equal(result.checkedUsers, 0);
-  assert.equal(queries.filter((q) => q.includes("FROM UserEntityAccess")).length, 0);
+  assert.equal(result.outcome, "VERIFIED");
+  assert.equal(result.selectionMethod, "ACTIVE_UNFROZEN_FALLBACK");
+  assert.equal(result.eligibleUsers, 3);
+  assert.equal(result.checkedUsers, 1);
+  assert.deepEqual(result.checkedUserDetails?.map(user => user.username), ["old@example.com"]);
+  assert.match(result.message, /without recorded login history/);
+  assert.ok(queries.some(q => q.includes("FROM UserLogin") && q.includes("IsFrozen")));
+  assert.equal(queries.filter(q => q.includes("FROM UserEntityAccess")).length, 1);
+});
+
+test("No login history falls back to active, unfrozen persona user for field Read", async () => {
+  const { connection, queries } = fakeOrg({
+    users: data.map(user => ({ ...user, LastLoginDate: null })),
+    fieldAccess: { [older]: false, [latest]: true },
+  });
+  const result = await new SalesforcePersonaAccessVerifier(connection)
+    .verifyFieldRead(target, "OrderSummary", "Sensitive__c");
+  assert.equal(result.outcome, "DENIED");
+  assert.equal(result.selectionMethod, "ACTIVE_UNFROZEN_FALLBACK");
+  assert.equal(result.checkedUserDetails?.[0].username, "old@example.com");
+  assert.ok(queries.some(q => q.includes("FROM UserFieldAccess") && q.includes(older)));
+});
+
+test("A frozen most-recently-logged-in user is skipped in favour of an unfrozen user", async () => {
+  const { connection, queries } = fakeOrg({
+    frozenUsers: [latest],
+    objectAccess: { [latest]: false, [older]: true },
+  });
+  const result = await new SalesforcePersonaAccessVerifier(connection)
+    .verifyObjectRead(target, "OrderSummary");
+  assert.equal(result.outcome, "VERIFIED");
+  assert.equal(result.selectionMethod, "RECENT_LOGIN");
+  assert.equal(result.checkedUserDetails?.[0].username, "old@example.com");
+  assert.ok(queries.some(q => q.includes("FROM UserEntityAccess") && q.includes(older)));
+  assert.ok(!queries.some(q => q.includes("FROM UserEntityAccess") && q.includes(latest)));
+});
+
+test("Frozen and missing UserLogin records are never treated as unfrozen", async () => {
+  const { connection, queries } = fakeOrg({
+    users: data.map(user => ({ ...user, LastLoginDate: null })),
+    frozenUsers: [older, latest],
+    missingUserLogin: [never],
+  });
+  const verifier = new SalesforcePersonaAccessVerifier(connection);
+  const object = await verifier.verifyObjectRead(target, "OrderSummary");
+  const field = await verifier.verifyFieldRead(target, "OrderSummary", "Sensitive__c");
+  assert.equal(object.outcome, "UNVERIFIED");
+  assert.equal(field.outcome, "UNVERIFIED");
+  assert.equal(object.unverifiedReason, "NO_UNFROZEN_USERS");
+  assert.equal(field.unverifiedReason, "NO_UNFROZEN_USERS");
+  assert.equal(object.checkedUsers, 0);
+  assert.equal(queries.filter(q => q.includes("FROM UserEntityAccess") ||
+    q.includes("FROM UserFieldAccess")).length, 0);
+});
+
+test("If Salesforce cannot query IsFrozen, access remains UNVERIFIED, never inferred", async () => {
+  const { connection, queries } = fakeOrg({ userLoginQueryFails: true });
+  const verifier = new SalesforcePersonaAccessVerifier(connection);
+  const object = await verifier.verifyObjectRead(target, "OrderSummary");
+  assert.equal(object.outcome, "UNVERIFIED");
+  assert.equal(object.checkedUsers, 0);
+  assert.match(object.message, /UserLogin unavailable/);
+  assert.equal(queries.filter(q => q.includes("FROM UserEntityAccess")).length, 0);
+});
+
+test("Concurrent field and object checks share one UserLogin lookup and same selected identity", async () => {
+  const { connection, queries } = fakeOrg({ users: data.map(user => ({ ...user, LastLoginDate: null })) });
+  const verifier = new SalesforcePersonaAccessVerifier(connection);
+  const [object, field] = await Promise.all([
+    verifier.verifyObjectRead(target, "OrderSummary"),
+    verifier.verifyFieldRead(target, "OrderSummary", "Sensitive__c"),
+  ]);
+  assert.equal(object.outcome, "VERIFIED");
+  assert.equal(field.outcome, "VERIFIED");
+  assert.deepEqual(object.checkedUserDetails, field.checkedUserDetails);
+  assert.equal(queries.filter(q => q.includes("FROM UserLogin")).length, 1);
 });
 
 test("The shared persona match is cached and the selected identity is stable across object checks", async () => {
