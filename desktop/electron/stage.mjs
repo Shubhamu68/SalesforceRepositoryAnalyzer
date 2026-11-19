@@ -20,7 +20,12 @@ for (const folder of ["runtime", "app", "app/web"]) {
 }
 cpSync(path.join(repo, "dist"), path.join(app, "dist"), { recursive: true });
 cpSync(path.join(repo, "web/dist"), path.join(app, "web/dist"), { recursive: true });
-cpSync(path.join(repo, "config"), path.join(destination, "config"), { recursive: true });
+// Allowlist app configuration; local Salesforce metadata caches must not ship.
+const configDir = path.join(destination, "config");
+mkdirSync(configDir, { recursive: true });
+for (const file of ["personas.json", "org-verification-status-policy.json"]) {
+  cpSync(path.join(repo, "config", file), path.join(configDir, file));
+}
 for (const file of [".env.example"]) cpSync(path.join(repo, file), path.join(destination, file));
 for (const file of ["package.json", "package-lock.json"]) cpSync(path.join(repo, file), path.join(app, file));
 cpSync(process.execPath, path.join(destination, "runtime", "node.exe"));
