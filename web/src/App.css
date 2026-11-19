@@ -103,3 +103,74 @@
 
 /* Keep long declared-mode labels readable on narrower desktop layouts. */
 @media (min-width:791px) and (max-width:1020px){.metrics-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
+
+/* SOQL Security Analysis: independent all-personas action above persona selection. */
+.soql-all-personas-panel {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 20px;
+  padding: 15px 0 22px;
+  margin-bottom: 21px;
+  border-bottom: 1px solid #e6edf6;
+}
+.soql-all-personas-copy {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  max-width: 440px;
+  line-height: 1.45;
+}
+.soql-all-personas-eyebrow {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .09em;
+  color: #667b98;
+}
+.soql-all-personas-copy strong {
+  color: #1a3558;
+  font-size: 15px;
+}
+.soql-all-personas-copy > span:not(.soql-all-personas-eyebrow) {
+  color: #667b98;
+  font-size: 11px;
+}
+.soql-all-personas-copy p {
+  margin: 3px 0 0;
+  font-size: 12px;
+  color: #6e819b;
+}
+.soql-high-priority-button {
+  background: #fff;
+  color: #265db1;
+  border: 1.5px solid #407bdb;
+  border-radius: 7px;
+  padding: 11px 17px;
+  font-size: 12px;
+  font-weight: 750;
+  white-space: nowrap;
+  min-height: 42px;
+}
+.soql-high-priority-button:hover:not(:disabled),
+.soql-high-priority-button:focus-visible {
+  background: #f0f6ff;
+  box-shadow: 0 0 0 3px rgba(47, 112, 218, .13);
+}
+.soql-high-priority-button:disabled {
+  cursor: not-allowed;
+  opacity: .55;
+}
+.soql-all-personas-result .soql-success-copy p {
+  font-size: 12px;
+  margin: 5px 0 0;
+  overflow-wrap: anywhere;
+  color: #5a7592;
+}
+@media(max-width:650px) {
+  .soql-all-personas-panel { align-items: stretch; justify-content: stretch; }
+  .soql-all-personas-copy { max-width: 100%; }
+  .soql-high-priority-button { width: 100%; white-space: normal; }
+}
