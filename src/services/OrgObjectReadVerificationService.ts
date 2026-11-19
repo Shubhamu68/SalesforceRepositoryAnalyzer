@@ -29,6 +29,8 @@ export interface ObjectReadDecision {
 
 export interface FieldReadDecision extends Omit<ObjectReadDecision, "statusNeutral"> {
   field: string;
+  /** Confirmed denied compound parent, not a direct denial on this component. */
+  deniedCompoundParent?: string;
 }
 
 // Retained for compatibility with older rules/tests. No longer an exception
@@ -179,6 +181,7 @@ export class OrgObjectReadVerificationService {
     return {
       field, source, readable: source === "ORG_VERIFIED",
       message: evidence?.message ?? "Repository field Read is not established and Salesforce verification is unavailable.",
+      ...(evidence?.deniedCompoundParent ? { deniedCompoundParent: evidence.deniedCompoundParent } : {}),
       ...(evidence ? { checkedUsers: evidence.checkedUsers, orgEvidence: evidence } : {}),
     };
   }
