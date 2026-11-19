@@ -986,32 +986,38 @@ function App() {
   const showSoqlOverlay = (checking || allPersonasChecking) && page === "soql";
 
   const analysisForm = (
-    <section className="panel analysis-panel">
-      <div className="panel-heading">
-        <div>
-          <h2>{page === "soql" ? WORKFLOW_COPY.soql.heading : WORKFLOW_COPY.access.heading}</h2>
-          <p>{page === "soql" ? WORKFLOW_COPY.soql.description : WORKFLOW_COPY.access.description}</p>
+    <section className={page === "soql" ? "panel analysis-panel soql-analysis-panel" : "panel analysis-panel"}>
+      <div className={page === "soql" ? "soql-analysis-top-row" : undefined}>
+        <div className="panel-heading">
+          <div>
+            <h2>{page === "soql" ? WORKFLOW_COPY.soql.heading : WORKFLOW_COPY.access.heading}</h2>
+            <p>{page === "soql" ? WORKFLOW_COPY.soql.description : WORKFLOW_COPY.access.description}</p>
+          </div>
         </div>
-        
-      </div>
-      {page === "soql" && (
-        <div className="soql-all-personas-panel">
-          <div className="soql-all-personas-copy">
-            <span className="soql-all-personas-eyebrow">ALL PERSONAS</span>
-            <strong>High Priority Summary</strong>
-            <span>No persona selection required</span>
+        {page === "soql" && (
+          <div className="soql-all-personas-panel" aria-label="All personas High Priority Summary">
+            <div className="soql-all-personas-heading">
+              <h3>All personas</h3>
+              <span className="soql-all-personas-pill">No persona selection required</span>
+            </div>
+            <button
+              type="button"
+              className="soql-high-priority-button"
+              disabled={checking || allPersonasChecking || loadingPersonas || !personas.length}
+              onClick={() => { void handleAllPersonasHighPriority(); }}
+            >
+              <svg className="soql-high-priority-icon" width="22" height="22" viewBox="0 0 24 24"
+                fill="none" stroke="currentColor" strokeWidth="1.8"
+                strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M7 2.5h7l5 5V20a1.5 1.5 0 0 1-1.5 1.5h-10A1.5 1.5 0 0 1 6 20V4A1.5 1.5 0 0 1 7.5 2.5Z" />
+                <path d="M14 2.5V8h5M9 12h7M9 15.5h7M9 19h4" />
+              </svg>
+              <span>{allPersonasChecking ? "Generating summary…" : "High Priority Summary"}</span>
+            </button>
             <p>Generates one Excel sheet with high-priority issues grouped by persona.</p>
           </div>
-          <button
-            type="button"
-            className="soql-high-priority-button"
-            disabled={checking || allPersonasChecking || loadingPersonas || !personas.length}
-            onClick={() => { void handleAllPersonasHighPriority(); }}
-          >
-            {allPersonasChecking ? "Generating summary…" : "High Priority Summary"}
-          </button>
-        </div>
-      )}
+        )}
+      </div>
       <div className="analysis-fields">
         <div className="form-field">
           <label htmlFor="persona">Business persona</label>
