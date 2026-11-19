@@ -89,6 +89,6 @@ export class OptionalFieldMetadataCache {
         console.warn("Optional field metadata cache unavailable or invalid; unresolved field permissionability will remain unknown.");
       }
     }
-    return this.loaded;
+    return this.loaded ?? null;
   }
 }
