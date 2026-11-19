@@ -42,8 +42,8 @@ export interface MissingReadPermission {
   /** Live verification status for either object or field Read. */
   orgOutcome?: "DENIED" | "UNVERIFIED";
   orgMessage?: string;
-  /** Missing persona match or matching users with no login history; distinct from API failures. */
-  orgReason?: "NO_MATCHING_USERS" | "NO_LOGGED_IN_USERS";
+  /** Missing matched user or no confirmed unfrozen user; distinct from API failures. */
+  orgReason?: "NO_MATCHING_USERS" | "NO_LOGGED_IN_USERS" | "NO_UNFROZEN_USERS";
 }
 
 export interface VerifiedOrgObject {

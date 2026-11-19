@@ -11,7 +11,7 @@ export interface OrgObjectAccessEvidence {
   outcome: OrgAccessOutcome;
   /** Number of representative users selected for verification (currently 1). */
   matchedUsers: number;
-  /** Total eligible active users before selecting the most recently logged-in one. */
+  /** Total persona-matched active users before representative selection. */
   eligibleUsers?: number;
   /** Number actually checked via UserEntityAccess or UserFieldAccess. */
   checkedUsers: number;
@@ -24,7 +24,8 @@ export interface OrgObjectAccessEvidence {
   compoundParent?: string;
   message: string;
   /** Structured explanation for an inconclusive check (never inferred from message text). */
-  unverifiedReason?: "NO_MATCHING_USERS" | "NO_LOGGED_IN_USERS";
+  selectionMethod?: "RECENT_LOGIN" | "ACTIVE_UNFROZEN_FALLBACK";
+  unverifiedReason?: "NO_MATCHING_USERS" | "NO_LOGGED_IN_USERS" | "NO_UNFROZEN_USERS";
 }
 
 type MatchedUsers = {
@@ -33,6 +34,7 @@ type MatchedUsers = {
   matchedUsers: number;
   sampled: boolean;
   eligibleUsers: number;
+  selectionMethod: "RECENT_LOGIN" | "ACTIVE_UNFROZEN_FALLBACK";
 };
 
 /** The org responded, but no active users could be associated with this persona. */
@@ -43,11 +45,11 @@ class NoMatchingOrgUsersError extends Error {
   }
 }
 
-/** A persona matched users but none has a recorded successful login. */
-class NoLoggedInOrgUsersError extends Error {
+/** Matching active users had no confirmed unfrozen login records. */
+class NoUnfrozenOrgUsersError extends Error {
   constructor(message: string) {
     super(message);
-    this.name = "NoLoggedInOrgUsersError";
+    this.name = "NoUnfrozenOrgUsersError";
   }
 }
 
@@ -63,6 +65,7 @@ type SfAssignment = {
 };
 type SfPermissionSet = { Id: string; Name: string | null; IsOwnedByProfile?: boolean };
 type SfUserEntityAccess = { UserId: string; IsReadable: boolean };
+type SfUserLogin = { UserId: string; IsFrozen: boolean };
 
 type Inventory = {
   profiles: OrgProfile[];
@@ -94,9 +97,9 @@ const quoteId = (id: string) => `'${id}'`; // IDs are validated before interpola
 export class SalesforcePersonaAccessVerifier {
   private inventoryCache: { key: string; until: number; value: Inventory } | null = null;
   private inventoryInflight: Promise<Inventory> | null = null;
-  // Reuse persona matching within the same (three-minute) metadata inventory.
-  // WeakMap means an expired inventory and its matches can be garbage-collected.
-  private readonly matchingCache = new WeakMap<Inventory, Map<string, MatchedUsers | NoMatchingOrgUsersError | NoLoggedInOrgUsersError>>();
+  // Deduplicate concurrent user selection across many OLS/FLS checks. The
+  // inventory WeakMap isolates results across orgs and metadata refreshes.
+  private readonly matchingCache = new WeakMap<Inventory, Map<string, Promise<MatchedUsers>>>();
   constructor(
     private readonly connection: SalesforceOrgConnection,
     private readonly userFieldAccess = new SalesforceUserFieldAccessGateway(connection),
@@ -229,47 +232,75 @@ export class SalesforcePersonaAccessVerifier {
       this.matchingCache.set(inventory, cache);
     }
     const cached = cache.get(cacheKey);
-    if (cached instanceof NoMatchingOrgUsersError || cached instanceof NoLoggedInOrgUsersError) throw cached;
     if (cached) return cached;
 
-    const cannotMatch = (message: string): never => {
-      const error = new NoMatchingOrgUsersError(message);
-      cache!.set(cacheKey, error);
-      throw error;
-    };
-    const unavailableSets = (persona.permissionSets ?? []).filter(
-      (name) => !inventory.knownPermissionSetNames.has(normalized(name)));
-    if (unavailableSets.length) throw new Error(
-      `Required Permission Sets not found in Salesforce: ${unavailableSets.join(", ")}.`);
-    const unavailableGroups = (persona.permissionSetGroups ?? []).filter(
-      (name) => !inventory.knownGroupNames.has(normalized(name)));
-    if (unavailableGroups.length) throw new Error(
-      `Required Permission Set Groups not found in Salesforce: ${unavailableGroups.join(", ")}.`);
-
-    if (!persona.profile?.trim()) throw new Error("Persona has no configured Profile; org-user matching is inconclusive.");
-    const match = matchPersonaUsers(persona, inventory.profiles, inventory.users, inventory.assignments);
-    if (!match.eligibleCount) cannotMatch(match.reason ?? "No matching active users.");
-    // Select ONE active user with the most recent successful login, after
-    // confirming Profile, direct Permission Sets and PSG membership. Never
-    // fall back to a random/stale user when LastLoginDate is missing.
-    const selected = selectMostRecentlyLoggedInMatchedUser(match.users, inventory.users);
-    if (!selected) {
-      const error = new NoLoggedInOrgUsersError(
-        "Matching active Salesforce users exist, but none has a recorded successful login."
-      );
-      cache.set(cacheKey, error);
+    // Publish the in-flight lookup before its first asynchronous API request.
+    const pending = this.selectMatchingUnfrozenUser(persona, inventory);
+    cache.set(cacheKey, pending);
+    try {
+      return await pending;
+    } catch (error) {
+      // Transient Salesforce/metadata errors should be retried, while known
+      // no-match/no-unfrozen conclusions remain stable for this inventory.
+      if (!(error instanceof NoMatchingOrgUsersError || error instanceof NoUnfrozenOrgUsersError)) {
+        cache.delete(cacheKey);
+      }
       throw error;
     }
-    const users = [selected];
-    const checkedUserDetails = users.map((userId) => inventory.userDetails.get(idKey(userId)) ?? {
-      id: idKey(userId), name: "Name unavailable", username: "Username unavailable"
-    });
-    // matchedUsers counts the selected representative, not the entire persona.
-    // eligibleUsers retains the full match count as auditable evidence.
-    const result = { users, checkedUserDetails, matchedUsers: 1,
-      eligibleUsers: match.eligibleCount, sampled: false };
-    cache.set(cacheKey, result);
-    return result;
+  }
+
+  private async selectMatchingUnfrozenUser(persona: Persona, inventory: Inventory): Promise<MatchedUsers> {
+    const missingSets = (persona.permissionSets ?? []).filter(
+      name => !inventory.knownPermissionSetNames.has(normalized(name)));
+    if (missingSets.length) throw new Error(
+      `Required Permission Sets not found in Salesforce: ${missingSets.join(", ")}.`);
+    const missingGroups = (persona.permissionSetGroups ?? []).filter(
+      name => !inventory.knownGroupNames.has(normalized(name)));
+    if (missingGroups.length) throw new Error(
+      `Required Permission Set Groups not found in Salesforce: ${missingGroups.join(", ")}.`);
+    if (!persona.profile?.trim()) throw new Error("Persona has no configured Profile; org-user matching is inconclusive.");
+
+    const match = matchPersonaUsers(persona, inventory.profiles, inventory.users, inventory.assignments);
+    if (!match.eligibleCount) throw new NoMatchingOrgUsersError(
+      match.reason ?? "No matching active users.");
+
+    // Inventory already selects User.IsActive=true. Confirm IsFrozen=false
+    // separately via UserLogin; never infer unfrozen status from LastLoginDate.
+    // Query only persona-matched users, in bounded batches.
+    const unfrozen = new Set<string>();
+    const frozen = new Set<string>();
+    for (let i = 0; i < match.users.length; i += USER_CHUNK) {
+      const ids = match.users.slice(i, i + USER_CHUNK);
+      if (ids.some(id => !userIdPattern.test(id))) {
+        throw new Error("Unexpected matched Salesforce User ID; verification is inconclusive.");
+      }
+      const query = `SELECT UserId, IsFrozen FROM UserLogin WHERE UserId IN (${ids.map(quoteId).join(",")})`;
+      const rows = await this.connection.queryAll<SfUserLogin>(query, "data", USER_CHUNK * 2);
+      const requested = new Set(ids.map(idKey));
+      for (const row of rows) {
+        if (!row.UserId || !requested.has(idKey(row.UserId))) continue;
+        const id = idKey(row.UserId);
+        if (row.IsFrozen === true) frozen.add(id);
+        else if (row.IsFrozen === false) unfrozen.add(id);
+      }
+    }
+    // Missing/contradictory UserLogin records never imply an unfrozen user.
+    const eligible = match.users.filter(id => unfrozen.has(idKey(id)) && !frozen.has(idKey(id)));
+    if (!eligible.length) throw new NoUnfrozenOrgUsersError(
+      "Matching active Salesforce users exist, but none has a confirmed unfrozen UserLogin record.");
+
+    // Existing preference: most recently logged-in eligible user. New
+    // fallback: first least-extra-grant eligible user, stable by Salesforce ID.
+    const recent = selectMostRecentlyLoggedInMatchedUser(eligible, inventory.users);
+    const selected = recent ?? eligible[0];
+    const checkedUserDetails = [inventory.userDetails.get(idKey(selected)) ?? {
+      id: idKey(selected), name: "Name unavailable", username: "Username unavailable"
+    }];
+    return {
+      users: [selected], checkedUserDetails, matchedUsers: 1,
+      eligibleUsers: match.eligibleCount, sampled: false,
+      selectionMethod: recent ? "RECENT_LOGIN" : "ACTIVE_UNFROZEN_FALLBACK",
+    };
   }
 
   /**
@@ -307,8 +338,8 @@ export class SalesforcePersonaAccessVerifier {
   }
 
   /**
-   * Results describe the ONE most recently logged-in matched active user.
-   * This optimizes representative-user checks, but does not establish
+   * Results describe ONE active, confirmed-unfrozen persona-matched user.
+   * Latest successful login is preferred, but never required; this does not establish
    * permission parity for all users assigned to a persona.
    * Missing rows or API failures remain inconclusive, never DENIED.
    */
@@ -317,11 +348,13 @@ export class SalesforcePersonaAccessVerifier {
     matchedUsers: number, checkedUsers: number, sampled: boolean,
     checkedUserDetails: OrgCheckedUser[], results: Array<boolean | null>, errorLabel: string,
     eligibleUsers?: number,
+    selectionMethod?: MatchedUsers["selectionMethod"],
   ): OrgObjectAccessEvidence {
     const common = {
       object, ...(field ? { field } : {}), matchedUsers, checkedUsers, sampled,
       checkedUserDetails, verifiedAt: new Date().toISOString(),
       ...(eligibleUsers !== undefined ? { eligibleUsers } : {}),
+      ...(selectionMethod ? { selectionMethod } : {}),
     };
     const denied = results.filter((value) => value === false).length;
     const unknown = results.filter((value) => value === null).length;
@@ -334,7 +367,9 @@ export class SalesforcePersonaAccessVerifier {
     if (checkedUsers === 0) return { ...common, outcome: "UNVERIFIED",
       message: `No matching users could be checked for ${errorLabel}.` };
     return { ...common, outcome: "VERIFIED",
-      message: "Access verified from Salesforce." };
+      message: selectionMethod === "ACTIVE_UNFROZEN_FALLBACK"
+        ? "Access verified from Salesforce using an active, unfrozen persona-matched user without recorded login history."
+        : "Access verified from Salesforce." };
   }
 
   async verifyObjectRead(persona: Persona, object: string): Promise<OrgObjectAccessEvidence> {
@@ -343,7 +378,7 @@ export class SalesforcePersonaAccessVerifier {
     });
     if (!objectNamePattern.test(object)) return uncertain("Invalid Salesforce object API name.");
     try {
-      const { users, checkedUserDetails, matchedUsers, eligibleUsers, sampled } = await this.matchingUsers(persona);
+      const { users, checkedUserDetails, matchedUsers, eligibleUsers, sampled, selectionMethod } = await this.matchingUsers(persona);
       const readable: Array<boolean | null> = [];
       for (let i = 0; i < users.length; i += VERIFY_CONCURRENCY) {
         const batch = users.slice(i, i + VERIFY_CONCURRENCY);
@@ -357,12 +392,12 @@ export class SalesforcePersonaAccessVerifier {
         }));
         readable.push(...results);
       }
-      return this.decide(object, undefined, matchedUsers, readable.length, sampled, checkedUserDetails, readable, `${object} object Read`, eligibleUsers);
+      return this.decide(object, undefined, matchedUsers, readable.length, sampled, checkedUserDetails, readable, `${object} object Read`, eligibleUsers, selectionMethod);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Salesforce verification failed.";
       return { ...uncertain(`Unable to verify object Read from Salesforce: ${message}`),
         ...(error instanceof NoMatchingOrgUsersError ? { unverifiedReason: "NO_MATCHING_USERS" as const } : {}),
-        ...(error instanceof NoLoggedInOrgUsersError ? { unverifiedReason: "NO_LOGGED_IN_USERS" as const } : {}) };
+        ...(error instanceof NoUnfrozenOrgUsersError ? { unverifiedReason: "NO_UNFROZEN_USERS" as const } : {}) };
     }
   }
 
@@ -374,7 +409,7 @@ export class SalesforcePersonaAccessVerifier {
       return uncertain("Invalid Salesforce field API name.");
     }
     try {
-      const { users, checkedUserDetails, matchedUsers, eligibleUsers, sampled } = await this.matchingUsers(persona);
+      const { users, checkedUserDetails, matchedUsers, eligibleUsers, sampled, selectionMethod } = await this.matchingUsers(persona);
       const readable: Array<boolean | null> = [];
       const compoundParents: string[] = [];
       let nonPermissionable = false;
@@ -392,7 +427,7 @@ export class SalesforcePersonaAccessVerifier {
         ));
       }
       const decision = this.decide(object, field, matchedUsers, readable.length, sampled, checkedUserDetails,
-        readable, `${object}.${field} field Read`, eligibleUsers);
+        readable, `${object}.${field} field Read`, eligibleUsers, selectionMethod);
       if (decision.outcome === "VERIFIED" && nonPermissionable) {
         return {
           ...decision,
@@ -415,7 +450,7 @@ export class SalesforcePersonaAccessVerifier {
       const message = error instanceof Error ? error.message : "Salesforce verification failed.";
       return { ...uncertain(`Unable to verify field Read from Salesforce: ${message}`),
         ...(error instanceof NoMatchingOrgUsersError ? { unverifiedReason: "NO_MATCHING_USERS" as const } : {}),
-        ...(error instanceof NoLoggedInOrgUsersError ? { unverifiedReason: "NO_LOGGED_IN_USERS" as const } : {}) };
+        ...(error instanceof NoUnfrozenOrgUsersError ? { unverifiedReason: "NO_UNFROZEN_USERS" as const } : {}) };
     }
   }
 }

@@ -79,6 +79,17 @@ type SoqlAnalysisResult = {
   outputFolder: string;
 };
 
+type AllPersonasHighPriorityResult = {
+  personaCount: number;
+  queryCount: number;
+  totalHighPriorityFindings: number;
+  totalHighPriorityOccurrences: number;
+  personas: Array<{ personaName: string; queryCount: number; highPriorityCount: number; highPriorityOccurrences: number }>;
+  reportFileName: string;
+  outputFolder: string;
+  verificationMode: string;
+};
+
 type CheckType = "object" | "field" | "soql";
 type Page = "dashboard" | "access" | "soql" | "matrix" | "stack" | "reports" | "salesforce";
 
@@ -130,6 +141,11 @@ function App() {
     useState(false);
 
   const [checking, setChecking] = useState(false);
+  const [allPersonasChecking, setAllPersonasChecking] = useState(false);
+  const [allPersonasResult, setAllPersonasResult] = useState<AllPersonasHighPriorityResult | null>(null);
+  const [allPersonasError, setAllPersonasError] = useState("");
+  const [latestSoqlReportKind, setLatestSoqlReportKind] = useState<"single" | "all" | "none">("none");
+  const [reportFolderPendingAction, setReportFolderPendingAction] = useState<"single" | "all">("single");
   const [page, setPage] = useState<Page>("dashboard");
   const [repositoryName, setRepositoryName] = useState<string>("");
   const [apiConnected, setApiConnected] = useState(false);
@@ -281,6 +297,8 @@ function App() {
       setFieldName("");
       setResult(null);
       setLastSoql(null);
+      setAllPersonasResult(null);
+      setLatestSoqlReportKind("none");
     } catch (cause) {
       setRepoError(cause instanceof Error ? cause.message : "Unable to configure the Salesforce repository.");
     } finally { setChoosingRepo(false); }
@@ -452,6 +470,7 @@ function App() {
   );
 
   async function handleCheck(skipReportOutputCheck = false) {
+    if (checking || allPersonasChecking) return;
     setError("");
     setResult(null);
 
@@ -496,6 +515,7 @@ function App() {
         if (!configuration.configured) {
           setReportFolderExplanation(reportOutputHint(configuration.reason, configuration.message));
           setReportFolderError("");
+          setReportFolderPendingAction("single");
           setReportFolderModalOpen(true);
           return;
         }
@@ -550,6 +570,7 @@ function App() {
         if (body.code === "REPORT_OUTPUT_NOT_CONFIGURED") {
           setReportFolderExplanation(reportOutputHint(undefined, body.error || "Choose a folder to save the Excel report."));
           setReportFolderError("");
+          setReportFolderPendingAction("single");
           setReportFolderModalOpen(true);
           return;
         }
@@ -586,6 +607,7 @@ function App() {
       setResult(data);
       if (checkType === "soql") {
         setLastSoql(data as SoqlAnalysisResult);
+        setLatestSoqlReportKind("single");
         setLastRunAt(new Date());
       }
     } catch (err) {
@@ -596,6 +618,58 @@ function App() {
       );
     } finally {
       setChecking(false);
+    }
+  }
+
+  /**
+   * Separate all-personas operation: deliberately ignores selectedPersona.
+   * Both actions share the org/repository preflight and report output setup.
+   */
+  async function handleAllPersonasHighPriority(skipReportOutputCheck = false) {
+    if (checking || allPersonasChecking) return;
+    setAllPersonasError("");
+    setAllPersonasResult(null);
+    setAllPersonasChecking(true);
+    try {
+      if (!(await ensureRepositoryReady())) return;
+      if (!skipReportOutputCheck) {
+        const outputResponse = await fetch("/api/report-output/status", { cache: "no-store" });
+        if (!outputResponse.ok) throw new Error("Unable to check the report output folder. Ensure the local API is running.");
+        const status: { configured: boolean; reason?: string; message: string } = await outputResponse.json();
+        if (!status.configured) {
+          setReportFolderExplanation(reportOutputHint(status.reason, status.message));
+          setReportFolderError("");
+          setReportFolderPendingAction("all");
+          setReportFolderModalOpen(true);
+          return;
+        }
+      }
+      const preflight = await preflightOrgVerification();
+      if (!preflight) return;
+      const response = await fetch("/api/soql-analysis/high-priority", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ acknowledgeRepoOnly: preflight.acknowledgeRepoOnly }),
+      });
+      if (!response.ok) {
+        const body: { code?: string; error?: string } = await response.json().catch(() => ({}));
+        if (response.status === 409 && body.code === "REPORT_OUTPUT_NOT_CONFIGURED") {
+          setReportFolderExplanation(reportOutputHint(undefined, body.error || "Choose an Excel output folder."));
+          setReportFolderError("");
+          setReportFolderPendingAction("all");
+          setReportFolderModalOpen(true);
+          return;
+        }
+        throw new Error(body.error || "Unable to generate the all-personas High Priority Summary.");
+      }
+      const data: AllPersonasHighPriorityResult = await response.json();
+      setAllPersonasResult(data);
+      setLatestSoqlReportKind("all");
+      setLastRunAt(new Date());
+    } catch (cause) {
+      setAllPersonasError(cause instanceof Error ? cause.message : "Unable to generate the High Priority Summary.");
+    } finally {
+      setAllPersonasChecking(false);
     }
   }
 
@@ -622,7 +696,8 @@ function App() {
         throw new Error("The output directory was not saved. Please try again.");
       }
       setReportFolderModalOpen(false);
-      await handleCheck(true);
+      if (reportFolderPendingAction === "all") await handleAllPersonasHighPriority(true);
+      else await handleCheck(true);
     } catch (error) {
       setReportFolderError(error instanceof Error ? error.message : "Unable to configure the report output folder.");
     } finally {
@@ -908,16 +983,40 @@ function App() {
     { label: "No explicit mode", value: soqlSummary?.unspecifiedModeQueries, icon: "?", tone: "amber" },
   ];
 
-  const showSoqlOverlay = checking && page === "soql";
+  const showSoqlOverlay = (checking || allPersonasChecking) && page === "soql";
 
   const analysisForm = (
-    <section className="panel analysis-panel">
-      <div className="panel-heading">
-        <div>
-          <h2>{page === "soql" ? WORKFLOW_COPY.soql.heading : WORKFLOW_COPY.access.heading}</h2>
-          <p>{page === "soql" ? WORKFLOW_COPY.soql.description : WORKFLOW_COPY.access.description}</p>
+    <section className={page === "soql" ? "panel analysis-panel soql-analysis-panel" : "panel analysis-panel"}>
+      <div className={page === "soql" ? "soql-analysis-top-row" : undefined}>
+        <div className="panel-heading">
+          <div>
+            <h2>{page === "soql" ? WORKFLOW_COPY.soql.heading : WORKFLOW_COPY.access.heading}</h2>
+            <p>{page === "soql" ? WORKFLOW_COPY.soql.description : WORKFLOW_COPY.access.description}</p>
+          </div>
         </div>
-        
+        {page === "soql" && (
+          <div className="soql-all-personas-panel" aria-label="All personas High Priority Summary">
+            <div className="soql-all-personas-heading">
+              <h3>All personas</h3>
+              <span className="soql-all-personas-pill">No persona selection required</span>
+            </div>
+            <button
+              type="button"
+              className="soql-high-priority-button"
+              disabled={checking || allPersonasChecking || loadingPersonas || !personas.length}
+              onClick={() => { void handleAllPersonasHighPriority(); }}
+            >
+              <svg className="soql-high-priority-icon" width="22" height="22" viewBox="0 0 24 24"
+                fill="none" stroke="currentColor" strokeWidth="1.8"
+                strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M7 2.5h7l5 5V20a1.5 1.5 0 0 1-1.5 1.5h-10A1.5 1.5 0 0 1 6 20V4A1.5 1.5 0 0 1 7.5 2.5Z" />
+                <path d="M14 2.5V8h5M9 12h7M9 15.5h7M9 19h4" />
+              </svg>
+              <span>{allPersonasChecking ? "Generating summary…" : "High Priority Summary"}</span>
+            </button>
+            <p>Generates one Excel sheet with high-priority issues grouped by persona.</p>
+          </div>
+        )}
       </div>
       <div className="analysis-fields">
         <div className="form-field">
@@ -925,7 +1024,7 @@ function App() {
           <select
             id="persona"
             value={selectedPersona}
-            disabled={loadingPersonas || checking}
+            disabled={loadingPersonas || checking || allPersonasChecking}
             onChange={(event) => {
               setSelectedPersona(event.target.value);
               setResult(null);
@@ -1042,11 +1141,12 @@ function App() {
       </div>
       <div className="form-footer">
         <span>{analysisModeHint(page === "soql" ? "soql" : "access", salesforceConnection)}</span>
-        <button className="primary-button" disabled={checking} type="button" onClick={() => { void handleCheck(); }}>
+        <button className="primary-button" disabled={checking || allPersonasChecking} type="button" onClick={() => { void handleCheck(); }}>
           {checking ? (page === "soql" ? "Analyzing…" : "Checking…") : (page === "soql" ? "Run SOQL Analysis" : "Check Access")}
         </button>
       </div>
       {error && <div className="error-card" role="alert">{error}</div>}
+      {page === "soql" && allPersonasError && <div className="error-card" role="alert">{allPersonasError}</div>}
     </section>
   );
 
@@ -1134,6 +1234,43 @@ function App() {
         {(page === "access" || page === "soql") && (
           <>
             {analysisForm}
+            {page === "soql" && allPersonasResult && (
+              <section className="results-section soql-all-personas-result" aria-live="polite">
+                <div className="soql-success-banner" role="status">
+                  <div className="soql-success-icon" aria-hidden="true">✓</div>
+                  <div className="soql-success-copy">
+                    <span className="soql-success-eyebrow">ALL PERSONAS ANALYSIS COMPLETE</span>
+                    <h3>High Priority Summary Excel saved</h3>
+                    <p>{allPersonasResult.reportFileName}</p>
+                  </div>
+                  <div className="soql-success-actions">
+                    <span className="soql-output-label">Output folder</span>
+                    <strong className="path-text">{allPersonasResult.outputFolder}</strong>
+                    <button type="button" className="secondary-button"
+                      onClick={() => navigator.clipboard.writeText(allPersonasResult.outputFolder)}>
+                      Copy folder path
+                    </button>
+                  </div>
+                </div>
+                <div className="result-card">
+                  <div className="result-header">
+                    <span className="result-type">HIGH PRIORITY · ALL PERSONAS</span>
+                    <h2>{allPersonasResult.personaCount} personas analyzed</h2>
+                  </div>
+                  <div className="permission-grid">
+                    <div className="permission-row"><span>SOQL Queries per persona</span><strong>{allPersonasResult.queryCount}</strong></div>
+                    <div className="permission-row"><span>Unique High Priority Issues</span><strong>{allPersonasResult.totalHighPriorityFindings}</strong></div>
+                    <div className="permission-row"><span>High Priority Occurrences</span><strong>{allPersonasResult.totalHighPriorityOccurrences}</strong></div>
+                  </div>
+                  <p className="soql-mode-explainer">Counts include each persona independently. Low and Unable to verify findings are not included in this report.</p>
+                  {allPersonasResult.verificationMode === "REPOSITORY_ONLY" && (
+                    <p className="soql-high-priority-warning" role="note">
+                      Repository-only analysis: Salesforce permissions were not verified. Zero High findings does not establish that access is safe.
+                    </p>
+                  )}
+                </div>
+              </section>
+            )}
             {result && (
               <section className="results-section">
                 {page === "soql" ? (
@@ -1156,9 +1293,41 @@ function App() {
         }} />}
         {page === "salesforce" && <SalesforceOrgConnection />}
 
-        {showSoqlOverlay && <AnalysisLoadingOverlay title="Analyzing SOQL" description="Scanning Apex queries and generating the Excel workbook…" />}
+        {showSoqlOverlay && <AnalysisLoadingOverlay title={allPersonasChecking ? "Analyzing all personas" : "Analyzing SOQL"}
+          description={allPersonasChecking
+            ? "Preparing SOQL once, checking each persona's permissions, and generating a single High Priority Excel worksheet…"
+            : "Scanning Apex queries and generating the Excel workbook…"} />}
 
-        {page === "reports" && <section className="panel reports-panel"><div className="panel-heading"><div><h2>Latest Excel report</h2><p>Saved directly to your configured folder.</p></div></div>{lastSoql ? <><div className="detail-line"><span>Persona</span><strong>{lastSoql.personaName}</strong></div><div className="detail-line"><span>Report folder</span><strong className="path-text">{lastSoql.outputFolder}</strong></div><div className="detail-line"><span>Findings</span><strong>{lastSoql.summary.totalFindings}</strong></div><button className="secondary-button" onClick={() => navigator.clipboard.writeText(lastSoql.outputFolder)}>Copy folder path</button></> : <div className="empty-reports"><span>▧</span><h3>No report yet</h3><p>Run SOQL analysis to generate an Excel workbook.</p><button className="primary-button" onClick={() => navigate("soql")}>Run SOQL Analysis</button></div>}</section>}
+        {page === "reports" && (
+          <section className="panel reports-panel">
+            <div className="panel-heading">
+              <div><h2>Latest Excel report</h2><p>Saved directly to your configured folder.</p></div>
+            </div>
+            {latestSoqlReportKind === "all" && allPersonasResult ? (
+              <>
+                <div className="detail-line"><span>Report type</span><strong>All Personas — High Priority Summary</strong></div>
+                <div className="detail-line"><span>Personas</span><strong>{allPersonasResult.personaCount}</strong></div>
+                <div className="detail-line"><span>High Priority Issues</span><strong>{allPersonasResult.totalHighPriorityFindings}</strong></div>
+                <div className="detail-line"><span>Excel file</span><strong>{allPersonasResult.reportFileName}</strong></div>
+                <div className="detail-line"><span>Report folder</span><strong className="path-text">{allPersonasResult.outputFolder}</strong></div>
+                <button className="secondary-button" onClick={() => navigator.clipboard.writeText(allPersonasResult.outputFolder)}>Copy folder path</button>
+              </>
+            ) : latestSoqlReportKind === "single" && lastSoql ? (
+              <>
+                <div className="detail-line"><span>Persona</span><strong>{lastSoql.personaName}</strong></div>
+                <div className="detail-line"><span>Report folder</span><strong className="path-text">{lastSoql.outputFolder}</strong></div>
+                <div className="detail-line"><span>Findings</span><strong>{lastSoql.summary.totalFindings}</strong></div>
+                <button className="secondary-button" onClick={() => navigator.clipboard.writeText(lastSoql.outputFolder)}>Copy folder path</button>
+              </>
+            ) : (
+              <div className="empty-reports">
+                <span>▧</span><h3>No report yet</h3>
+                <p>Run SOQL analysis to generate an Excel workbook.</p>
+                <button className="primary-button" onClick={() => navigate("soql")}>Run SOQL Analysis</button>
+              </div>
+            )}
+          </section>
+        )}
       </main>
       {repoModalOpen && (
         <RepositorySetupModal
