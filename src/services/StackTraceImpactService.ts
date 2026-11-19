@@ -302,12 +302,24 @@ export class StackTraceImpactService {
             checkedUsers: result.checkedUsers, matchedUsers: result.matchedUsers,
             sampled: result.sampled, message: result.message });
         } else {
-          remaining.push({ ...missing, orgOutcome: result?.outcome ?? "UNVERIFIED",
+          // Attribute a missing component's proven parent dependency to that
+          // parent, not to a fictitious direct component denial. Keep the
+          // original queried components in query.checkedFields.
+          remaining.push({ ...missing,
+            ...(result?.deniedCompoundParent ? { field: result.deniedCompoundParent } : {}),
+            orgOutcome: result?.outcome ?? "UNVERIFIED",
             orgMessage: result?.message ?? "Salesforce org verification is unavailable.",
             ...(result?.unverifiedReason ? { orgReason: result.unverifiedReason } : {}) });
         }
       }
-      impact.missing = remaining;
+      // Collapse siblings with the same denied compound parent within a
+      // query/persona. Independent component denials remain separate.
+      const groupedMissing = new Map<string, MissingReadPermission>();
+      for (const item of remaining) {
+        const key = `${item.object}|${item.field ?? ""}|${item.reason}|${item.orgOutcome ?? ""}`.toLowerCase();
+        if (!groupedMissing.has(key)) groupedMissing.set(key, item);
+      }
+      impact.missing = [...groupedMissing.values()];
       if (verified.length) impact.verifiedFromOrg = verified;
       if (checkedUsers.size) impact.orgCheckedUsers = [...checkedUsers.values()];
       const denied = remaining.some((item) => item.orgOutcome === "DENIED");
