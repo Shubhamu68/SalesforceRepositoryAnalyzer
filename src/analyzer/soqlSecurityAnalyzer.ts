@@ -258,9 +258,9 @@ export class SoqlSecurityAnalyzer {
         const repositoryFieldRead = permissionable === false;
         if (repositoryFieldRead) return;
 
-        const fieldDecision = this.readVerification
+        const fieldDecision: Decision = this.readVerification
           ? await this.readVerification.resolveFieldRead(persona, object, fieldName, false)
-          : { source: "UNVERIFIED" as const, readable: false, message: "Salesforce verification unavailable." };
+          : { source: "UNVERIFIED", readable: false, message: "Salesforce verification unavailable." };
         // The confirmed permission gap belongs to the parent, not the
         // component with no direct access row. Report under the parent so the
         // Excel writer groups repeated components with the existing High row.
