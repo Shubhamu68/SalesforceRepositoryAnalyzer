@@ -6,7 +6,7 @@ The former `config/field-permissionability.json` held 1,190 field values from an
 
 The shared `SalesforceFieldMetadataService` now resolves in this order:
 
-1. **Live selected Salesforce org**: object-level Tooling `EntityParticle` query, cached by org/session/API version and object, remains authoritative.
+1. **Live selected Salesforce org**: object-level Tooling `EntityParticle` query is preferred. If it fails, omits a field, or has no `IsPermissionable` value, the Analyzer uses the same org's REST sObject Describe `permissionable` property before reporting UNKNOWN. Metadata is cached by org/session/API version and object.
 2. **Explicit optional local cache**, only if the source org ID matches the selected connected org, or the explicit target org in repository-only mode; at most **90 days old**.
 3. **UNKNOWN**: no inferred grant/denial; field security checks remain Review where verification is unavailable.
 
@@ -50,7 +50,7 @@ The Analyzer **does not** assume that a `FooId` field always points to `Foo`, an
 
 ## Why this preserves safety
 - Permissionability is **not** the same as field Read permission. A nonpermissionable field still requires object Read; a permissionable field requires FLS evidence.
-- Successful live object metadata lookup never borrows absent fields from any offline cache.
+- Successful Tooling metadata lookup never borrows absent fields from any offline cache. The current org's REST Describe is a separate authoritative live metadata source, including for custom Address component fields when the Tooling result is incomplete.
 - An unavailable or denied Tooling query does not prove a field exists, is nonpermissionable, or is inaccessible.
 - EntityParticle and REST Describe work is object-scoped and cached. No extra per-field Salesforce queries are added.
 - SOQL, Access Checker, Stack Trace and other callers share the same optional-cache logic; no feature-specific OMS whitelist or bypass is introduced.
