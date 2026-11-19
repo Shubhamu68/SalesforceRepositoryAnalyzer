@@ -61,7 +61,11 @@ test("actual aggregate query with chained Apex date calculation has no parser li
     "OrderItemSummary.LastModifiedDate", "OrderItemSummary.Status",
     "OrderSummary.Client__c", "OrderSummary.AccountId",
   ]) assert.ok(names.includes(expected), expected);
-  // Id is recognized by the syntax parser but omitted from FLS inventory.\n  assert.ok(extractSoqlExpressionFields(aggregateApexBind).fields.some(ref => ref.fieldPath === "Id"));\n  assert.ok(!names.includes("OrderItemSummary.Id"));\n  assert.ok(inventory.has("OrderItemSummary"), "object Read remains in scope");\n  for (const invalid of ["recordCount", "lastModified", "MAX", "COUNT", "System", "today",
+  // Id is recognized by the syntax parser but omitted from FLS inventory.
+  assert.ok(extractSoqlExpressionFields(aggregateApexBind).fields.some(ref => ref.fieldPath === "Id"));
+  assert.ok(!names.includes("OrderItemSummary.Id"));
+  assert.ok(inventory.has("OrderItemSummary"), "object Read remains in scope");
+  for (const invalid of ["recordCount", "lastModified", "MAX", "COUNT", "System", "today",
     "addDays", "daysLimit", "client", "customer", "CANCELED", "maxResults"]) {
     assert.ok(!names.some(name => name.endsWith("." + invalid)), invalid);
   }
