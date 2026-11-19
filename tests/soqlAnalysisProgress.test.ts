@@ -200,6 +200,9 @@ test("web and API: one polling hook, optional UUID, no extra Salesforce calls fo
     readFile(new URL("../src/salesforce/SalesforcePersonaAccessVerifier.ts", import.meta.url), "utf8"),
   ]);
   assert.match(api, /app\.get\("\/api\/soql-analysis\/progress\/:id"/);
+  assert.ok(api.indexOf('app.get("/api/soql-analysis/progress/:id"') <
+    api.indexOf('app.use("/api", async'),
+    "read-only progress polling must bypass costly repository-validation middleware");
   assert.match(api, /res\.setHeader\("Cache-Control", "no-store"\)/);
   assert.match(api, /withSoqlProgress\(progress,/);
   assert.match(api, /soqlProgressRegistry\.finish/);
