@@ -89,7 +89,9 @@ export class SoqlSecurityAnalyzer {
   async prepare(inputQueries: SoqlQuery[]): Promise<PreparedSoqlSecurityAnalysis> {
     // Direct callers may bypass SoqlAnalysisService; skip event queries here too.
     const queries = inputQueries.filter((query) => isDataAccessAnalysisObject(query.object));
-    const relationshipMap = await timeSoqlPhase("relationships.local", () => buildRelationshipMap(this.objectsDirectory));
+    const relationshipMap = await timeSoqlPhase("relationships.local", () => buildRelationshipMap(this.objectsDirectory,
+      { connected: Boolean(this.orgRelationshipMetadata),
+        organizationId: this.orgRelationshipMetadata?.getOrganizationId?.() }));
     // The same scoped collector and Describe hydrator are used by Stack Trace.
     // Only queries with unresolved paths trigger optional Salesforce Describe.
     if (this.orgRelationshipMetadata) {
