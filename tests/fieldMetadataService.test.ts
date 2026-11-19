@@ -32,7 +32,7 @@ function makeOrg(settings: {
   denyMetadata?: boolean;
   metadataRows?: ReturnType<typeof rows>;
   userRows?: Array<{ UserId: string; IsAccessible: boolean | null; FieldDefinition: { QualifiedApiName: string } }>;
-  describeFields?: Array<{ name: string; type: string; compoundFieldName?: string }>;
+  describeFields?: Array<{ name: string; type: string; compoundFieldName?: string; permissionable?: boolean }>;
 } = {}) {
   let orgId = "00D000000000001";
   let queriedMetadata = 0;
@@ -137,6 +137,75 @@ test("failed live metadata without an explicitly scoped cache stays UNKNOWN, nev
   assert.deepEqual(await service.getField("Account", "Name"), { permissionable: undefined, source: "UNKNOWN" });
   assert.deepEqual(await service.getField("User", "FirstName"), { permissionable: undefined, source: "UNKNOWN" });
   assert.equal(org.metadataCalls, 2, "failed per-object queries may be cached independently");
+});
+
+test("REST Describe resolves non-permissionable custom Address components when Tooling metadata fails", async () => {
+  const object = "Order_Changes__c";
+  const parent = "Bill_To_Address__c";
+  const component = "Bill_To_Address__City__s";
+  const org = makeOrg({
+    denyMetadata: true,
+    describeFields: [
+      { name: parent, type: "address", permissionable: true },
+      { name: component, type: "string", compoundFieldName: parent, permissionable: false },
+    ],
+  });
+  const metadata = new SalesforceFieldMetadataService(org.connection);
+  assert.deepEqual(await metadata.getField(object, component),
+    { permissionable: false, dataType: "string", source: "LIVE" });
+  const gateway = new SalesforceUserFieldAccessGateway(org.connection, metadata);
+  assert.deepEqual(await gateway.verifyUserField(user, object, component),
+    { read: true, edit: null, nonPermissionableSource: "LIVE" });
+  assert.equal(org.accessCalls, 0, "component requires no separate UserFieldAccess query");
+  assert.equal(org.describeCalls, 1, "one object-level REST Describe is reused");
+
+  const temp = await mkdtemp(path.join(os.tmpdir(), "sf-address-describe-"));
+  try {
+    const analyzer = new SoqlSecurityAnalyzer(repoResolver(object), temp,
+      undefined, undefined, undefined, metadata);
+    const findings = await analyzer.analyze(analysisPersona, [query(object, component)]);
+    assert.deepEqual(findings, [], "object Read alone suffices for non-permissionable component");
+  } finally { await rm(temp, { recursive: true, force: true }); }
+});
+
+test("REST Describe can classify fields absent from a successful Tooling object response", async () => {
+  const org = makeOrg({
+    metadataRows: [],
+    describeFields: [{ name: "Bill_Ship_Address__PostalCode__s", type: "string", permissionable: false }],
+  });
+  const metadata = new SalesforceFieldMetadataService(org.connection);
+  assert.equal((await metadata.getField("Order_Changes__c", "Bill_Ship_Address__PostalCode__s")).permissionable, false);
+  assert.equal(org.metadataCalls, 1);
+  assert.equal(org.describeCalls, 1);
+});
+
+test("current-org Tooling permissionability takes precedence over contradictory REST Describe data", async () => {
+  const org = makeOrg({
+    metadataRows: [
+      { QualifiedApiName: "Bill_To_Address__City__s", DataType: "string",
+        IsPermissionable: true, IsComponent: true, IsCompound: false },
+    ],
+    describeFields: [
+      { name: "Bill_To_Address__City__s", type: "string", permissionable: false },
+    ],
+  });
+  const metadata = new SalesforceFieldMetadataService(org.connection);
+  assert.equal((await metadata.getField("Order_Changes__c", "Bill_To_Address__City__s")).permissionable, true);
+  assert.equal(org.describeCalls, 0, "authoritative Tooling evidence is not overwritten");
+});
+
+test("REST Describe permissionable=true never invents field Read when user access is denied", async () => {
+  const component = "Bill_To_Address__Street__s";
+  const org = makeOrg({
+    denyMetadata: true,
+    describeFields: [{ name: component, type: "string", permissionable: true }],
+    userRows: [{ UserId: user, IsAccessible: false, FieldDefinition: { QualifiedApiName: component } }],
+  });
+  const metadata = new SalesforceFieldMetadataService(org.connection);
+  assert.equal((await metadata.getField("Order_Changes__c", component)).permissionable, true);
+  const gateway = new SalesforceUserFieldAccessGateway(org.connection, metadata);
+  assert.deepEqual(await gateway.verifyUserField(user, "Order_Changes__c", component),
+    { read: false, edit: null });
 });
 
 test("cache keys include Salesforce org and avoid metadata leakage when switching orgs", async () => {
