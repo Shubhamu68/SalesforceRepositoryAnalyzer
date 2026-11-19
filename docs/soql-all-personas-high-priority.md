@@ -48,3 +48,16 @@ Integration/manual acceptance:
 - Use `$env:SALESFORCE_SOQL_PERF="1"` in the backend terminal to observe one repository scan and one preparation followed by per-persona verification timings.
 
 **Important:** CI validates structure, behavior and regression tests. The real end-to-end performance of the all-personas action must still be measured against a connected Salesforce org and representative repository.
+
+## Active and unfrozen representative-user selection
+
+Live SOQL OLS/FLS verification uses the shared Salesforce persona verifier, also used by Stack Trace and Access Checker.
+
+- Profile, all required direct Permission Sets and Permission Set Groups must match, using **active** users from Salesforce (`User.IsActive = true`).
+- Query `UserLogin.IsFrozen` for only these persona-matched users. A user with an explicit `IsFrozen = false` is eligible; missing/conflicting rows, frozen users, and UserLogin API failures are **not** assumed to be eligible.
+- Prefer the most recently successfully logged-in **eligible** user, as before. If none has a valid `LastLoginDate`, select the eligible user with the fewest extra assignments (stable Salesforce ID tie-break). The absence of login history is no longer a reason to skip all Salesforce checks.
+- Effective Read still comes only from live `UserEntityAccess` or `UserFieldAccess` checks, never inferred from matching or the fallback itself. The result records which user was queried and whether the `ACTIVE_UNFROZEN_FALLBACK` path was used.
+- User selection (including in-flight UserLogin requests) is cached per persona and per three-minute org inventory snapshot. This avoids repeated UserLogin requests for hundreds of fields and prevents selection across org refreshes.
+- If no eligible unfrozen match exists, mark the result **Unable to verify**, with reason `NO_UNFROZEN_USERS`. No impersonation, login attempt, or Salesforce configuration change is performed.
+
+This targeted fallback is tested for no-login users, frozen recent logins, missing UserLogin rows, UserLogin query failures, object and field checks, and concurrent verifier calls.
