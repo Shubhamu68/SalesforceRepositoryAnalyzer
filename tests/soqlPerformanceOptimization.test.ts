@@ -13,7 +13,7 @@ import { recordSoqlCount, timeSoqlOrgQuery, timeSoqlPhase, withSoqlPerformance }
 import type { Persona } from "../src/models/Persona.js";
 import type { SoqlQuery } from "../src/models/SoqlQuery.js";
 import type { PersonaPermissionResolver, ResolvedPersonaPermissions } from "../src/analyzer/PersonaPermissionResolver.js";
-import type { OrgObjectReadVerificationService } from "../src/services/OrgObjectReadVerificationService.js";
+import { OrgObjectReadVerificationService } from "../src/services/OrgObjectReadVerificationService.js";
 import type { SalesforceFieldMetadataService } from "../src/salesforce/SalesforceFieldMetadataService.js";
 import { SalesforceUserFieldAccessGateway } from "../src/salesforce/SalesforceUserFieldAccessGateway.js";
 import type { SalesforceOrgConnection } from "../src/salesforce/SalesforceOrgConnection.js";
@@ -301,4 +301,56 @@ test("compound parent indexing handles large Describe without changing field sem
   assert.equal(await gateway.compoundParent("Account", "BillingCity"), "BillingAddress");
   assert.equal(await gateway.compoundParent("Account", "Field1799__c"), null);
   assert.equal(describes, 1, "one Describe is enough for all compound-field lookups");
+});
+
+test("org verification bounds concurrent field checks and preserves all outcomes", async () => {
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const calls: string[] = [];
+  const mock = {
+    getVerificationScope: () => "test-org",
+    verifyFieldRead: async (_persona: Persona, object: string, field: string) => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise<void>(resolve => setTimeout(resolve, 8));
+      calls.push(object + "." + field);
+      inFlight--;
+      return {
+        object, field, outcome: "VERIFIED" as const, matchedUsers: 1,
+        checkedUsers: 1, sampled: false, message: "Accessible",
+      };
+    },
+  };
+  const service = new OrgObjectReadVerificationService(
+    { statusNeutralObjectRead: new Set() },
+    mock as unknown as import("../src/salesforce/SalesforcePersonaAccessVerifier.js").SalesforcePersonaAccessVerifier,
+  );
+  const decisions = await Promise.all(
+    Array.from({ length: 14 }, (_, i) => service.resolveField(persona, "Account", `Custom${i}__c`)),
+  );
+  assert.equal(calls.length, 14, "all unique fields must be checked");
+  assert.equal(inFlight, 0);
+  assert.ok(maxInFlight <= 3, `org concurrency exceeded its cap: ${maxInFlight}`);
+  assert.ok(decisions.every(result => result?.outcome === "VERIFIED"));
+});
+
+test("Apex scanner fast-path ignores static SOQL text in comments and strings", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "sf-quick-mask-"));
+  try {
+    const file = path.join(root, "One.cls");
+    await writeFile(file, [
+      "public class One {",
+      "  String literal = '[SELECT Id FROM Account]';",
+      "  // [SELECT Name FROM Contact]",
+      "  /* [SELECT Amount FROM Opportunity] */",
+      "  void run() { [   SELECT Id FROM OrderSummary WITH USER_MODE]; }",
+      "}",
+    ].join("\n"));
+    const found = await scanApexSoql(root);
+    assert.equal(found.length, 1);
+    assert.equal(found[0].object, "OrderSummary");
+    assert.equal(found[0].lineNumber, 5);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
