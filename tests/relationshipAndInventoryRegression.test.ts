@@ -75,7 +75,8 @@ test('Inventory keeps query locations while deduplicating the same field key', (
 test('Aggregate operands are retained without treating functions as fields', () => {
   const graph = new RelationshipMap();
   const inv = buildSoqlFieldInventory([query('Account', ['COUNT(Id)', 'Industry'])], graph);
-  assert.deepEqual([...inv.get('Account')!.keys()].sort(), ['id', 'industry']);
+  assert.deepEqual([...inv.get('Account')!.keys()].sort(), ['industry']);
+  assert.equal(inv.objectReferences.get('Account')?.length, 1, 'aggregate query still requires object Read');
   assert.ok(!inv.get('Account')?.has('count'));
 });
 

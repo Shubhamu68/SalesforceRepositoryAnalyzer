@@ -3,7 +3,6 @@ import type { PermissionSet } from "../models/PermissionSet.js";
 import type { PermissionSetGrant } from "../models/PermissionSetGrant.js";
 import type { PermissionSource } from "./permissionAggregator.js";
 import type { EffectiveFieldPermission } from "./fieldPermissionAggregator.js";
-import { getFieldPermissionability } from "./fieldPermissionability.js";
 import { isFieldLevelSecurityApplicable } from "../config/fieldSecurityPolicy.js";
 import { isSchemaRequiredField } from "./schemaRequiredFields.js";
 import {
@@ -173,7 +172,11 @@ export function createPersonaAccessEvaluator(
       fieldCache.set(fieldKey, eventField);
       return eventField;
     }
-    const permissionable = getFieldPermissionability(objectName, fieldName);
+    // Field permissionability is resolved centrally by SalesforceFieldMetadataService
+    // using current-org metadata or an explicitly scoped optional cache. The
+    // repository evaluator does not make global assumptions about standard or
+    // managed fields from another project's snapshot.
+    const permissionable: boolean | undefined = undefined;
     const schemaRequired = isSchemaRequiredField(resolved.metadataObjectsDirectory, objectName, fieldName);
     const readGrantedBy: PermissionSource[] = [];
     const editGrantedBy: PermissionSource[] = [];
@@ -215,7 +218,7 @@ export function createPersonaAccessEvaluator(
       // Universally required custom fields cannot have individual FLS entries
       // in Profile/PS XML. Object permission is still necessary. Required-on-
       // layout fields are NOT exempt from FLS.
-      readable: objectAccess.access.read && (schemaRequired || permissionable === false || readGrantedBy.length > 0),
+      readable: objectAccess.access.read && (schemaRequired || readGrantedBy.length > 0),
       editable: objectAccess.access.edit && (schemaRequired || editGrantedBy.length > 0),
       permissionable,
       schemaRequired,

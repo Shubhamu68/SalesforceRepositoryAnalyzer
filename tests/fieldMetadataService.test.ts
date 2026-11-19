@@ -9,7 +9,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { test } from "node:test";
-import { SalesforceFieldMetadataService, compoundNameParentFromMetadata } from "../src/salesforce/SalesforceFieldMetadataService.js";
+import { SalesforceFieldMetadataService, compoundNameParentFromMetadata, compoundParentFromMetadata } from "../src/salesforce/SalesforceFieldMetadataService.js";
 import { SalesforceUserFieldAccessGateway } from "../src/salesforce/SalesforceUserFieldAccessGateway.js";
 import { OrgObjectReadVerificationService } from "../src/services/OrgObjectReadVerificationService.js";
 import type { SalesforceOrgConnection } from "../src/salesforce/SalesforceOrgConnection.js";
@@ -31,7 +31,8 @@ const rows = (name: string) => [
 function makeOrg(settings: {
   denyMetadata?: boolean;
   metadataRows?: ReturnType<typeof rows>;
-  userRows?: Array<{ UserId: string; IsAccessible: boolean; FieldDefinition: { QualifiedApiName: string } }>;
+  userRows?: Array<{ UserId: string; IsAccessible: boolean | null; FieldDefinition: { QualifiedApiName: string } }>;
+  describeFields?: Array<{ name: string; type: string; compoundFieldName?: string; permissionable?: boolean }>;
 } = {}) {
   let orgId = "00D000000000001";
   let queriedMetadata = 0;
@@ -58,7 +59,7 @@ function makeOrg(settings: {
       described++;
       return {
         name,
-        fields: [
+        fields: settings.describeFields ?? [
           { name: "Name", type: "string" },
           { name: "FirstName", type: "string", compoundFieldName: "Name" },
           { name: "LastName", type: "string", compoundFieldName: "Name" },
@@ -130,12 +131,81 @@ test("successful online object metadata excludes absent fields instead of trusti
   assert.equal(org.metadataCalls, 1);
 });
 
-test("failed live metadata uses a known offline snapshot rather than claiming a grant for unknown fields", async () => {
+test("failed live metadata without an explicitly scoped cache stays UNKNOWN, never grants access", async () => {
   const org = makeOrg({ denyMetadata: true });
   const service = new SalesforceFieldMetadataService(org.connection);
-  assert.deepEqual(await service.getField("Account", "Name"), { permissionable: false, source: "SNAPSHOT" });
+  assert.deepEqual(await service.getField("Account", "Name"), { permissionable: undefined, source: "UNKNOWN" });
   assert.deepEqual(await service.getField("User", "FirstName"), { permissionable: undefined, source: "UNKNOWN" });
   assert.equal(org.metadataCalls, 2, "failed per-object queries may be cached independently");
+});
+
+test("REST Describe resolves non-permissionable custom Address components when Tooling metadata fails", async () => {
+  const object = "Order_Changes__c";
+  const parent = "Bill_To_Address__c";
+  const component = "Bill_To_Address__City__s";
+  const org = makeOrg({
+    denyMetadata: true,
+    describeFields: [
+      { name: parent, type: "address", permissionable: true },
+      { name: component, type: "string", compoundFieldName: parent, permissionable: false },
+    ],
+  });
+  const metadata = new SalesforceFieldMetadataService(org.connection);
+  assert.deepEqual(await metadata.getField(object, component),
+    { permissionable: false, dataType: "string", source: "LIVE" });
+  const gateway = new SalesforceUserFieldAccessGateway(org.connection, metadata);
+  assert.deepEqual(await gateway.verifyUserField(user, object, component),
+    { read: true, edit: null, nonPermissionableSource: "LIVE" });
+  assert.equal(org.accessCalls, 0, "component requires no separate UserFieldAccess query");
+  assert.equal(org.describeCalls, 1, "one object-level REST Describe is reused");
+
+  const temp = await mkdtemp(path.join(os.tmpdir(), "sf-address-describe-"));
+  try {
+    const analyzer = new SoqlSecurityAnalyzer(repoResolver(object), temp,
+      undefined, undefined, undefined, metadata);
+    const findings = await analyzer.analyze(analysisPersona, [query(object, component)]);
+    assert.deepEqual(findings, [], "object Read alone suffices for non-permissionable component");
+  } finally { await rm(temp, { recursive: true, force: true }); }
+});
+
+test("REST Describe can classify fields absent from a successful Tooling object response", async () => {
+  const org = makeOrg({
+    metadataRows: [],
+    describeFields: [{ name: "Bill_Ship_Address__PostalCode__s", type: "string", permissionable: false }],
+  });
+  const metadata = new SalesforceFieldMetadataService(org.connection);
+  assert.equal((await metadata.getField("Order_Changes__c", "Bill_Ship_Address__PostalCode__s")).permissionable, false);
+  assert.equal(org.metadataCalls, 1);
+  assert.equal(org.describeCalls, 1);
+});
+
+test("current-org Tooling permissionability takes precedence over contradictory REST Describe data", async () => {
+  const org = makeOrg({
+    metadataRows: [
+      { QualifiedApiName: "Bill_To_Address__City__s", DataType: "string",
+        IsPermissionable: true, IsComponent: true, IsCompound: false },
+    ],
+    describeFields: [
+      { name: "Bill_To_Address__City__s", type: "string", permissionable: false },
+    ],
+  });
+  const metadata = new SalesforceFieldMetadataService(org.connection);
+  assert.equal((await metadata.getField("Order_Changes__c", "Bill_To_Address__City__s")).permissionable, true);
+  assert.equal(org.describeCalls, 0, "authoritative Tooling evidence is not overwritten");
+});
+
+test("REST Describe permissionable=true never invents field Read when user access is denied", async () => {
+  const component = "Bill_To_Address__Street__s";
+  const org = makeOrg({
+    denyMetadata: true,
+    describeFields: [{ name: component, type: "string", permissionable: true }],
+    userRows: [{ UserId: user, IsAccessible: false, FieldDefinition: { QualifiedApiName: component } }],
+  });
+  const metadata = new SalesforceFieldMetadataService(org.connection);
+  assert.equal((await metadata.getField("Order_Changes__c", component)).permissionable, true);
+  const gateway = new SalesforceUserFieldAccessGateway(org.connection, metadata);
+  assert.deepEqual(await gateway.verifyUserField(user, "Order_Changes__c", component),
+    { read: false, edit: null });
 });
 
 test("cache keys include Salesforce org and avoid metadata leakage when switching orgs", async () => {
@@ -170,6 +240,61 @@ test("permissionable field never inherits a grant from Name unless component/par
   assert.ok(org.accessCalls > 0);
 });
 
+test("live custom Address components inherit parent Read when Describe omits compound metadata", async () => {
+  const parent = "Bill_Ship_Address__c";
+  const component = "Bill_Ship_Address__City__s";
+  const org = makeOrg({
+    metadataRows: [
+      { QualifiedApiName: parent, DataType: "address", IsPermissionable: true, IsComponent: false, IsCompound: true },
+      { QualifiedApiName: component, DataType: "string", IsPermissionable: true, IsComponent: true, IsCompound: false },
+    ],
+    userRows: [{ UserId: user, IsAccessible: true, FieldDefinition: { QualifiedApiName: parent } }],
+    // Salesforce may omit a useful compoundFieldName and parent from Describe.
+    describeFields: [{ name: component, type: "string" }],
+  });
+  const metadata = new SalesforceFieldMetadataService(org.connection);
+  const gateway = new SalesforceUserFieldAccessGateway(org.connection, metadata);
+  assert.equal(await metadata.getCompoundParent("Order_Changes__c", component), parent);
+  assert.deepEqual(await gateway.verifyUserField(user, "Order_Changes__c", component),
+    { read: true, edit: null, readFromCompoundParent: parent });
+  assert.equal(org.metadataCalls, 1, "object metadata should be fetched once");
+});
+
+test("custom Address parent Read resolves a null direct component row but never overrides direct denial", async () => {
+  const parent = "Bill_To_Address__c";
+  const component = "Bill_To_Address__CountryCode__s";
+  const metadataRows = [
+    { QualifiedApiName: parent, DataType: "address", IsPermissionable: true, IsComponent: false, IsCompound: true },
+    { QualifiedApiName: component, DataType: "string", IsPermissionable: true, IsComponent: true, IsCompound: false },
+  ];
+  for (const directAccess of [null, false]) {
+    const org = makeOrg({
+      metadataRows,
+      userRows: [
+        { UserId: user, IsAccessible: directAccess, FieldDefinition: { QualifiedApiName: component } },
+        { UserId: user, IsAccessible: true, FieldDefinition: { QualifiedApiName: parent } },
+      ],
+      describeFields: [{ name: component, type: "string", compoundFieldName: parent },
+        { name: parent, type: "address" }],
+    });
+    const gateway = new SalesforceUserFieldAccessGateway(org.connection,
+      new SalesforceFieldMetadataService(org.connection));
+    const effective = await gateway.verifyUserField(user, "Order_Changes__c", component);
+    assert.equal(effective.read, directAccess === null ? true : false);
+    assert.equal(effective.readFromCompoundParent, directAccess === null ? parent : undefined);
+  }
+});
+
+test("address-like field names alone never authorize compound Read", () => {
+  const parent = "Bill_To_Address__c";
+  const component = "Bill_To_Address__City__s";
+  const fields = new Map([
+    [parent.toLowerCase(), { source: "LIVE" as const, permissionable: true, isCompound: true, dataType: "address" }],
+    [component.toLowerCase(), { source: "LIVE" as const, permissionable: true, isComponent: false }],
+  ]);
+  assert.equal(compoundParentFromMetadata(fields, component), null);
+});
+
 test("parent Name denial cannot establish component FLS denial", async () => {
   const row = rows("User").map((item) =>
     item.QualifiedApiName === "FirstName" ? { ...item, IsPermissionable: true } : item);
@@ -179,7 +304,8 @@ test("parent Name denial cannot establish component FLS denial", async () => {
   const gateway = new SalesforceUserFieldAccessGateway(org.connection,
     new SalesforceFieldMetadataService(org.connection));
   assert.deepEqual(await gateway.verifyUserField(user, "User", "FirstName"),
-    { read: null, edit: null });
+    { read: null, edit: null, deniedCompoundParent: "Name" },
+    "parent denial is captured, but not attributed as a direct component denial");
 });
 
 test("missing or failed Name compound metadata does not yield inferred FLS Read", async () => {

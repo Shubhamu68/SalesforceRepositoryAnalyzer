@@ -20,7 +20,7 @@ The Analyzer reads Salesforce repository metadata locally and can optionally con
 ## Report and artifact handling
 
 - Excel reports may contain client object/field metadata and Apex paths; store them in a controlled folder.
-- Publish official portable versions only after UAT. The ZIP intentionally omits secrets, but may include repository-independent configuration snapshots.
+- Publish official portable versions only after UAT. Portable and desktop packages allowlist application config files and exclude local org-specific field/relationship caches.
 - Follow organizational data-retention requirements for analysis outputs and downloaded ZIPs.
 
 For a potential security vulnerability, contact the repository owner privately rather than publishing sensitive exploitation details in an issue.

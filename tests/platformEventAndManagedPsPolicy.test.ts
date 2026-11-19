@@ -6,7 +6,6 @@ import path from "node:path";
 
 import { isFieldLevelSecurityApplicable, isDataAccessAnalysisObject, assertDataAccessAnalysisObject, PLATFORM_EVENT_FLS_REASON, PLATFORM_EVENT_ANALYSIS_EXCLUSION_REASON } from "../src/config/fieldSecurityPolicy.js";
 import { isKnownSalesforcePermissionSet } from "../src/config/knownSalesforcePermissionSets.js";
-import { getFieldPermissionability } from "../src/analyzer/fieldPermissionability.js";
 import { createPersonaAccessEvaluator } from "../src/analyzer/personaAccessEvaluator.js";
 import type { ResolvedPersonaPermissions, PersonaPermissionResolver } from "../src/analyzer/PersonaPermissionResolver.js";
 import type { Persona } from "../src/models/Persona.js";
@@ -45,7 +44,7 @@ test("central policy exempts only custom Platform Event field FLS, including nam
   for (const name of ["OrderSummary", "Event", "AccountChangeEvent", "OrderSummaryChangeEvent", "Custom__c", "Thing__e__c"]) {
     assert.equal(isFieldLevelSecurityApplicable(name), true, name);
   }
-  assert.equal(getFieldPermissionability(event, field), false);
+  // Platform Event FLS policy is intrinsic, not from a project field snapshot.
   assert.equal(isDataAccessAnalysisObject(event), false);
   assert.equal(isDataAccessAnalysisObject("pkg__MyEvent__e"), false);
   assert.equal(isDataAccessAnalysisObject("AccountChangeEvent"), true);

@@ -29,6 +29,8 @@ export interface ObjectReadDecision {
 
 export interface FieldReadDecision extends Omit<ObjectReadDecision, "statusNeutral"> {
   field: string;
+  /** Confirmed denied compound parent, not a direct denial on this component. */
+  deniedCompoundParent?: string;
 }
 
 // Retained for compatibility with older rules/tests. No longer an exception
@@ -166,7 +168,7 @@ export class OrgObjectReadVerificationService {
     if (metadata?.permissionable === false) return {
       source: metadata.source === "LIVE" ? "ORG_VERIFIED" : "REPOSITORY",
       readable: true, field,
-      message: `${object}.${field} is non-permissionable (${metadata.source.toLowerCase()} field metadata); no individual FLS Read grant is needed.`,
+      message: `${object}.${field} is non-permissionable (${metadata.source === "LIVE" ? "current Salesforce org" : "explicit matching-org offline cache"}); no individual FLS Read grant is needed.`,
     };
     if (repositoryRead) return {
       source: "REPOSITORY", readable: true, field,
@@ -179,6 +181,7 @@ export class OrgObjectReadVerificationService {
     return {
       field, source, readable: source === "ORG_VERIFIED",
       message: evidence?.message ?? "Repository field Read is not established and Salesforce verification is unavailable.",
+      ...(evidence?.deniedCompoundParent ? { deniedCompoundParent: evidence.deniedCompoundParent } : {}),
       ...(evidence ? { checkedUsers: evidence.checkedUsers, orgEvidence: evidence } : {}),
     };
   }

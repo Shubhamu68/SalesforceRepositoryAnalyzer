@@ -1,5 +1,3 @@
-import { getFieldPermissionability } from "./fieldPermissionability.js";
-
 export const SOQL_SYSTEM_FIELDS = new Set([
   "id",
   "ownerid",
@@ -33,13 +31,9 @@ export function isIgnoredField(
   fieldName: string,
   objectName?: string
 ): boolean {
-  // Snapshot-backed fields are checked centrally by the effective-access
-  // evaluator. In particular, do not skip a field marked permissionable=true.
-  if (objectName && getFieldPermissionability(objectName, fieldName) !== undefined) {
-    return false;
-  }
-
-  // Legacy fallback for fields outside the current snapshot.
-  const normalized = fieldName.trim().toLowerCase();
-  return isSystemField(normalized) || normalized.endsWith("__s");
+  // Id is intrinsic to every SObject and does not require an independent
+  // FLS grant. Other fields, including compound components and standard
+  // fields, need actual Salesforce/declared repository evidence.
+  void objectName;
+  return fieldName.trim().toLowerCase() === "id";
 }

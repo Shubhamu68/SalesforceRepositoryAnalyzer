@@ -70,6 +70,7 @@ flowchart LR
 - **Frontend:** React, TypeScript and Vite.
 - **Input:** Repository metadata for Apex, Profiles, Permission Sets, PSGs and schema; optional live Salesforce effective-access evidence.
 - **Output:** Local analysis results and Excel workbooks. The tool does not deploy permission changes to Salesforce.
+- **Portability:** No project-specific field-permissionability export is bundled. Current-org metadata is resolved live when available; repository-only unknown fields remain Review unless explicitly configured with a matching-org local cache.
 
 Read [Architecture](docs/architecture.md) for the module-level flow.
 

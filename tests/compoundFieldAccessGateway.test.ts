@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { SalesforceUserFieldAccessGateway, compoundParentFromDescribe } from "../src/salesforce/SalesforceUserFieldAccessGateway.js";
+import { SalesforceUserFieldAccessGateway, compoundParentFromDescribe, uniformlyDeniedCompoundParent } from "../src/salesforce/SalesforceUserFieldAccessGateway.js";
 import { SalesforceEffectivePermissionVerifier } from "../src/salesforce/SalesforceEffectivePermissionVerifier.js";
 import type { SalesforceOrgConnection, SalesforceSObjectDescribe } from "../src/salesforce/SalesforceOrgConnection.js";
 import type { SalesforcePersonaAccessVerifier } from "../src/salesforce/SalesforcePersonaAccessVerifier.js";
@@ -121,9 +121,8 @@ test("Exact component read=true or denied=false always beats compound parent", a
   }
 });
 
-test("Parent denial, missing parent, absent Describe, and non-compound fields stay inconclusive", async () => {
+test("Missing parent, absent Describe, and non-compound fields stay inconclusive", async () => {
   const cases: FakeOptions[] = [
-    { access: { BillingAddress: { read: false } } },
     { access: {} },
     { access: { BillingAddress: { read: true } }, throwDescribe: true },
     { access: { BillingAddress: { read: true } }, descriptions: [{ name: "BillingCity" }] },
@@ -138,6 +137,41 @@ test("Parent denial, missing parent, absent Describe, and non-compound fields st
   assert.deepEqual(
     await new SalesforceUserFieldAccessGateway(ordinary.connection).verifyUserField(user, "Account", "Industry"),
     { read: null, edit: null });
+});
+
+test("Denied compound parent is a traceable dependency, not an invented component denial", async () => {
+  const org = fakeOrg({ access: { BillingAddress: { read: false, edit: false } } });
+  const gateway = new SalesforceUserFieldAccessGateway(org.connection);
+  const component = await gateway.verifyUserField(user, "Account", "BillingCity");
+  assert.deepEqual(component, { read: null, edit: null, deniedCompoundParent: "BillingAddress" });
+  assert.equal(uniformlyDeniedCompoundParent([component]), "BillingAddress");
+  assert.equal(uniformlyDeniedCompoundParent([component, { read: null, edit: null }]), null,
+    "partial evidence cannot be promoted to an effective denial");
+  assert.equal(uniformlyDeniedCompoundParent([component, {
+    read: null, edit: null, deniedCompoundParent: "ShippingAddress",
+  }]), null, "different denied parent sources cannot be combined");
+  assert.equal(uniformlyDeniedCompoundParent([{ read: false, edit: null }, component]), null,
+    "explicit component denial is a separate type of evidence");
+});
+
+test("Consensus field verification attributes common parent denial without inventing direct component denial", async () => {
+  const org = fakeOrg({ access: { BillingAddress: { read: false } } });
+  const matcher = {
+    getVerificationScope: () => "org",
+    matchingActiveUsersForConsensus: async () => ({
+      eligibleUsers: 2, users: [
+        { id: user, profileId: "00e000000000001" },
+        { id: otherUser, profileId: "00e000000000001" },
+      ],
+    }),
+  } as unknown as SalesforcePersonaAccessVerifier;
+  const gateway = new SalesforceUserFieldAccessGateway(org.connection);
+  const result = await new SalesforceEffectivePermissionVerifier(org.connection, matcher, gateway)
+    .verifyField(person, "Account", "BillingCity");
+  assert.equal(result.read.source, "ORG_DENIED");
+  assert.equal(result.read.deniedCompoundParent, "BillingAddress");
+  assert.match(result.read.message, /direct component Read.*inconclusive/i);
+  assert.equal(result.edit.source, "UNVERIFIED", "parent Read does not establish component Edit denial");
 });
 
 test("Conflicting direct component rows cannot be overridden by a parent grant", async () => {

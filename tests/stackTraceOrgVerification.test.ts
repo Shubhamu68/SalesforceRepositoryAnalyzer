@@ -11,7 +11,7 @@ const persona: Persona = {
 const profileId = "00e000000000001";
 const userId = "005000000000001";
 
-function fakeConnection(options: { users: boolean; disconnected?: boolean; access?: boolean }) {
+function fakeConnection(options: { users: boolean; disconnected?: boolean; access?: boolean; deniedAddressParent?: boolean }) {
   const queries: string[] = [];
   const connection = {
     status: { organizationId: "00D000000000001", instanceUrl: "https://test.example" },
@@ -29,8 +29,21 @@ function fakeConnection(options: { users: boolean; disconnected?: boolean; acces
       if (soql.includes("FROM UserLogin")) return options.users
         ? [{ UserId: userId, IsFrozen: false }] as T[] : [];
       if (soql.includes("FROM UserEntityAccess")) return [{ UserId: userId, IsReadable: options.access ?? true }] as T[];
+      if (soql.includes("FROM UserFieldAccess") && options.deniedAddressParent) {
+        const exact = /AND FieldDefinition\.QualifiedApiName = '([^']+)'/.exec(soql)?.[1];
+        if (exact && exact !== "Delivery_Address__c") return [];
+        return [{ UserId: userId, IsAccessible: false, IsUpdatable: false,
+          FieldDefinition: { QualifiedApiName: "Delivery_Address__c" } }] as T[];
+      }
       return [];
-    }
+    },
+    async describeSObject(object: string) {
+      return { name: object, fields: [
+        { name: "Delivery_Address__c", type: "address" },
+        { name: "Delivery_Address__City__s", type: "string",
+          compoundFieldName: "Delivery_Address__c" },
+      ], childRelationships: [] };
+    },
   };
   return { connection: connection as unknown as SalesforceOrgConnection, queries };
 }
@@ -69,4 +82,14 @@ test("Salesforce denial stays a denial", async () => {
   const result = await verifier.verifyObjectRead(persona, "OrderItemSummary");
   assert.equal(result.outcome, "DENIED");
   assert.equal(result.unverifiedReason, undefined);
+});
+
+test("persona org verification attributes missing component row to confirmed denied compound parent", async () => {
+  const { connection } = fakeConnection({ users: true, deniedAddressParent: true });
+  const verifier = new SalesforcePersonaAccessVerifier(connection);
+  const result = await verifier.verifyFieldRead(persona, "Example__c", "Delivery_Address__City__s");
+  assert.equal(result.outcome, "DENIED");
+  assert.equal(result.deniedCompoundParent, "Delivery_Address__c");
+  assert.match(result.message, /not a confirmed component FLS denial/i);
+  assert.equal(result.checkedUsers, 1, "verification uses the selected synthetic persona user");
 });

@@ -7,3 +7,9 @@ reports/
 *.log
 # Safe template may be committed; real credentials never should be.
 !.env.example
+# Per-org metadata exports are local, never bundled as universal Salesforce facts.
+config/field-permissionability.json
+config/field-permissionability.csv
+config/field-permissionability.local.json
+config/relationship-schema.json
+config/*.local.json

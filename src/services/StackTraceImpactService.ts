@@ -117,7 +117,10 @@ export class StackTraceImpactService {
     walk(entry, [`${entry.className}.${entry.methodName}`], 0);
 
     const persons = await this.personaConfigLoader.getAllPersonas();
-    const relationshipMap = await buildRelationshipMap(this.objectsDirectory);
+    const relationshipMap = await buildRelationshipMap(this.objectsDirectory, {
+      connected: Boolean(this.orgRelationshipMetadata),
+      organizationId: this.orgRelationshipMetadata?.getOrganizationId?.(),
+    });
     const orgRelationshipHydrator = this.orgRelationshipMetadata?.createHydrator(relationshipMap);
     const prepared: {
       persona: Persona;
@@ -299,12 +302,35 @@ export class StackTraceImpactService {
             checkedUsers: result.checkedUsers, matchedUsers: result.matchedUsers,
             sampled: result.sampled, message: result.message });
         } else {
-          remaining.push({ ...missing, orgOutcome: result?.outcome ?? "UNVERIFIED",
+          // Attribute a missing component's proven parent dependency to that
+          // parent, not to a fictitious direct component denial. Keep the
+          // original queried components in query.checkedFields.
+          remaining.push({ ...missing,
+            ...(result?.deniedCompoundParent ? {
+              field: result.deniedCompoundParent,
+              deniedCompoundParent: result.deniedCompoundParent,
+              ...(missing.field ? { dependentComponents: [missing.field] } : {}),
+            } : {}),
+            orgOutcome: result?.outcome ?? "UNVERIFIED",
             orgMessage: result?.message ?? "Salesforce org verification is unavailable.",
             ...(result?.unverifiedReason ? { orgReason: result.unverifiedReason } : {}) });
         }
       }
-      impact.missing = remaining;
+      // Collapse siblings with the same denied compound parent within a
+      // query/persona. Independent component denials remain separate.
+      const groupedMissing = new Map<string, MissingReadPermission>();
+      for (const item of remaining) {
+        const key = `${item.object}|${item.field ?? ""}|${item.reason}|${item.orgOutcome ?? ""}`.toLowerCase();
+        const prior = groupedMissing.get(key);
+        if (!prior) groupedMissing.set(key, item);
+        else if (item.deniedCompoundParent) {
+          prior.deniedCompoundParent = item.deniedCompoundParent;
+          prior.dependentComponents = [...new Set([
+            ...(prior.dependentComponents ?? []), ...(item.dependentComponents ?? []),
+          ])];
+        }
+      }
+      impact.missing = [...groupedMissing.values()];
       if (verified.length) impact.verifiedFromOrg = verified;
       if (checkedUsers.size) impact.orgCheckedUsers = [...checkedUsers.values()];
       const denied = remaining.some((item) => item.orgOutcome === "DENIED");

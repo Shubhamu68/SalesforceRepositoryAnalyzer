@@ -19,7 +19,7 @@ import { recordSoqlCount, timeSoqlPhase, timeSoqlSync } from "../services/SoqlPe
 const CONCURRENCY = 4;
 const OBJECT_READ_FIELD = "(Object Read Missing)";
 
-type Decision = { source: ReadDecisionSource; message: string; readable: boolean };
+type Decision = { source: ReadDecisionSource; message: string; readable: boolean; deniedCompoundParent?: string };
 
 /**
  * Severity describes SOQL enforcement, while verificationSource retains the
@@ -89,7 +89,9 @@ export class SoqlSecurityAnalyzer {
   async prepare(inputQueries: SoqlQuery[]): Promise<PreparedSoqlSecurityAnalysis> {
     // Direct callers may bypass SoqlAnalysisService; skip event queries here too.
     const queries = inputQueries.filter((query) => isDataAccessAnalysisObject(query.object));
-    const relationshipMap = await timeSoqlPhase("relationships.local", () => buildRelationshipMap(this.objectsDirectory));
+    const relationshipMap = await timeSoqlPhase("relationships.local", () => buildRelationshipMap(this.objectsDirectory,
+      { connected: Boolean(this.orgRelationshipMetadata),
+        organizationId: this.orgRelationshipMetadata?.getOrganizationId?.() }));
     // The same scoped collector and Describe hydrator are used by Stack Trace.
     // Only queries with unresolved paths trigger optional Salesforce Describe.
     if (this.orgRelationshipMetadata) {
@@ -156,7 +158,9 @@ export class SoqlSecurityAnalyzer {
       decision: Decision,
     ): SoqlSecurityFinding[] {
       const subject = type === "OBJECT_READ" ? `Object ${object}` : `Field ${object}.${field}`;
-      const detail = decision.source === "ORG_VERIFIED"
+      const detail = decision.deniedCompoundParent
+        ? `${subject}: Salesforce confirmed missing Read on compound parent ${object}.${decision.deniedCompoundParent}. The requested address/location component had no conclusive direct UserFieldAccess decision; this finding is attributed to the denied parent, not an independently proven component denial.`
+        : decision.source === "ORG_VERIFIED"
         ? `${subject}: Read permission wasn't established in repository metadata, but Salesforce confirmed access.${decision.message.includes("via compound parent") ? " " + decision.message : ""}`
         : decision.source === "ORG_DENIED"
           ? `${subject}: Repository metadata did not establish Read access; Salesforce confirmed it is missing for the selected user.`
@@ -238,6 +242,7 @@ export class SoqlSecurityAnalyzer {
 
       const uniqueFields = [...fields.entries()];
       const fieldFindings = new Map<string, SoqlSecurityFinding[]>();
+      const deniedParentKeys = new Set<string>();
       await boundedMap(uniqueFields, async ([fieldKey, references]) => {
         const fieldName = references[0]?.field ?? fieldKey;
         const grant = evaluator.evaluateField(`${object}.${fieldName}`);
@@ -245,7 +250,7 @@ export class SoqlSecurityAnalyzer {
         // established FLS. EntityParticle metadata cannot change that verdict;
         // avoid an unnecessary live-org lookup when all fields are granted.
         if (grant.schemaRequired === true || grant.readGrantedBy.length > 0) return;
-        // Current-org metadata overrides the curated snapshot. Never
+        // Current-org metadata overrides any explicitly selected offline cache. Never
         // infer a grant from an unknown field in a successful live lookup.
         const metadata = await this.fieldMetadata?.getField(object, fieldName);
         const permissionable = this.fieldMetadata ? metadata?.permissionable : grant.permissionable;
@@ -253,13 +258,33 @@ export class SoqlSecurityAnalyzer {
         const repositoryFieldRead = permissionable === false;
         if (repositoryFieldRead) return;
 
-        const fieldDecision = this.readVerification
+        const fieldDecision: Decision = this.readVerification
           ? await this.readVerification.resolveFieldRead(persona, object, fieldName, false)
-          : { source: "UNVERIFIED" as const, readable: false, message: "Salesforce verification unavailable." };
+          : { source: "UNVERIFIED", readable: false, message: "Salesforce verification unavailable." };
+        // The confirmed permission gap belongs to the parent, not the
+        // component with no direct access row. Report under the parent so the
+        // Excel writer groups repeated components with the existing High row.
+        const reportedField = fieldDecision.deniedCompoundParent ?? fieldName;
+        if (fieldDecision.deniedCompoundParent) deniedParentKeys.add(reportedField.toLowerCase());
         fieldFindings.set(fieldKey,
-          findingFor(references, object, fieldName, "FIELD_READ", fieldDecision));
+          findingFor(references, object, reportedField, "FIELD_READ", fieldDecision));
       });
-      for (const [key] of uniqueFields) objectFindings.push(...(fieldFindings.get(key) ?? []));
+      // Multiple components of one inaccessible compound parent can occur
+      // on the same Apex line. Keep one reference per denied parent/location;
+      // distinct source lines still appear in the Excel occurrence list.
+      const groupedFieldFindings = new Map<string, SoqlSecurityFinding>();
+      for (const [key] of uniqueFields) {
+        for (const [index, finding] of (fieldFindings.get(key) ?? []).entries()) {
+          // Deduplicate ONLY confirmed compound-parent dependencies; unrelated
+          // field references can differ in clause/enforcement at one line.
+          const id = deniedParentKeys.has(finding.field.toLowerCase())
+            ? [finding.object, finding.field, finding.filePath,
+                finding.lineNumber, finding.relationshipPath ?? ""].join("|").toLowerCase()
+            : `direct|${key}|${index}`;
+          if (!groupedFieldFindings.has(id)) groupedFieldFindings.set(id, finding);
+        }
+      }
+      objectFindings.push(...groupedFieldFindings.values());
       results.set(object, objectFindings);
       } finally {
         // A unit finishes only after all of its relevant field decisions.

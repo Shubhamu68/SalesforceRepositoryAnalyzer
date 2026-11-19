@@ -1,19 +1,20 @@
 import type { SalesforceOrgConnection } from "./SalesforceOrgConnection.js";
-import { getFieldPermissionability } from "../analyzer/fieldPermissionability.js";
+import { OptionalFieldMetadataCache } from "../services/OptionalFieldMetadataCache.js";
 import { recordSoqlCount } from "../services/SoqlPerformanceMetrics.js";
 
 /**
  * One metadata source for every analysis workflow:
- *  1. current-org EntityParticle (authoritative for FLS applicability);
- *  2. the optional local snapshot if online metadata cannot be retrieved;
- *  3. unknown, never an inferred permission grant.
+ *  1. current-org EntityParticle (preferred), then current-org REST Describe
+ *     when Tooling metadata fails, omits a field or lacks IsPermissionable;
+ *  2. an explicitly configured, org-scoped offline cache (never bundled);
+ *  3. UNKNOWN, never an inferred permission grant.
  *
  * Org metadata is cached in memory by org ID, instance and API version.
- * A successful live lookup does not silently fall back to stale snapshot
- * metadata if a field is absent from that org's EntityParticle response.
+ * A successful live lookup never falls back to offline cache metadata if
+ * the field is absent from the queried org's EntityParticle response.
  */
-type Connection = Pick<SalesforceOrgConnection, "status" | "queryAll">;
-export type FieldMetadataSource = "LIVE" | "SNAPSHOT" | "UNKNOWN";
+type Connection = Pick<SalesforceOrgConnection, "status" | "queryAll" | "describeSObject">;
+export type FieldMetadataSource = "LIVE" | "OPTIONAL_CACHE" | "UNKNOWN";
 
 export interface SalesforceFieldMetadata {
   permissionable: boolean | undefined;
@@ -51,10 +52,41 @@ export function compoundNameParentFromMetadata(
   return parent?.source === "LIVE" && parent.isCompound === true ? candidate : null;
 }
 
+/**
+ * Live EntityParticle can establish compound membership when REST Describe
+ * omits compoundFieldName (common for custom Address components). Neither
+ * suffixes nor a parent field name alone are sufficient proof.
+ */
+export function compoundParentFromMetadata(
+  fields: ReadonlyMap<string, SalesforceFieldMetadata>,
+  fieldName: string,
+): string | null {
+  const nameParent = compoundNameParentFromMetadata(fields, fieldName);
+  if (nameParent) return nameParent;
+  const component = fields.get(norm(fieldName));
+  if (component?.source !== "LIVE" || component.isComponent !== true) return null;
+
+  const custom = /^(.*)__(City|Country|Street|State|PostalCode|CountryCode|StateCode|GeocodeAccuracy|Latitude|Longitude)__s$/i.exec(fieldName);
+  const standard = /^(.*?)(GeocodeAccuracy|PostalCode|CountryCode|StateCode|Latitude|Longitude|Country|Street|State|City)$/i.exec(fieldName);
+  const candidate = custom ? custom[1] + "__c" : standard ? standard[1] + "Address" : null;
+  if (!candidate) return null;
+  const parent = fields.get(norm(candidate));
+  if (parent?.source !== "LIVE" || parent.isCompound !== true) return null;
+  if (parent.dataType && !/^(?:address|location)$/i.test(parent.dataType)) return null;
+  return candidate;
+}
+
 export class SalesforceFieldMetadataService {
   private readonly cachedObjects = new Map<string, CacheEntry>();
+  private readonly cachedDescribes = new Map<string, CacheEntry>();
 
-  constructor(private readonly connection?: Connection) {}
+  constructor(
+    private readonly connection?: Connection,
+    private readonly offlineCache = new OptionalFieldMetadataCache(
+      process.env.FIELD_PERMISSIONABILITY_SNAPSHOT_PATH?.trim(),
+      process.env.FIELD_METADATA_OFFLINE_ORG_ID?.trim(),
+    ),
+  ) {}
 
   private cacheKey(object: string): string {
     const state = this.connection?.status;
@@ -105,18 +137,74 @@ export class SalesforceFieldMetadataService {
     return entry.value;
   }
 
+  /**
+   * REST sObject Describe supplies the same org's field.permissionable value.
+   * Use it when EntityParticle is inaccessible or missing this field, never
+   * an unrelated org's metadata or the presence of an address-like suffix.
+   */
+  private async getDescribeMetadata(object: string): Promise<Map<string, SalesforceFieldMetadata> | null> {
+    if (!VALID_NAME.test(object) || !this.connection) return null;
+    const key = this.cacheKey(object);
+    const hit = this.cachedDescribes.get(key);
+    if (hit && hit.until > Date.now()) return hit.value;
+    if (this.cachedDescribes.size >= MAX_ENTRIES) this.cachedDescribes.clear();
+
+    const entry: CacheEntry = { until: Date.now() + TTL_MS, value: Promise.resolve(null) };
+    entry.value = (async () => {
+      try {
+        const describe = await this.connection!.describeSObject(object);
+        const fields = new Map<string, SalesforceFieldMetadata>();
+        for (const item of describe.fields) {
+          if (!item.name || !VALID_NAME.test(item.name)) continue;
+          fields.set(norm(item.name), {
+            permissionable: typeof item.permissionable === "boolean" ? item.permissionable : undefined,
+            ...(typeof item.type === "string" ? { dataType: item.type } : {}),
+            source: "LIVE",
+          });
+        }
+        return fields;
+      } catch {
+        recordSoqlCount("org.field_metadata.describe_failures");
+        entry.until = Date.now() + ERROR_TTL_MS;
+        return null;
+      }
+    })();
+    this.cachedDescribes.set(key, entry);
+    return entry.value;
+  }
+
   async getField(object: string, field: string): Promise<SalesforceFieldMetadata> {
     const unknown: SalesforceFieldMetadata = { permissionable: undefined, source: "UNKNOWN" };
     if (!VALID_NAME.test(object) || !VALID_NAME.test(field)) return unknown;
     const live = await this.getObjectMetadata(object);
-    if (live !== null) return live.get(norm(field)) ?? unknown;
-    const snapshot = getFieldPermissionability(object, field);
-    return snapshot === undefined ? unknown : { permissionable: snapshot, source: "SNAPSHOT" };
+    const toolingField = live?.get(norm(field));
+    if (typeof toolingField?.permissionable === "boolean") return toolingField;
+    // A successful Tooling response can omit compound components, while a
+    // failed Tooling query may be caused by missing View Setup access. REST
+    // Describe is independent current-org evidence, not an offline override.
+    const describeField = (await this.getDescribeMetadata(object))?.get(norm(field));
+    if (typeof describeField?.permissionable === "boolean") {
+      return { ...toolingField, ...describeField, source: "LIVE" };
+    }
+    if (live !== null) return toolingField ?? unknown;
+    // Only opt-in metadata from the SAME org may supplement a failed live
+    // request. Repository-only mode requires FIELD_METADATA_OFFLINE_ORG_ID.
+    const connectedOrgId = this.connection?.status.organizationId;
+    const cached = this.connection && !connectedOrgId ? undefined
+      : this.offlineCache.getField(object, field, connectedOrgId);
+    return cached === undefined ? unknown : { permissionable: cached, source: "OPTIONAL_CACHE" };
   }
 
   async getCompoundNameParent(object: string, field: string): Promise<string | null> {
     if (!VALID_NAME.test(object) || !VALID_NAME.test(field)) return null;
     const live = await this.getObjectMetadata(object);
     return live ? compoundNameParentFromMetadata(live, field) : null;
+  }
+
+  /** Resolve compound Name/Address/Location parent only from this org's live metadata. */
+  async getCompoundParent(object: string, field: string): Promise<string | null> {
+    if (!VALID_NAME.test(object) || !VALID_NAME.test(field)) return null;
+    const live = await this.getObjectMetadata(object);
+    return live ? compoundParentFromMetadata(live, field) : null;
   }
 }

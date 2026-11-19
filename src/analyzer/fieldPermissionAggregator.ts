@@ -7,7 +7,7 @@ export interface EffectiveFieldPermission {
 
   readable: boolean;
   editable: boolean;
-  /** Salesforce EntityParticle.IsPermissionable; undefined if not in snapshot. */
+  /** IsPermissionable when verified by metadata; undefined when unresolved. */
   permissionable?: boolean;
   /** False for Platform Events: skip all individual FLS checks. */
   flsApplicable?: boolean;

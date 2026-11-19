@@ -5,7 +5,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { PersonaConfigLoader } from '../src/config/PersonaConfigLoader.js';
 import { loadOrgVerificationStatusPolicy, isStatusNeutralOrgObjectRead } from '../src/config/orgVerificationStatusPolicy.js';
-import { getFieldPermissionability, listPermissionabilitySnapshotFields } from '../src/analyzer/fieldPermissionability.js';
 import { isIgnoredField, isAggregateExpression, isSystemField } from '../src/analyzer/soqlSystemFields.js';
 
 async function fixture<T>(name: string, contents: string, fn: (filepath: string) => Promise<T>): Promise<T> {
@@ -66,18 +65,14 @@ test('Org status-neutral policy rejects missing, invalid, or malformed entries',
   }
 });
 
-test('Permissionability snapshot recognizes case-insensitive standard Account fields', () => {
-  const city = getFieldPermissionability('Account', 'BillingCity');
-  assert.equal(typeof city, 'boolean');
-  assert.equal(getFieldPermissionability('account', 'billingcity'), city);
-  assert.equal(getFieldPermissionability('Account', 'Not_A_Real_Field_998__c'), undefined);
-});
-
-test('Permissionability field inventory is returned without mutating the cached source', () => {
-  const first = listPermissionabilitySnapshotFields();
-  assert.ok(first.get('Account')?.length);
-  first.get('Account')?.push('InjectedField__c');
-  assert.equal(listPermissionabilitySnapshotFields().get('Account')?.includes('InjectedField__c'), false);
+test('No project-specific field snapshot is required for generic SOQL classification', () => {
+  // Standard fields cannot be globally skipped because an org's actual
+  // IsPermissionable metadata may require FLS checks.
+  assert.equal(isIgnoredField('Name', 'Account'), false);
+  assert.equal(isIgnoredField('BillingCity', 'Account'), false);
+  assert.equal(isIgnoredField('CreatedDate', 'Contact'), false);
+  // Every SObject ID is intrinsic and does not need an independent FLS row.
+  assert.equal(isIgnoredField('Id', 'Contact'), true);
 });
 
 test('SOQL system fields, aggregate recognition, and legacy exceptions', () => {

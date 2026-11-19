@@ -1,8 +1,18 @@
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
 
-const input = path.resolve(process.argv[2] ?? "config/field-permissionability.csv");
-const output = path.resolve(process.argv[3] ?? "config/field-permissionability.json");
+// Explicit source org ID prevents an unrelated project's field export from
+// silently becoming the Analyzer's shared metadata. This is a manual,
+ // repository-independent cache; do NOT commit it.
+const args = process.argv.slice(2);
+const at = args.indexOf("--org-id");
+const organizationId = at < 0 ? "" : args[at + 1] ?? "";
+if (!/^00D[A-Za-z0-9]{12}(?:[A-Za-z0-9]{3})?$/.test(organizationId)) {
+  throw new Error("Provide the source Salesforce organization ID with --org-id 00D... (15 or 18 characters).");
+}
+const positional = args.filter((_argument, index) => at < 0 || (index !== at && index !== at + 1));
+const input = path.resolve(positional[0] ?? "config/field-permissionability.csv");
+const output = path.resolve(positional[1] ?? "config/field-permissionability.local.json");
 const source = readFileSync(input, "utf8").replace(/^\uFEFF/, "");
 
 function parseCsv(text) {
@@ -54,10 +64,11 @@ const sortedObjects = Object.fromEntries(
     )])
 );
 const snapshot = {
-  version: 1,
-  source: "Salesforce EntityParticle.IsPermissionable (user-exported snapshot)",
+  version: 2,
+  organizationId,
+  capturedAt: new Date().toISOString(),
   objects: sortedObjects,
 };
 mkdirSync(path.dirname(output), { recursive: true });
 writeFileSync(output, JSON.stringify(snapshot, null, 2) + "\n");
-console.log(`Wrote ${keys.size} fields across ${Object.keys(objects).length} objects to ${output}`);
+console.log(`Wrote ${keys.size} fields across ${Object.keys(objects).length} objects to ${output} for org ${organizationId.slice(0, 15)}`);

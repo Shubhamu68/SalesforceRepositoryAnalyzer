@@ -42,6 +42,10 @@ export interface MissingReadPermission {
   /** Live verification status for either object or field Read. */
   orgOutcome?: "DENIED" | "UNVERIFIED";
   orgMessage?: string;
+  /** Verified denied compound parent, not a direct component field denial. */
+  deniedCompoundParent?: string;
+  /** Original components whose missing Read is attributed to this parent. */
+  dependentComponents?: string[];
   /** Missing matched user or no confirmed unfrozen user; distinct from API failures. */
   orgReason?: "NO_MATCHING_USERS" | "NO_LOGGED_IN_USERS" | "NO_UNFROZEN_USERS";
 }

@@ -33,9 +33,29 @@ export type EffectiveUserFieldAccess = {
   edit: boolean | null;
   /** Non-empty only when a component's Read was inferred from an explicitly verified parent. */
   readFromCompoundParent?: string;
-  /** Evidence came from live/snapshot IsPermissionable=false, not a user grant. */
-  nonPermissionableSource?: "LIVE" | "SNAPSHOT";
+  /** Origin of non-permissionable field metadata, never proof of user access by itself. */
+  nonPermissionableSource?: "LIVE" | "OPTIONAL_CACHE";
+  /**
+   * Salesforce denied Read on this confirmed compound parent while the
+   * component itself had no conclusive direct UserFieldAccess result.
+   * read stays null: this is a parent dependency, NOT a direct field denial.
+   */
+  deniedCompoundParent?: string;
 };
+
+/**
+ * True only when EVERY checked user has the same independently verified
+ * compound-parent denial and no conclusive direct component Read decision.
+ * Partial, mixed, or conflicting evidence must remain UNVERIFIED.
+ */
+export function uniformlyDeniedCompoundParent(
+  results: readonly EffectiveUserFieldAccess[],
+): string | null {
+  if (!results.length || results.some((result) => result.read !== null || !result.deniedCompoundParent)) return null;
+  const parent = results[0].deniedCompoundParent!;
+  return results.every((result) => result.deniedCompoundParent?.toLowerCase() === parent.toLowerCase())
+    ? parent : null;
+}
 
 const CACHE_MS = 60_000;
 const MAX_CACHE_ENTRIES = 2000;
@@ -217,25 +237,37 @@ export class SalesforceUserFieldAccessGateway {
   async verifyUserField(userId: string, object: string, field: string): Promise<EffectiveUserFieldAccess> {
     const unknown = { read: null, edit: null };
     if (!USER_ID.test(userId) || !FIELD_NAME.test(object) || !FIELD_NAME.test(field)) return unknown;
-    // Non-permissionable field components cannot have independent FLS
-    // grants. Live EntityParticle wins over any stale offline snapshot.
+    // Live EntityParticle proves the absence of configurable individual FLS.
+    // An explicitly opted offline cache is NOT direct Salesforce user-access
+    // evidence; it must not be misreported as an org-verified user grant.
     const fieldMetadata = await this.metadata?.getField(object, field);
     if (fieldMetadata?.permissionable === false) {
-      return {
-        read: true, edit: null,
-        nonPermissionableSource: fieldMetadata.source === "LIVE" ? "LIVE" : "SNAPSHOT",
-      };
+      return fieldMetadata.source === "LIVE"
+        ? { read: true, edit: null, nonPermissionableSource: "LIVE" }
+        : { read: null, edit: null, nonPermissionableSource: "OPTIONAL_CACHE" };
     }
     const direct = await this.direct(userId, object, field);
-    if (direct.state !== "MISSING") return { read: direct.read, edit: direct.edit };
+    // A confirmed direct grant/denial always wins. A present row with null
+    // IsAccessible is not a denial: try a verified compound parent instead.
+    // Conflicting or failed direct evidence remains inconclusive.
+    if (direct.state === "INCONCLUSIVE" ||
+        (direct.state === "PRESENT" && direct.read !== null)) {
+      return { read: direct.read, edit: direct.edit };
+    }
     const parent = await this.compoundParent(object, field)
+      ?? await this.metadata?.getCompoundParent(object, field)
       ?? await this.metadata?.getCompoundNameParent(object, field) ?? null;
     if (!parent) return unknown;
     const parentAccess = await this.direct(userId, object, parent);
     if (parentAccess.state === "PRESENT" && parentAccess.read === true) {
-      // Only promote positive, metadata-backed parent READ. A parent denial is
-      // not enough proof to assert a component denial; parent EDIT is irrelevant.
+      // Only promote positive, metadata-backed parent READ; parent Edit is
+      // irrelevant to a component's independently configurable Edit FLS.
       return { read: true, edit: null, readFromCompoundParent: parent };
+    }
+    if (parentAccess.state === "PRESENT" && parentAccess.read === false) {
+      // Preserve a confirmed dependency without asserting that Salesforce
+      // returned an explicit denial for the individual component field.
+      return { ...unknown, deniedCompoundParent: parent };
     }
     return unknown;
   }

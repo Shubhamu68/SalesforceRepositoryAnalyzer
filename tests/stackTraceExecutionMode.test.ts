@@ -67,3 +67,48 @@ test('Unsupported SECURITY_ENFORCED at API 67 is review not green', async () => 
   assert.equal(result.queries[0].effectiveMode, 'INVALID_CLAUSE');
   assert.equal(result.personas[0].status, 'REVIEW');
 });
+
+test('Stack Trace consolidates inaccessible compound components under the proven denied parent', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'sf-stack-compound-'));
+  try {
+    await mkdir(path.join(dir, 'objects'));
+    const file = path.join(dir, 'Demo.cls');
+    await writeFile(file, [
+      'public class Demo {',
+      '  public static void run() {',
+      '    List<Example__c> rows = [SELECT Delivery_Address__City__s, Delivery_Address__Street__s FROM Example__c WITH USER_MODE];',
+      '  }',
+      '}',
+    ].join('\n'));
+    await writeFile(`${file}-meta.xml`, '<ApexClass><apiVersion>67.0</apiVersion></ApexClass>');
+    const parent = 'Delivery_Address__c';
+    const live = {
+      getVerificationScope: () => 'test-org',
+      verifyObjectRead: async (_p: Persona, object: string): Promise<OrgObjectAccessEvidence> => ({
+        object, outcome: 'VERIFIED', checkedUsers: 1, matchedUsers: 1, sampled: false,
+        message: 'Object Read verified.',
+      }),
+      verifyFieldRead: async (_p: Persona, object: string, field: string): Promise<OrgObjectAccessEvidence> => ({
+        object, field, outcome: 'DENIED', checkedUsers: 1, matchedUsers: 1, sampled: false,
+        deniedCompoundParent: parent,
+        message: `Salesforce denied compound parent ${object}.${parent}; component access unresolved.`,
+      }),
+    } as unknown as SalesforcePersonaAccessVerifier;
+    const verifier = new OrgObjectReadVerificationService({ statusNeutralObjectRead: new Set() }, live);
+    const service = new StackTraceImpactService(dir, path.join(dir, 'objects'), loader, resolver,
+      path.join(dir, 'muting'), verifier);
+    const result = await service.analyze('Class.Demo.run: line 3, column 1');
+    assert.equal(result.queries.length, 1);
+    const impact = result.queries[0].personas[0];
+    assert.equal(impact.status, 'AT_RISK');
+    assert.equal(impact.missing.length, 1, 'both address components depend on one denied parent');
+    assert.equal(impact.missing[0].field, parent);
+    assert.equal(impact.missing[0].orgOutcome, 'DENIED');
+    assert.equal(impact.missing[0].deniedCompoundParent, parent);
+    assert.deepEqual((impact.missing[0].dependentComponents ?? []).sort(),
+      ['Delivery_Address__City__s', 'Delivery_Address__Street__s'].sort());
+    assert.match(impact.missing[0].orgMessage ?? '', /compound parent/i);
+    assert.ok(result.queries[0].checkedFields.some((field) => field.field === 'Delivery_Address__City__s'));
+    assert.ok(result.queries[0].checkedFields.some((field) => field.field === 'Delivery_Address__Street__s'));
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});

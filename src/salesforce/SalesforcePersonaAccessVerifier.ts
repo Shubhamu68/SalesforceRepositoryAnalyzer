@@ -2,7 +2,7 @@ import type { Persona } from "../models/Persona.js";
 import type { OrgCheckedUser } from "../models/StackTraceImpact.js";
 import { SalesforceOrgConnection } from "./SalesforceOrgConnection.js";
 import { matchPersonaUsers, selectMostRecentlyLoggedInMatchedUser, type OrgAssignment, type OrgProfile, type OrgUser } from "./OrgPersonaMatcher.js";
-import { SalesforceUserFieldAccessGateway } from "./SalesforceUserFieldAccessGateway.js";
+import { SalesforceUserFieldAccessGateway, uniformlyDeniedCompoundParent, type EffectiveUserFieldAccess } from "./SalesforceUserFieldAccessGateway.js";
 import { noteSoqlUserMatching } from "../services/SoqlAnalysisProgress.js";
 
 export type OrgAccessOutcome = "VERIFIED" | "DENIED" | "UNVERIFIED";
@@ -23,6 +23,8 @@ export interface OrgObjectAccessEvidence {
   verifiedAt?: string;
   /** When exact UserFieldAccess is absent, verified Read via a metadata-linked compound parent. */
   compoundParent?: string;
+  /** Confirmed parent Read denial, NOT a direct component UserFieldAccess denial. */
+  deniedCompoundParent?: string;
   message: string;
   /** Structured explanation for an inconclusive check (never inferred from message text). */
   selectionMethod?: "RECENT_LOGIN" | "ACTIVE_UNFROZEN_FALLBACK";
@@ -415,6 +417,7 @@ export class SalesforcePersonaAccessVerifier {
       const { users, checkedUserDetails, matchedUsers, eligibleUsers, sampled, selectionMethod } = await this.matchingUsers(persona);
       const readable: Array<boolean | null> = [];
       const compoundParents: string[] = [];
+      const fieldChecks: EffectiveUserFieldAccess[] = [];
       let nonPermissionable = false;
       for (let i = 0; i < users.length; i += VERIFY_CONCURRENCY) {
         const batch = users.slice(i, i + VERIFY_CONCURRENCY);
@@ -423,6 +426,7 @@ export class SalesforcePersonaAccessVerifier {
             return await this.userFieldAccess.verifyUserField(userId, object, field);
           } catch { return { read: null, edit: null }; }
         }));
+        fieldChecks.push(...results);
         readable.push(...results.map((item) => item.read));
         nonPermissionable ||= results.some((item) => Boolean(item.nonPermissionableSource));
         compoundParents.push(...results.map((item) => item.readFromCompoundParent).filter(
@@ -431,6 +435,13 @@ export class SalesforcePersonaAccessVerifier {
       }
       const decision = this.decide(object, field, matchedUsers, readable.length, sampled, checkedUserDetails,
         readable, `${object}.${field} field Read`, eligibleUsers, selectionMethod);
+      const deniedParent = uniformlyDeniedCompoundParent(fieldChecks);
+      if (decision.outcome === "UNVERIFIED" && deniedParent) {
+        return {
+          ...decision, outcome: "DENIED", deniedCompoundParent: deniedParent,
+          message: `Salesforce confirmed missing Read on compound parent ${object}.${deniedParent}; ${object}.${field} has no conclusive direct component Read decision. This is a parent-access dependency, not a confirmed component FLS denial.`,
+        };
+      }
       if (decision.outcome === "VERIFIED" && nonPermissionable) {
         return {
           ...decision,

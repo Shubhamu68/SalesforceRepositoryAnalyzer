@@ -40,6 +40,8 @@ export type SalesforceSObjectDescribe = {
     compoundFieldName?: string | null;
     /** Salesforce field type, e.g. address or location. */
     type?: string;
+    /** Current-org Describe: whether this field has independently configurable FLS. */
+    permissionable?: boolean | null;
     relationshipName?: string | null;
     referenceTo?: string[];
     namePointing?: boolean;

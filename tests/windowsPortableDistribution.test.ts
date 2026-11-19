@@ -11,6 +11,11 @@ test("portable distribution keeps existing setup/API features and excludes bundl
   assert.match(workflow, /npm ci --omit=dev/);
   assert.match(workflow, /Packag(?:ing|e) must NEVER include/);
   assert.match(workflow, /desktop\/windows\/smoke\.mjs/);
+  assert.match(workflow, /"config\/personas\.json","config\/org-verification-status-policy\.json"/);
+  assert.doesNotMatch(workflow, /Copy-Item -Path "config" -Destination/);
+  const desktopStage = readFileSync(path.resolve("desktop/electron/stage.mjs"), "utf8");
+  assert.match(desktopStage, /for \(const file of \["personas\.json", "org-verification-status-policy\.json"\]\)/);
+  assert.doesNotMatch(desktopStage, /cpSync\(path\.join\(repo, "config"\),/);
   assert.match(launcher, /\.env\.example/);
   assert.match(launcher, /SALESFORCE_ANALYZER_STATIC_DIR/);
   assert.match(launcher, /SALESFORCE_ANALYZER_PORT/);

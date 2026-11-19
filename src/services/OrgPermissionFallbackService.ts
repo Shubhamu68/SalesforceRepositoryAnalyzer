@@ -79,9 +79,13 @@ export class OrgPermissionFallbackService {
       if (objectDenied || fieldDenied) {
         const denied = objectDenied ? objectEvidence! : flsEvidence!;
         const origin = objectDenied ? "object" : "field";
+        const deniedParent = !objectDenied && permission === "read"
+          ? flsEvidence?.deniedCompoundParent : undefined;
         evidence[permission] = {
           ...denied,
-          message: `Effective ${object}.${field} ${permission} denied: Salesforce confirmed missing ${origin} ${permission}. ${denied.message}`,
+          message: deniedParent
+            ? `Effective ${object}.${field} Read depends on denied compound parent ${object}.${deniedParent}. Salesforce verified the parent Read denial; direct component FLS denial was not independently established. ${denied.message}`
+            : `Effective ${object}.${field} ${permission} denied: Salesforce confirmed missing ${origin} ${permission}. ${denied.message}`,
         };
       } else if (objectUnverified || fieldUnverified) {
         const unresolved = objectUnverified ? objectEvidence : flsEvidence;
