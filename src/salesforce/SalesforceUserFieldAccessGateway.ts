@@ -33,8 +33,8 @@ export type EffectiveUserFieldAccess = {
   edit: boolean | null;
   /** Non-empty only when a component's Read was inferred from an explicitly verified parent. */
   readFromCompoundParent?: string;
-  /** Evidence came from live/snapshot IsPermissionable=false, not a user grant. */
-  nonPermissionableSource?: "LIVE" | "SNAPSHOT";
+  /** Origin of non-permissionable field metadata, never proof of user access by itself. */
+  nonPermissionableSource?: "LIVE" | "OPTIONAL_CACHE";
 };
 
 const CACHE_MS = 60_000;
@@ -217,14 +217,14 @@ export class SalesforceUserFieldAccessGateway {
   async verifyUserField(userId: string, object: string, field: string): Promise<EffectiveUserFieldAccess> {
     const unknown = { read: null, edit: null };
     if (!USER_ID.test(userId) || !FIELD_NAME.test(object) || !FIELD_NAME.test(field)) return unknown;
-    // Non-permissionable field components cannot have independent FLS
-    // grants. Live EntityParticle wins over any stale offline snapshot.
+    // Live EntityParticle proves the absence of configurable individual FLS.
+    // An explicitly opted offline cache is NOT direct Salesforce user-access
+    // evidence; it must not be misreported as an org-verified user grant.
     const fieldMetadata = await this.metadata?.getField(object, field);
     if (fieldMetadata?.permissionable === false) {
-      return {
-        read: true, edit: null,
-        nonPermissionableSource: fieldMetadata.source === "LIVE" ? "LIVE" : "SNAPSHOT",
-      };
+      return fieldMetadata.source === "LIVE"
+        ? { read: true, edit: null, nonPermissionableSource: "LIVE" }
+        : { read: null, edit: null, nonPermissionableSource: "OPTIONAL_CACHE" };
     }
     const direct = await this.direct(userId, object, field);
     if (direct.state !== "MISSING") return { read: direct.read, edit: direct.edit };
