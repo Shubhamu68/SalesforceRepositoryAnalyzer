@@ -2,7 +2,6 @@ import { readdir, readFile } from "node:fs/promises";
 import { readFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import { XMLParser } from "fast-xml-parser";
-import { listPermissionabilitySnapshotFields } from "./fieldPermissionability.js";
 import { recordSoqlCount } from "../services/SoqlPerformanceMetrics.js";
 
 const parser = new XMLParser({ ignoreAttributes: true });
@@ -253,29 +252,9 @@ export async function buildRelationshipMap(objectsDirectory: string): Promise<Re
     }
   }
 
-  // The existing permissionability export contains field names for nine objects.
-  // It can identify straightforward standard FooId -> Foo relationships without
-  // inventing a parent for custom lookup fields or polymorphic references.
-  const snapshotFields = listPermissionabilitySnapshotFields();
-  const knownObjects = new Map<string, string>();
-  for (const objectName of snapshotFields.keys()) {
-    knownObjects.set(norm(objectName), objectName);
-    graph.registerObject(objectName);
-  }
-  for (const [objectName, fields] of snapshotFields) {
-    for (const fieldName of fields) {
-      if (!fieldName.endsWith("Id") || fieldName === "Id") continue;
-      const relationship = fieldName.slice(0, -2);
-      if (graph.parentObject(objectName, relationship)) continue;
-      const directTarget = knownObjects.get(norm(relationship));
-      if (directTarget) graph.addParent(objectName, relationship, [directTarget], fieldName);
-      // OriginalOrderItemId is a standard reference to OrderItem. Only infer
-      // this when both the exact source field and OrderItem object are known.
-      if (norm(relationship) === "originalorderitem" && knownObjects.has("orderitem")) {
-        graph.addParent(objectName, relationship, [knownObjects.get("orderitem")!], fieldName);
-      }
-    }
-  }
+  // Relationship evidence comes from repository CustomField metadata or
+  // Salesforce Describe / an explicitly configured project-specific schema.
+  // Never infer standard edges from an unrelated org's permissionability list.
 
   const snapshotFile = path.resolve(process.env.SALESFORCE_RELATIONSHIP_SNAPSHOT_PATH?.trim()
     || path.join(process.cwd(), "config", "relationship-schema.json"));
