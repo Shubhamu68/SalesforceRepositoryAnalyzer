@@ -123,6 +123,29 @@ test("field Review shows object verification failure even if FLS is already in r
   assert.equal(fields.evidence.edit?.source, "UNVERIFIED");
 });
 
+test("Access Checker explains denied compound parent without claiming direct component FLS denial", async () => {
+  const objectName = "Example__c";
+  const component = "Delivery_Address__City__s";
+  const parent = "Delivery_Address__c";
+  const read: OrgPermissionEvidence = {
+    ...evidence("ORG_DENIED"), deniedCompoundParent: parent,
+    message: `Salesforce confirmed parent Read denied: ${objectName}.${parent}; direct component access inconclusive.`,
+  };
+  const fallback = new OrgPermissionFallbackService({
+    verifyObject: async () => objectEvidence("ORG_VERIFIED"),
+    verifyField: async () => ({ read, edit: evidence("UNVERIFIED") }),
+  });
+  const result = await fallback.resolveField(persona, objectName, component,
+    { access: allAccess(), evidence: {} }, { read: false, edit: false });
+  assert.equal(result.access.read, false);
+  assert.equal(result.evidence.read?.source, "ORG_DENIED");
+  assert.equal(result.evidence.read?.deniedCompoundParent, parent);
+  assert.match(result.evidence.read!.message, /parent.*denied|denied compound parent/i);
+  assert.match(result.evidence.read!.message, /not independently established/i);
+  assert.equal(permissionPresentation(false, result.evidence.read).label, "No");
+  assert.equal(result.evidence.edit?.source, "UNVERIFIED", "parent Read cannot determine component Edit");
+});
+
 test("confirmed field Edit denial reports No even if object Edit is granted", async () => {
   const fallback = new OrgPermissionFallbackService({
     verifyObject: async () => objectEvidence("ORG_VERIFIED"),
