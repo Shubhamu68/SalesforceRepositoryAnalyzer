@@ -127,6 +127,7 @@ export class SoqlSecurityAnalyzer {
   /** Persona-specific verification. Never reuse another persona's access decisions. */
   async analyzePrepared(
     persona: Persona, prepared: PreparedSoqlSecurityAnalysis,
+    onObjectProgress?: (completed: number, total: number) => void,
   ): Promise<SoqlSecurityFinding[]> {
     const { queries, inventory, unresolvedFields, parserLimitations, modeResults } = prepared;
     const resolved = await timeSoqlPhase("permissions.resolve", () => this.personaPermissionResolver.resolve(persona));
@@ -198,10 +199,13 @@ export class SoqlSecurityAnalyzer {
     // Resolve each distinct object only once. One object failure is represented
     // once per referencing SOQL query, NOT duplicated across all fields.
     const objects = [...inventory.entries()];
+    let completedObjects = 0;
+    onObjectProgress?.(0, objects.length);
     recordSoqlCount("inventory.objects", objects.length);
     recordSoqlCount("inventory.unique_fields", objects.reduce((total, [, fields]) => total + fields.size, 0));
     const results = new Map<string, SoqlSecurityFinding[]>();
     await timeSoqlPhase("access.evaluate", () => boundedMap(objects, async ([object, fields]) => {
+      try {
       const repositoryObject = evaluator.evaluateObject(object).access;
       const objectDecision = this.readVerification
         ? await this.readVerification.resolve(persona, object, repositoryObject.read)
@@ -257,6 +261,11 @@ export class SoqlSecurityAnalyzer {
       });
       for (const [key] of uniqueFields) objectFindings.push(...(fieldFindings.get(key) ?? []));
       results.set(object, objectFindings);
+      } finally {
+        // A unit finishes only after all of its relevant field decisions.
+        completedObjects++;
+        onObjectProgress?.(completedObjects, objects.length);
+      }
     }));
 
     for (const [object] of objects) findings.push(...(results.get(object) ?? []));
