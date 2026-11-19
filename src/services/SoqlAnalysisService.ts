@@ -8,6 +8,7 @@ import { SoqlSecurityAnalyzer } from "../analyzer/soqlSecurityAnalyzer.js";
 import { scanApexSoql } from "../scanner/apexSoqlScanner.js";
 import { writeSoqlReport, writeAllPersonasHighPriorityReport, type PersonaHighPriorityReportSection } from "../reporter/soqlReportWriter.js";
 import { recordSoqlCount, timeSoqlPhase, withSoqlPerformance } from "./SoqlPerformanceMetrics.js";
+import type { SoqlAnalysisProgress } from "./SoqlAnalysisProgress.js";
 
 export interface SoqlAnalysisSummary extends DeclaredSoqlModeCounts {
   queriesAnalyzed: number;
@@ -50,26 +51,35 @@ export class SoqlAnalysisService {
 ) {}
 
   async analyze(
-    persona: Persona
+    persona: Persona,
+    progress?: SoqlAnalysisProgress,
   ): Promise<SoqlAnalysisResult> {
     return withSoqlPerformance(async () => {
+    progress?.moveTo("scanning");
     const queries: SoqlQuery[] =
       (await timeSoqlPhase("repository.scan", () => scanApexSoql(
         this.repositoryPath
       ))).filter((query) => isDataAccessAnalysisObject(query.object));
     recordSoqlCount("queries.analyzed", queries.length);
 
-    const findings =
-      await timeSoqlPhase("security.total", () => this.soqlSecurityAnalyzer.analyze(
-        persona,
-        queries
-      ));
+    // Keep the pre-existing analyzer path for callers without progress
+    // (including CLI/tests). With progress, the SAME preparation/evaluation
+    // methods are split to report real milestones and per-object completion.
+    progress?.moveTo("preparing");
+    const findings = await timeSoqlPhase("security.total", async () => {
+      if (!progress) return this.soqlSecurityAnalyzer.analyze(persona, queries);
+      const prepared = await this.soqlSecurityAnalyzer.prepare(queries);
+      progress.moveTo("permissions");
+      return this.soqlSecurityAnalyzer.analyzePrepared(persona, prepared,
+        (completed, total) => progress.reportObjects(completed, total));
+    });
     recordSoqlCount("findings", findings.length);
 
     const outputDirectory = typeof this.outputDirectory === "function"
       ? this.outputDirectory()
       : this.outputDirectory;
 
+    progress?.moveTo("excel");
     const reports =
       await timeSoqlPhase("excel.total", () => writeSoqlReport(
         outputDirectory,
@@ -127,6 +137,7 @@ export class SoqlAnalysisService {
   async analyzeAllHighPriority(
     personas: readonly Persona[],
     verificationMode: "ORG_AND_REPOSITORY" | "REPOSITORY_ONLY" = "ORG_AND_REPOSITORY",
+    progress?: SoqlAnalysisProgress,
   ): Promise<AllPersonasHighPriorityResult> {
     if (personas.length === 0) throw new Error("No business personas are configured for SOQL analysis.");
     const names = new Set<string>();
@@ -136,14 +147,18 @@ export class SoqlAnalysisService {
       names.add(name);
     }
     return withSoqlPerformance(async () => {
+      progress?.setTotalPersonas(personas.length);
+      progress?.moveTo("scanning");
       const queries = (await timeSoqlPhase("repository.scan",
         () => scanApexSoql(this.repositoryPath)))
         .filter((query) => isDataAccessAnalysisObject(query.object));
       recordSoqlCount("queries.analyzed", queries.length);
       recordSoqlCount("personas.analyzed", personas.length);
 
+      progress?.moveTo("preparing");
       const prepared = await timeSoqlPhase("security.prepare",
         () => this.soqlSecurityAnalyzer.prepare(queries));
+      progress?.moveTo("permissions");
       const sections = new Array<PersonaHighPriorityReportSection>(personas.length);
       let nextPersona = 0;
       const worker = async (): Promise<void> => {
@@ -157,6 +172,7 @@ export class SoqlAnalysisService {
           const high = findings.filter((finding) => finding.criticality === "High");
           recordSoqlCount("findings.high", high.length);
           sections[index] = { personaName: persona.name, queryCount: queries.length, findings: high };
+          progress?.personaCompleted();
         }
       };
       await timeSoqlPhase("security.all_personas_wall_ms", () =>
@@ -164,6 +180,7 @@ export class SoqlAnalysisService {
 
       const outputDirectory = typeof this.outputDirectory === "function"
         ? this.outputDirectory() : this.outputDirectory;
+      progress?.moveTo("excel");
       const report = await timeSoqlPhase("excel.total",
         () => writeAllPersonasHighPriorityReport(outputDirectory, sections, verificationMode));
       return {
