@@ -2,7 +2,7 @@ import type { Persona } from "../models/Persona.js";
 import { MATRIX_PERMISSION_KEYS, type MatrixPermission } from "../models/ObjectAccessMatrixResult.js";
 import type { SalesforceOrgConnection } from "./SalesforceOrgConnection.js";
 import type { SalesforcePersonaAccessVerifier } from "./SalesforcePersonaAccessVerifier.js";
-import { SalesforceUserFieldAccessGateway } from "./SalesforceUserFieldAccessGateway.js";
+import { SalesforceUserFieldAccessGateway, uniformlyDeniedCompoundParent } from "./SalesforceUserFieldAccessGateway.js";
 
 export type OrgPermissionOutcome = "VERIFIED" | "DENIED" | "UNVERIFIED";
 export interface OrgPermissionEvidence {
@@ -11,6 +11,8 @@ export interface OrgPermissionEvidence {
   message: string;
   matchedUsers: number;
   checkedUsers: number;
+  /** Denied compound parent used as evidence; component direct Read was inconclusive. */
+  deniedCompoundParent?: string;
 }
 
 type ObjectEvidence = Record<MatrixPermission, OrgPermissionEvidence>;
@@ -287,6 +289,13 @@ export class SalesforceEffectivePermissionVerifier {
       }
     });
     const read = consensus(result.map((entry) => entry.read), `${object}.${field} field Read`, users.length);
+    const deniedParent = uniformlyDeniedCompoundParent(result);
+    if (read.source === "UNVERIFIED" && deniedParent) {
+      read.source = "ORG_DENIED";
+      read.outcome = "DENIED";
+      read.deniedCompoundParent = deniedParent;
+      read.message = `Salesforce confirmed missing Read on compound parent ${object}.${deniedParent} for every checked user; direct component Read for ${object}.${field} remains inconclusive. This is a parent dependency, not an independent component FLS denial.`;
+    }
     const parents = [...new Set(result.map((entry) => entry.readFromCompoundParent).filter(
       (item): item is string => typeof item === "string"
     ))];
