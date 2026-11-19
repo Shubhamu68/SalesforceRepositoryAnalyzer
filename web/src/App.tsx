@@ -9,6 +9,7 @@ import SalesforceOrgConnection from "./components/SalesforceOrgConnection";
 import SalesforceCliLogin from "./components/SalesforceCliLogin";
 import { shouldShowOrgChooser, type OrgChooserMode } from "./utils/salesforceAuthUi";
 import AnalysisLoadingOverlay from "./components/AnalysisLoadingOverlay";
+import { useSoqlAnalysisProgress } from "./hooks/useSoqlAnalysisProgress";
 import ReportOutputSetupModal from "./components/ReportOutputSetupModal";
 import RepositorySetupModal from "./components/RepositorySetupModal";
 import OrgAnalysisWarningModal, { type AnalysisWarning } from "./components/OrgAnalysisWarningModal";
@@ -163,6 +164,8 @@ function App() {
   const [allPersonasChecking, setAllPersonasChecking] = useState(false);
   const [allPersonasResult, setAllPersonasResult] = useState<AllPersonasHighPriorityResult | null>(null);
   const [allPersonasError, setAllPersonasError] = useState("");
+  const { progressId: activeSoqlProgressId, progress: soqlProgress,
+    start: startSoqlProgress, stop: stopSoqlProgress } = useSoqlAnalysisProgress();
   const [reportFolderPendingAction, setReportFolderPendingAction] = useState<"single" | "all">("single");
   const [page, setPage] = useState<Page>("dashboard");
   const [repositoryName, setRepositoryName] = useState<string>("");
@@ -541,6 +544,7 @@ function App() {
       if (checkType === "soql") {
         const preflight = await preflightOrgVerification();
         if (!preflight) return;
+        const progressId = startSoqlProgress();
         response = await fetch(
           "/api/soql-analysis",
           {
@@ -553,6 +557,7 @@ function App() {
               personaName:
                 selectedPersona,
               acknowledgeRepoOnly: preflight.acknowledgeRepoOnly,
+              progressId,
             }),
           }
         );
@@ -634,6 +639,7 @@ function App() {
           : "Unable to perform the access check."
       );
     } finally {
+      if (checkType === "soql") stopSoqlProgress();
       setChecking(false);
     }
   }
@@ -663,10 +669,11 @@ function App() {
       }
       const preflight = await preflightOrgVerification();
       if (!preflight) return;
+      const progressId = startSoqlProgress();
       const response = await fetch("/api/soql-analysis/high-priority", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ acknowledgeRepoOnly: preflight.acknowledgeRepoOnly }),
+        body: JSON.stringify({ acknowledgeRepoOnly: preflight.acknowledgeRepoOnly, progressId }),
       });
       if (!response.ok) {
         const body: { code?: string; error?: string } = await response.json().catch(() => ({}));
@@ -686,6 +693,7 @@ function App() {
     } catch (cause) {
       setAllPersonasError(cause instanceof Error ? cause.message : "Unable to generate the High Priority Summary.");
     } finally {
+      stopSoqlProgress();
       setAllPersonasChecking(false);
     }
   }
@@ -1000,7 +1008,9 @@ function App() {
     { label: "No explicit mode", value: soqlSummary?.unspecifiedModeQueries, icon: "?", tone: "amber" },
   ];
 
-  const showSoqlOverlay = (checking || allPersonasChecking) && page === "soql";
+  // Show live stages only for an accepted SOQL submission, not during setup/preflight.
+  const showSoqlOverlay = Boolean(activeSoqlProgressId) &&
+    (checking || allPersonasChecking) && page === "soql";
 
   const analysisForm = (
     <section className={page === "soql" ? "panel analysis-panel soql-analysis-panel" : "panel analysis-panel"}>
@@ -1307,10 +1317,10 @@ function App() {
         }} />}
         {page === "salesforce" && <SalesforceOrgConnection />}
 
-        {showSoqlOverlay && <AnalysisLoadingOverlay title={allPersonasChecking ? "Analyzing all personas" : "Analyzing SOQL"}
-          description={allPersonasChecking
-            ? "Preparing SOQL once, checking each persona's permissions, and generating a single High Priority Excel worksheet…"
-            : "Scanning Apex queries and generating the Excel workbook…"} />}
+        {showSoqlOverlay && <AnalysisLoadingOverlay
+          title="Analyzing SOQL Security"
+          description="Your analysis is in progress"
+          progress={soqlProgress} />}
 
 
       </main>
