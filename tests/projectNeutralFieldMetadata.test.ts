@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile, readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { OptionalFieldMetadataCache, FIELD_CACHE_MAX_AGE_MS } from "../src/services/OptionalFieldMetadataCache.js";
@@ -158,6 +160,32 @@ test("relationship export is opt-in, org-scoped and cannot override repository r
       if (oldOrg === undefined) delete process.env.FIELD_METADATA_OFFLINE_ORG_ID;
       else process.env.FIELD_METADATA_OFFLINE_ORG_ID = oldOrg;
     }
+  });
+});
+
+test("no project-specific field JSON is shipped in the Analyzer source", () => {
+  assert.equal(existsSync(path.resolve("config/field-permissionability.json")), false);
+});
+
+test("CSV importer generates an explicit, org-scoped version 2 cache", async () => {
+  await withRoot(async root => {
+    const input = path.join(root, "fields.csv");
+    const output = path.join(root, "fields.local.json");
+    await writeFile(input, [
+      "EntityDefinition.QualifiedApiName,QualifiedApiName,IsPermissionable",
+      "Custom__c,Example__c,true",
+      "Custom__c,CreatedDate,false",
+    ].join("\n"));
+    const result = spawnSync(process.execPath,
+      ["scripts/import-field-permissionability.mjs", input, output, "--org-id", ORG_A],
+      { cwd: process.cwd(), encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    const exported = JSON.parse(await readFile(output, "utf8"));
+    assert.equal(exported.version, 2);
+    assert.equal(exported.organizationId, ORG_A);
+    assert.ok(Number.isFinite(Date.parse(exported.capturedAt)));
+    assert.deepEqual(exported.objects.Custom__c,
+      { CreatedDate: false, Example__c: true });
   });
 });
 
