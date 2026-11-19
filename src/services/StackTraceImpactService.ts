@@ -117,7 +117,10 @@ export class StackTraceImpactService {
     walk(entry, [`${entry.className}.${entry.methodName}`], 0);
 
     const persons = await this.personaConfigLoader.getAllPersonas();
-    const relationshipMap = await buildRelationshipMap(this.objectsDirectory);
+    const relationshipMap = await buildRelationshipMap(this.objectsDirectory, {
+      connected: Boolean(this.orgRelationshipMetadata),
+      organizationId: this.orgRelationshipMetadata?.getOrganizationId?.(),
+    });
     const orgRelationshipHydrator = this.orgRelationshipMetadata?.createHydrator(relationshipMap);
     const prepared: {
       persona: Persona;
