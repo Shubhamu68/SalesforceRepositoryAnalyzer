@@ -30,7 +30,7 @@ function fakeConnection(options: { users: boolean; disconnected?: boolean; acces
         ? [{ UserId: userId, IsFrozen: false }] as T[] : [];
       if (soql.includes("FROM UserEntityAccess")) return [{ UserId: userId, IsReadable: options.access ?? true }] as T[];
       if (soql.includes("FROM UserFieldAccess") && options.deniedAddressParent) {
-        const exact = /AND FieldDefinition\\.QualifiedApiName = '([^']+)'/.exec(soql)?.[1];
+        const exact = /AND FieldDefinition\.QualifiedApiName = '([^']+)'/.exec(soql)?.[1];
         if (exact && exact !== "Delivery_Address__c") return [];
         return [{ UserId: userId, IsAccessible: false, IsUpdatable: false,
           FieldDefinition: { QualifiedApiName: "Delivery_Address__c" } }] as T[];
