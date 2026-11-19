@@ -51,6 +51,30 @@ export function compoundNameParentFromMetadata(
   return parent?.source === "LIVE" && parent.isCompound === true ? candidate : null;
 }
 
+/**
+ * Live EntityParticle can establish compound membership when REST Describe
+ * omits compoundFieldName (common for custom Address components). Neither
+ * suffixes nor a parent field name alone are sufficient proof.
+ */
+export function compoundParentFromMetadata(
+  fields: ReadonlyMap<string, SalesforceFieldMetadata>,
+  fieldName: string,
+): string | null {
+  const nameParent = compoundNameParentFromMetadata(fields, fieldName);
+  if (nameParent) return nameParent;
+  const component = fields.get(norm(fieldName));
+  if (component?.source !== "LIVE" || component.isComponent !== true) return null;
+
+  const custom = /^(.*)__(City|Country|Street|State|PostalCode|CountryCode|StateCode|GeocodeAccuracy|Latitude|Longitude)__s$/i.exec(fieldName);
+  const standard = /^(.*?)(GeocodeAccuracy|PostalCode|CountryCode|StateCode|Latitude|Longitude|Country|Street|State|City)$/i.exec(fieldName);
+  const candidate = custom ? custom[1] + "__c" : standard ? standard[1] + "Address" : null;
+  if (!candidate) return null;
+  const parent = fields.get(norm(candidate));
+  if (parent?.source !== "LIVE" || parent.isCompound !== true) return null;
+  if (parent.dataType && !/^(?:address|location)$/i.test(parent.dataType)) return null;
+  return candidate;
+}
+
 export class SalesforceFieldMetadataService {
   private readonly cachedObjects = new Map<string, CacheEntry>();
 
@@ -128,5 +152,12 @@ export class SalesforceFieldMetadataService {
     if (!VALID_NAME.test(object) || !VALID_NAME.test(field)) return null;
     const live = await this.getObjectMetadata(object);
     return live ? compoundNameParentFromMetadata(live, field) : null;
+  }
+
+  /** Resolve compound Name/Address/Location parent only from this org's live metadata. */
+  async getCompoundParent(object: string, field: string): Promise<string | null> {
+    if (!VALID_NAME.test(object) || !VALID_NAME.test(field)) return null;
+    const live = await this.getObjectMetadata(object);
+    return live ? compoundParentFromMetadata(live, field) : null;
   }
 }
