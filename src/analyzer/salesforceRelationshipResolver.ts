@@ -300,7 +300,7 @@ export async function buildRelationshipMap(
           if (!namePattern.test(objectName) || !details || typeof details !== "object") continue;
           graph.registerObject(objectName);
           for (const rel of Array.isArray(details.parents) ? details.parents : []) {
-            if (namePattern.test(rel.relationshipName) &&
+            if (rel && namePattern.test(rel.relationshipName) &&
               Array.isArray(rel.referenceTo) && rel.referenceTo.length > 0 &&
               rel.referenceTo.every(target => namePattern.test(target)) &&
               !graph.parentTargets(objectName, rel.relationshipName)) {
