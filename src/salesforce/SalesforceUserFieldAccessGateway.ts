@@ -1,5 +1,6 @@
 import type { SalesforceOrgConnection, SalesforceSObjectDescribe } from "./SalesforceOrgConnection.js";
 import type { SalesforceFieldMetadataService } from "./SalesforceFieldMetadataService.js";
+import { recordSoqlCount } from "../services/SoqlPerformanceMetrics.js";
 
 /**
  * Shared, conservative UserFieldAccess gateway for SOQL, Stack Trace,
@@ -119,7 +120,8 @@ export class SalesforceUserFieldAccessGateway {
 
   private cached<T>(store: Map<string, CacheEntry<T>>, key: string, load: () => Promise<T>): Promise<T> {
     const hit = store.get(key);
-    if (hit && hit.expires > Date.now()) return hit.promise;
+    if (hit && hit.expires > Date.now()) { recordSoqlCount("org.user_field_gateway.cache_hits"); return hit.promise; }
+    recordSoqlCount("org.user_field_gateway.cache_misses");
     if (store.size > MAX_CACHE_ENTRIES) store.clear();
     const promise = load().catch((error: unknown) => {
       store.delete(key); // Do not persist network/metadata failures.
@@ -134,6 +136,7 @@ export class SalesforceUserFieldAccessGateway {
     return this.cached(this.fullCache, cacheKey, async () => {
       const soql =
         `SELECT UserId, FieldDefinition.QualifiedApiName, IsAccessible, IsUpdatable FROM UserFieldAccess WHERE User.Id = '${userId}' AND FieldDefinition.EntityDefinition.QualifiedApiName = '${object}'`;
+      recordSoqlCount("org.user_field_gateway.object_wide_queries");
       const records = await this.connection.queryAll<UserAccessRow>(soql, "tooling", 20000);
       const byField = new Map<string, UserAccessRow[]>();
       for (const row of records) {
@@ -153,6 +156,7 @@ export class SalesforceUserFieldAccessGateway {
     return this.cached(this.exactCache, key, async () => {
       const soql =
         `SELECT UserId, IsAccessible, IsUpdatable, FieldDefinition.QualifiedApiName FROM UserFieldAccess WHERE User.Id = '${userId}' AND FieldDefinition.EntityDefinition.QualifiedApiName = '${object}' AND FieldDefinition.QualifiedApiName = '${field}'`;
+      recordSoqlCount("org.user_field_gateway.exact_queries");
       return toAccess(await this.connection.queryAll<UserAccessRow>(soql, "tooling", 5), userId, field);
     });
   }
@@ -161,7 +165,9 @@ export class SalesforceUserFieldAccessGateway {
     try {
       const record = (await this.allFields(userId, object)).get(norm(field));
       if (record) return record; // Direct denials and conflicts always win.
+      recordSoqlCount("org.user_field_gateway.missing_row_fallbacks");
     } catch {
+      recordSoqlCount("org.user_field_gateway.object_wide_failures");
       // Some orgs reject object-wide queries. A field-specific query may work.
     }
     try {
