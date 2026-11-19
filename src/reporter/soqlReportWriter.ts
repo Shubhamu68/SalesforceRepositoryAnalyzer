@@ -75,6 +75,7 @@ export interface PersonaHighPriorityReportSummary {
 export async function writeAllPersonasHighPriorityReport(
   outputDirectory: string,
   sections: readonly PersonaHighPriorityReportSection[],
+  verificationMode: "ORG_AND_REPOSITORY" | "REPOSITORY_ONLY" = "ORG_AND_REPOSITORY",
 ): Promise<{
   summaryReportPath: string;
   totalHighPriorityFindings: number;
@@ -123,8 +124,9 @@ export async function writeAllPersonasHighPriorityReport(
     "Only confirmed High-criticality references are included. Low and Unable to verify are excluded; duplicate findings across personas are retained.";
   sheet.getCell("A4").font = { italic: true, size: 10, color: { argb: "FF60748D" } };
   sheet.mergeCells("A5:H5");
-  sheet.getCell("A5").value =
-    "Section headers repeat for each persona; Excel's single global auto-filter is disabled to avoid filtering across different sections.";
+  sheet.getCell("A5").value = verificationMode === "REPOSITORY_ONLY"
+    ? "REPOSITORY-ONLY: Salesforce Read access could not be verified. No confirmed High findings does NOT mean permissions are safe."
+    : "Section headers repeat for each persona; Excel's single global auto-filter is disabled to avoid filtering across different sections.";
   sheet.getCell("A5").font = { italic: true, size: 10, color: { argb: "FF60748D" } };
 
   for (const [index, section] of grouped.entries()) {
