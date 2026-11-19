@@ -22,6 +22,10 @@ const READ_BATCH_SIZE = 12;
  */
 const FILE_CONCURRENCY = 16;
 const MAX_REPOSITORIES = 2;
+// On Windows, rapid same-length rewrites can retain the exact same mtime and
+// ctime within the filesystem's timestamp-resolution window. Treat very
+// recently modified files as unstable and parse them again until aged out.
+const FILE_TIMESTAMP_SAFETY_NS = 2_000_000_000n;
 type CachedApexFile = { fingerprint: string; queries: SoqlQuery[] };
 const indexedRepositories = new Map<string, Map<string, CachedApexFile>>();
 const inFlightScans = new Map<string, Promise<SoqlQuery[]>>();
@@ -70,7 +74,10 @@ async function scanRepositoryApex(repositoryPath: string): Promise<SoqlQuery[]> 
       const info = await stat(filePath, { bigint: true });
       const fingerprint = `${info.size}:${info.mtimeNs}:${info.ctimeNs}`;
       const cached = previous?.get(filePath);
-      if (cached?.fingerprint === fingerprint) {
+      const nowNs = BigInt(Date.now()) * 1_000_000n;
+      const lastChanged = info.ctimeNs > info.mtimeNs ? info.ctimeNs : info.mtimeNs;
+      const timestampStable = nowNs - lastChanged >= FILE_TIMESTAMP_SAFETY_NS;
+      if (cached?.fingerprint === fingerprint && timestampStable) {
         reused++;
         return [filePath, cached];
       }
