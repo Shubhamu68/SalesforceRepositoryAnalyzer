@@ -13,3 +13,5 @@ config/field-permissionability.csv
 config/field-permissionability.local.json
 config/relationship-schema.json
 config/*.local.json
+# Generated Electron desktop builds
+/release/
