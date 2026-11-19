@@ -52,10 +52,9 @@ test("COUNT() and COUNT(Id) preserve object Read without a spurious field FLS fi
     const q = parse("SELECT " + expression + " FROM Account");
     const inventory = buildSoqlFieldInventory([q], new RelationshipMap());
     assert.ok(inventory.has("Account"));
-    // Account.Id is in the snapshot and explicitly non-permissionable.
-    // Retaining the Id reference is safe; access evaluation must not issue FLS.
-    assert.deepEqual([...inventory.get("Account")!.keys()],
-      expression === "COUNT()" ? [] : ["id"]);
+    // Id is intrinsic to an SObject: COUNT() and COUNT(Id) require object
+    // Read, not an independent field-level Read permission.
+    assert.deepEqual([...inventory.get("Account")!.keys()], []);
     assert.equal(inventory.objectReferences.get("Account")?.length, 1);
   }
 });
