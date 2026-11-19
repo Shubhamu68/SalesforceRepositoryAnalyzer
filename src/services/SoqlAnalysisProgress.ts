@@ -155,7 +155,16 @@ export class SoqlProgressRegistry {
     if (!UUID.test(id)) throw new Error("Invalid progress request identifier.");
     this.prune();
     if (this.entries.has(id)) throw new Error("Progress request identifier already exists.");
-    if (this.entries.size >= MAX_JOBS) throw new Error("Too many retained progress jobs.");
+    if (this.entries.size >= MAX_JOBS) {
+      // Evict the oldest finished job first; do not reject new analyses simply
+      // because several quick reports finished within the retention window.
+      for (const [previousId, entry] of this.entries) {
+        if (entry.finishedAt === undefined) continue;
+        this.entries.delete(previousId);
+        break;
+      }
+    }
+    if (this.entries.size >= MAX_JOBS) throw new Error("Too many active progress jobs.");
     const progress = new SoqlAnalysisProgress(kind, this.now);
     this.entries.set(id, { progress });
     return progress;
