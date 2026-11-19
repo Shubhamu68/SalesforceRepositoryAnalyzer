@@ -26,7 +26,7 @@ test("one root query retains two sibling relationship SELECTs", () => {
   assert.equal(q.subqueries.length, 2);
   assert.deepEqual(q.subqueries.map(s => s.kind), ["CHILD", "CHILD"]);
   assert.deepEqual(q.subqueries.map(s => s.relationshipName), ["Contacts", "Opportunities"]);
-  assert.deepEqual(names(q), ["Account.Id", "Contact.LastName", "Opportunity.StageName"]);
+  assert.deepEqual(names(q), ["Contact.LastName", "Opportunity.StageName"]);\n  assert.ok(collectQueryFields(q, graph()).queriedObjects.includes("Account"), "root object Read remains required");
 });
 test("nested SELECT scopes resolve child of child", () => {
   const q = parse("SELECT Name, (SELECT LastName, (SELECT Subject FROM Cases) FROM Contacts) FROM Account");
