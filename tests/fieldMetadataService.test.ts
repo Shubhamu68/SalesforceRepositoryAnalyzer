@@ -130,10 +130,10 @@ test("successful online object metadata excludes absent fields instead of trusti
   assert.equal(org.metadataCalls, 1);
 });
 
-test("failed live metadata uses a known offline snapshot rather than claiming a grant for unknown fields", async () => {
+test("failed live metadata without an explicitly scoped cache stays UNKNOWN, never grants access", async () => {
   const org = makeOrg({ denyMetadata: true });
   const service = new SalesforceFieldMetadataService(org.connection);
-  assert.deepEqual(await service.getField("Account", "Name"), { permissionable: false, source: "SNAPSHOT" });
+  assert.deepEqual(await service.getField("Account", "Name"), { permissionable: undefined, source: "UNKNOWN" });
   assert.deepEqual(await service.getField("User", "FirstName"), { permissionable: undefined, source: "UNKNOWN" });
   assert.equal(org.metadataCalls, 2, "failed per-object queries may be cached independently");
 });
