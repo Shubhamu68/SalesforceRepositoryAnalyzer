@@ -1,5 +1,6 @@
 import type { SalesforceOrgConnection } from "./SalesforceOrgConnection.js";
 import { getFieldPermissionability } from "../analyzer/fieldPermissionability.js";
+import { recordSoqlCount } from "../services/SoqlPerformanceMetrics.js";
 
 /**
  * One metadata source for every analysis workflow:
@@ -70,7 +71,8 @@ export class SalesforceFieldMetadataService {
     if (!VALID_NAME.test(object) || !this.connection) return null;
     const key = this.cacheKey(object);
     const cached = this.cachedObjects.get(key);
-    if (cached && cached.until > Date.now()) return cached.value;
+    if (cached && cached.until > Date.now()) { recordSoqlCount("org.field_metadata.cache_hits"); return cached.value; }
+    recordSoqlCount("org.field_metadata.cache_misses");
     if (this.cachedObjects.size >= MAX_ENTRIES) this.cachedObjects.clear();
 
     const entry: CacheEntry = { until: Date.now() + TTL_MS, value: Promise.resolve(null) };
@@ -92,6 +94,7 @@ export class SalesforceFieldMetadataService {
         }
         return result;
       } catch {
+        recordSoqlCount("org.field_metadata.query_failures");
         // Tooling EntityParticle can require View Setup and Configuration.
         // Do not persist a failed remote query as an authoritative empty map.
         entry.until = Date.now() + ERROR_TTL_MS;

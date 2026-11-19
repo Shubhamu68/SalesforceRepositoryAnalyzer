@@ -135,8 +135,8 @@ function clauseFields(query: string, kind: "WHERE" | "ORDER BY" | "GROUP BY" | "
 }
 
 function scopeFieldLine(text: string, lineNumber: number, field: string,
-  context?: SoqlFieldContext): number {
-  const visible = maskNestedSelects(text);
+  context?: SoqlFieldContext, maskedScope?: string): number {
+  const visible = maskedScope ?? maskNestedSelects(text);
   const safe = field.replace(/[^A-Za-z0-9_]/g, "\\$&");
   const pattern = new RegExp("\\b" + safe + "\\b", "i");
   const clauses: Record<SoqlFieldContext, RegExp> = {
@@ -161,6 +161,17 @@ export function collectQueryFields(query: SoqlQuery, relationships: Relationship
   const unresolvedEntries: UnresolvedQueryReference[] = [];
   const limitations: string[] = [];
   const scopes: QueryFieldCollection["scopes"] = [];
+  // Rich SELECTs may have dozens of field references. Reusing the masked
+  // scope avoids rescanning/parsing its nested subqueries once per field.
+  const maskedScopes = new Map<string, string>();
+  const masked = (text: string): string => {
+    let value = maskedScopes.get(text);
+    if (value === undefined) {
+      value = maskNestedSelects(text);
+      maskedScopes.set(text, value);
+    }
+    return value;
+  };
   const unresolved = (kind: "FIELD" | "RELATIONSHIP", baseObject: string,
     fieldPath: string, lineNumber: number, path: string, message: string): void => {
     if (isDataAccessAnalysisObject(baseObject)) {
@@ -192,7 +203,7 @@ export function collectQueryFields(query: SoqlQuery, relationships: Relationship
     if (isIgnoredField(resolved.field, resolved.object)) return;
     const field: ScopedFieldReference = {
       object: resolved.object, field: resolved.field, source,
-      lineNumber: scopeFieldLine(text, lineNumber, candidate, usageContext),
+      lineNumber: scopeFieldLine(text, lineNumber, candidate, usageContext, masked(text)),
       queryLineNumber: query.lineNumber, relationshipPath: path,
       ...(usageContext ? { usageContext } : {}),
       ...(functionName ? { functionName } : {}),

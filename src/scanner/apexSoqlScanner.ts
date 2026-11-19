@@ -1,122 +1,149 @@
 import {
   readdir,
   readFile,
+  stat,
 } from "node:fs/promises";
 import path from "node:path";
 import { classifySoqlMode } from "../analyzer/soqlExecutionMode.js";
 import { parseNestedSoql, maskSoql } from "../analyzer/nestedSoqlScopes.js";
 
 import type { SoqlQuery } from "../models/SoqlQuery.js";
+import { recordSoqlCount, timeSoqlPhase } from "../services/SoqlPerformanceMetrics.js";
 
-export async function scanApexSoql(
-  repositoryPath: string
-): Promise<SoqlQuery[]> {
-  const apexFiles =
-    await findApexClasses(
-      repositoryPath
-    );
+// Bound filesystem concurrency: improve cold scans without opening hundreds of
+// Apex files simultaneously or changing deterministic query ordering.
+const READ_BATCH_SIZE = 12;
 
-  const queries: SoqlQuery[] = [];
+/**
+ * Preserve the original repository-wide semantics (including class exclusion
+ * and source ordering) while avoiding repeated Apex parsing across personas.
+ * Every call stats every discovered class, so changed, deleted and newly added
+ * files invalidate the cached per-file parse without a stale global TTL.
+ */
+const FILE_CONCURRENCY = 16;
+const MAX_REPOSITORIES = 2;
+// On Windows, rapid same-length rewrites can retain the exact same mtime and
+// ctime within the filesystem's timestamp-resolution window. Treat very
+// recently modified files as unstable and parse them again until aged out.
+const FILE_TIMESTAMP_SAFETY_NS = 2_000_000_000n;
+type CachedApexFile = { fingerprint: string; queries: SoqlQuery[] };
+const indexedRepositories = new Map<string, Map<string, CachedApexFile>>();
+const inFlightScans = new Map<string, Promise<SoqlQuery[]>>();
 
-  for (const filePath of apexFiles) {
-    const source =
-      await readFile(
-        filePath,
-        "utf-8"
-      );
-
-    const fileQueries =
-      extractSoqlQueries(
-        source,
-        filePath
-      );
-
-    queries.push(
-      ...fileQueries
-    );
-  }
-
-  return queries.sort(
-    (a, b) =>
-      a.filePath.localeCompare(
-        b.filePath
-      ) ||
-      a.lineNumber -
-        b.lineNumber
-  );
-}
-
-async function findApexClasses(
-  repositoryPath: string
-): Promise<string[]> {
-  const results: string[] = [];
-
-  await walkDirectory(
-    repositoryPath,
-    results
-  );
-
+async function parallelMap<T, R>(
+  input: readonly T[], task: (value: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(input.length);
+  let position = 0;
+  await Promise.all(Array.from({ length: Math.min(FILE_CONCURRENCY, input.length) }, async () => {
+    while (position < input.length) {
+      const index = position++;
+      results[index] = await task(input[index]);
+    }
+  }));
   return results;
 }
 
-async function walkDirectory(
-  directoryPath: string,
-  results: string[]
-): Promise<void> {
-  const entries =
-    await readdir(
-      directoryPath,
-      { withFileTypes: true }
-    );
-
-  for (const entry of entries) {
-    const fullPath =
-      path.join(
-        directoryPath,
-        entry.name
-      );
-
-    if (entry.isDirectory()) {
-      await walkDirectory(
-        fullPath,
-        results
-      );
-
-      continue;
-    }
-
-    if (!entry.isFile()) {
-      continue;
-    }
-
-    if (
-      !entry.name
-        .toLowerCase()
-        .endsWith(".cls")
-    ) {
-      continue;
-    }
-
-    /*
-     * Exclude test classes.
-     */
-    if (
-      entry.name
-        .toLowerCase()
-        .includes("test")
-    ) {
-      continue;
-    }
-
-    results.push(fullPath);
+export async function scanApexSoql(repositoryPath: string): Promise<SoqlQuery[]> {
+  const root = path.resolve(repositoryPath);
+  const pending = inFlightScans.get(root);
+  if (pending) {
+    recordSoqlCount("scanner.inflight_reuse");
+    return pending;
+  }
+  const work = scanRepositoryApex(root);
+  inFlightScans.set(root, work);
+  try {
+    return await work;
+  } finally {
+    if (inFlightScans.get(root) === work) inFlightScans.delete(root);
   }
 }
 
- export function extractSoqlQueries(
+async function scanRepositoryApex(repositoryPath: string): Promise<SoqlQuery[]> {
+  const apexFiles = await timeSoqlPhase("scanner.discovery", () => findApexClasses(repositoryPath));
+  apexFiles.sort((a, b) => a.localeCompare(b));
+  recordSoqlCount("scanner.apex_files", apexFiles.length);
+
+  const previous = indexedRepositories.get(repositoryPath);
+  let reused = 0;
+  const currentEntries = await timeSoqlPhase("scanner.stat_and_parse", () =>
+    parallelMap(apexFiles, async (filePath): Promise<[string, CachedApexFile]> => {
+      // Nanosecond mtime+ctime and size detect ordinary source edits even when
+      // content length is unchanged; directory traversal detects additions/deletions.
+      // Cold scans need both source bytes and metadata anyway. Fetch them
+      // concurrently rather than serializing thousands of stat+read pairs.
+      // Warm scans stat first, avoiding file reads when reuse is safe.
+      const cold = previous ? undefined : await Promise.all([
+        stat(filePath, { bigint: true }), readFile(filePath, "utf8"),
+      ]);
+      const info = cold ? cold[0] : await stat(filePath, { bigint: true });
+      const fingerprint = `${info.size}:${info.mtimeNs}:${info.ctimeNs}`;
+      const cached = previous?.get(filePath);
+      const nowNs = BigInt(Date.now()) * 1_000_000n;
+      const lastChanged = info.ctimeNs > info.mtimeNs ? info.ctimeNs : info.mtimeNs;
+      const timestampStable = nowNs - lastChanged >= FILE_TIMESTAMP_SAFETY_NS;
+      if (cached?.fingerprint === fingerprint && timestampStable) {
+        reused++;
+        return [filePath, cached];
+      }
+      const source = cold ? cold[1] : await readFile(filePath, "utf8");
+      return [filePath, { fingerprint, queries: extractSoqlQueries(source, filePath) }];
+    }));
+  recordSoqlCount("scanner.reused_files", reused);
+  recordSoqlCount("scanner.parsed_files", apexFiles.length - reused);
+  const nextIndex = new Map(currentEntries);
+  // Only publish a complete successful snapshot. Failed reads do not poison
+  // the previous cache, and deleted files are removed from the new index.
+  if (indexedRepositories.size >= MAX_REPOSITORIES && !indexedRepositories.has(repositoryPath)) {
+    indexedRepositories.delete(indexedRepositories.keys().next().value!);
+  }
+  indexedRepositories.set(repositoryPath, nextIndex);
+  const queries: SoqlQuery[] = [];
+  for (const [, entry] of currentEntries) queries.push(...entry.queries);
+  return queries.sort((a, b) =>
+    a.filePath.localeCompare(b.filePath) || a.lineNumber - b.lineNumber);
+}
+
+/**
+ * A breadth-first directory walker with bounded parallel readdir operations.
+ * Unlike an unbounded recursive Promise.all, concurrency and memory stay
+ * controlled across large metadata repositories.
+ */
+async function findApexClasses(repositoryPath: string): Promise<string[]> {
+  const results: string[] = [];
+  let directories = [repositoryPath];
+  while (directories.length) {
+    const currentLevel = directories;
+    directories = [];
+    const listed = await parallelMap(currentLevel, async directoryPath => ({
+      directoryPath,
+      entries: await readdir(directoryPath, { withFileTypes: true }),
+    }));
+    for (const { directoryPath, entries } of listed) {
+      for (const entry of entries) {
+        const fullPath = path.join(directoryPath, entry.name);
+        if (entry.isDirectory()) {
+          directories.push(fullPath);
+        } else if (entry.isFile() && entry.name.toLowerCase().endsWith(".cls") &&
+                   !entry.name.toLowerCase().includes("test")) {
+          results.push(fullPath);
+        }
+      }
+    }
+  }
+  return results;
+}
+
+export function extractSoqlQueries(
   source: string,
   filePath: string
 ): SoqlQuery[] {
   const queries: SoqlQuery[] = [];
+  // The scanner only recognizes static bracketed [SELECT ...] queries.
+  // Most Apex classes have none. Skip expensive whole-file masking for them.
+  // A false positive in a comment/string still gets safely masked below.
+  if (!/\[\s*SELECT\b/i.test(source)) return queries;
   // Mask Apex strings/comments once: repeated prefix rescans were quadratic.
   const visible = maskSoql(source);
 
@@ -184,28 +211,11 @@ function findNextQueryOpeningBracket(
   source: string,
   startIndex: number
 ): number {
-  for (
-    let index = startIndex;
-    index < source.length;
-    index++
-  ) {
-    if (source[index] !== "[") {
-      continue;
-    }
-
-    const remainder =
-      source.slice(index + 1);
-
-    if (
-      /^\s*SELECT\b/i.test(
-        remainder
-      )
-    ) {
-      return index;
-    }
-  }
-
-  return -1;
+  // A single regex scan avoids allocating a suffix string for every Apex
+  // array/list bracket in files that also contain static SOQL.
+  const pattern = /\[\s*SELECT\b/gi;
+  pattern.lastIndex = startIndex;
+  return pattern.exec(source)?.index ?? -1;
 }
 
 function findMatchingBracket(

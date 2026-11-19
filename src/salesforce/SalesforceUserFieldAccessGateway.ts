@@ -1,5 +1,6 @@
 import type { SalesforceOrgConnection, SalesforceSObjectDescribe } from "./SalesforceOrgConnection.js";
 import type { SalesforceFieldMetadataService } from "./SalesforceFieldMetadataService.js";
+import { recordSoqlCount } from "../services/SoqlPerformanceMetrics.js";
 
 /**
  * Shared, conservative UserFieldAccess gateway for SOQL, Stack Trace,
@@ -51,11 +52,10 @@ const isCompoundType = (type: string | undefined): boolean =>
   ["address", "location", "name"].includes(type?.toLowerCase() ?? "");
 
 /** Only a recognized compound field in Describe may become an FLS parent. */
-export function compoundParentFromDescribe(
-  describe: Pick<SalesforceSObjectDescribe, "fields">,
+function compoundParentFromIndexedDescribe(
+  fields: ReadonlyMap<string, DescribeField>,
   requestedField: string,
 ): string | null {
-  const fields = new Map(describe.fields.filter((item) => typeof item.name === "string").map((item) => [norm(item.name), item]));
   const component = fields.get(norm(requestedField));
   if (!component) return null;
   if (typeof component.compoundFieldName === "string" && component.compoundFieldName.trim()) {
@@ -82,6 +82,16 @@ export function compoundParentFromDescribe(
     if (parent?.type?.toLowerCase() === "address") return parent.name;
   }
   return null;
+}
+
+/** Public single-field helper; the full-object path shares one index instead. */
+export function compoundParentFromDescribe(
+  describe: Pick<SalesforceSObjectDescribe, "fields">,
+  requestedField: string,
+): string | null {
+  const index = new Map(describe.fields.filter((item) => typeof item.name === "string")
+    .map((item) => [norm(item.name), item]));
+  return compoundParentFromIndexedDescribe(index, requestedField);
 }
 
 function toAccess(rows: UserAccessRow[], userId: string, field: string): DirectAccess {
@@ -119,7 +129,8 @@ export class SalesforceUserFieldAccessGateway {
 
   private cached<T>(store: Map<string, CacheEntry<T>>, key: string, load: () => Promise<T>): Promise<T> {
     const hit = store.get(key);
-    if (hit && hit.expires > Date.now()) return hit.promise;
+    if (hit && hit.expires > Date.now()) { recordSoqlCount("org.user_field_gateway.cache_hits"); return hit.promise; }
+    recordSoqlCount("org.user_field_gateway.cache_misses");
     if (store.size > MAX_CACHE_ENTRIES) store.clear();
     const promise = load().catch((error: unknown) => {
       store.delete(key); // Do not persist network/metadata failures.
@@ -134,6 +145,7 @@ export class SalesforceUserFieldAccessGateway {
     return this.cached(this.fullCache, cacheKey, async () => {
       const soql =
         `SELECT UserId, FieldDefinition.QualifiedApiName, IsAccessible, IsUpdatable FROM UserFieldAccess WHERE User.Id = '${userId}' AND FieldDefinition.EntityDefinition.QualifiedApiName = '${object}'`;
+      recordSoqlCount("org.user_field_gateway.object_wide_queries");
       const records = await this.connection.queryAll<UserAccessRow>(soql, "tooling", 20000);
       const byField = new Map<string, UserAccessRow[]>();
       for (const row of records) {
@@ -153,6 +165,7 @@ export class SalesforceUserFieldAccessGateway {
     return this.cached(this.exactCache, key, async () => {
       const soql =
         `SELECT UserId, IsAccessible, IsUpdatable, FieldDefinition.QualifiedApiName FROM UserFieldAccess WHERE User.Id = '${userId}' AND FieldDefinition.EntityDefinition.QualifiedApiName = '${object}' AND FieldDefinition.QualifiedApiName = '${field}'`;
+      recordSoqlCount("org.user_field_gateway.exact_queries");
       return toAccess(await this.connection.queryAll<UserAccessRow>(soql, "tooling", 5), userId, field);
     });
   }
@@ -161,7 +174,9 @@ export class SalesforceUserFieldAccessGateway {
     try {
       const record = (await this.allFields(userId, object)).get(norm(field));
       if (record) return record; // Direct denials and conflicts always win.
+      recordSoqlCount("org.user_field_gateway.missing_row_fallbacks");
     } catch {
+      recordSoqlCount("org.user_field_gateway.object_wide_failures");
       // Some orgs reject object-wide queries. A field-specific query may work.
     }
     try {
@@ -175,9 +190,14 @@ export class SalesforceUserFieldAccessGateway {
     const key = this.scope() + "|" + norm(object);
     return this.cached(this.parentCache, key, async () => {
       const describe = await this.connection.describeSObject(object);
+      // The previous per-field helper rebuilt a Map of *every field* for
+      // each field in the Describe. On large objects that was O(fields²).
+      // A single shared index makes this pass O(fields).
+      const index = new Map(describe.fields.filter((item) => typeof item.name === "string")
+        .map((item) => [norm(item.name), item]));
       const parents = new Map<string, string>();
       for (const field of describe.fields) {
-        const parent = compoundParentFromDescribe(describe, field.name);
+        const parent = compoundParentFromIndexedDescribe(index, field.name);
         if (parent) parents.set(norm(field.name), parent);
       }
       return parents;

@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import ExcelJS from "exceljs";
+import { timeSoqlPhase, timeSoqlSync } from "../services/SoqlPerformanceMetrics.js";
 
 import {
   SoqlSecurityFinding,
@@ -30,9 +31,9 @@ export async function writeSoqlReport(
 
   // Include High, Low and Unable to verify. A successful Salesforce
   // verification is evidence worth keeping, not an error to suppress.
-  const conciseFindings = buildConciseFindings(
+  const conciseFindings = timeSoqlSync("excel.grouping", () => buildConciseFindings(
     findings.filter((finding) => !isMetadataObject(finding.object))
-  );
+  ));
 
   const baseName =
     `soql-fls-${safePersonaName}-${timestamp}`;
@@ -351,9 +352,9 @@ async function writeSummaryWorkbook(
     to: `H${Math.max(6, summarySheet.rowCount)}`,
   };
 
-  await workbook.xlsx.writeFile(
+  await timeSoqlPhase("excel.serialization", () => workbook.xlsx.writeFile(
     filePath
-  );
+  ));
 }
 
 // --------------------------------------------------

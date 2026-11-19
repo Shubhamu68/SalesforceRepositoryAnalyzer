@@ -3,6 +3,7 @@ import { readFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import { XMLParser } from "fast-xml-parser";
 import { listPermissionabilitySnapshotFields } from "./fieldPermissionability.js";
+import { recordSoqlCount } from "../services/SoqlPerformanceMetrics.js";
 
 const parser = new XMLParser({ ignoreAttributes: true });
 const norm = (value: string) => value.trim().toLowerCase();
@@ -224,20 +225,31 @@ export async function buildRelationshipMap(objectsDirectory: string): Promise<Re
     let fieldEntries;
     try { fieldEntries = await readdir(fieldsDirectory, { withFileTypes: true }); }
     catch { continue; }
-    for (const fieldEntry of fieldEntries) {
-      if (!fieldEntry.isFile() || !fieldEntry.name.endsWith(".field-meta.xml")) continue;
-      const field = parser.parse(await readFile(path.join(fieldsDirectory, fieldEntry.name), "utf8")).CustomField;
-      if (!field) continue;
-      const targets = normalizeStringArray(field.referenceTo);
-      if (!targets.length) continue;
-      const sourceField = fieldEntry.name.slice(0, -".field-meta.xml".length);
-      // SOQL parent relationship name for CustomField Foo__c is Foo__r.
-      const parentName = sourceField.endsWith("__c") ? `${sourceField.slice(0, -3)}__r`
-        : sourceField.endsWith("Id") ? sourceField.slice(0, -2) : undefined;
-      if (parentName) graph.addParent(childObject, parentName, targets, sourceField);
-      // XML relationshipName is the inverse parent-to-child relationship name.
-      const childName = typeof field.relationshipName === "string" ? field.relationshipName.trim() : "";
-      if (childName) for (const parent of targets) graph.addChild(parent, childName, childObject, sourceField);
+    // Read/parse field XML with bounded IO concurrency, then apply edges in
+    // original directory order. This avoids thousands of serial file reads
+    // without changing relationship override/ambiguity semantics.
+    const fieldFiles = fieldEntries.filter((entry) =>
+      entry.isFile() && entry.name.endsWith(".field-meta.xml"));
+    recordSoqlCount("relationships.field_xml", fieldFiles.length);
+    for (let offset = 0; offset < fieldFiles.length; offset += 12) {
+      const batch = fieldFiles.slice(offset, offset + 12);
+      const parsed = await Promise.all(batch.map(async (entry) => ({
+        name: entry.name,
+        field: parser.parse(await readFile(path.join(fieldsDirectory, entry.name), "utf8")).CustomField,
+      })));
+      for (const { name, field } of parsed) {
+        if (!field) continue;
+        const targets = normalizeStringArray(field.referenceTo);
+        if (!targets.length) continue;
+        const sourceField = name.slice(0, -".field-meta.xml".length);
+        // SOQL parent relationship name for CustomField Foo__c is Foo__r.
+        const parentName = sourceField.endsWith("__c") ? `${sourceField.slice(0, -3)}__r`
+          : sourceField.endsWith("Id") ? sourceField.slice(0, -2) : undefined;
+        if (parentName) graph.addParent(childObject, parentName, targets, sourceField);
+        // XML relationshipName is the inverse parent-to-child relationship name.
+        const childName = typeof field.relationshipName === "string" ? field.relationshipName.trim() : "";
+        if (childName) for (const parent of targets) graph.addChild(parent, childName, childObject, sourceField);
+      }
     }
   }
 

@@ -1,5 +1,6 @@
 import { SalesforceCliAuthProvider, SalesforceCliLoginCancelledError, type CliOrg, type CliWebLogin } from "./SalesforceCliAuthProvider.js";
 import { timedAuthStep } from "./SalesforceAuthTiming.js";
+import { recordSoqlCount, timeSoqlOrgQuery, timeSoqlPhase } from "../services/SoqlPerformanceMetrics.js";
 /**
  * Local Salesforce CLI browser authorization: no Analyzer-owned client secret
  * or integration Run As identity. Tokens stay in backend process memory.
@@ -430,6 +431,7 @@ export class SalesforceOrgConnection {
     soql: string, api: SalesforceQueryApi, limit = 20000,
     minimumVersion?: "v63.0",
   ): Promise<T[]> {
+    return timeSoqlOrgQuery(soql, async () => {
     if (api !== "data" && api !== "tooling") throw new SalesforceConnectionError("Invalid API type.", 400);
     if (!/^SELECT\s/i.test(soql.trim()) || soql.length > MAX_QUERY_LENGTH || soql.includes(";")) {
       throw new SalesforceConnectionError("Only a single read-only SELECT SOQL query is supported.", 400);
@@ -495,6 +497,7 @@ export class SalesforceOrgConnection {
       }
       nextPath = page.nextRecordsUrl;
     }
+    });
   }
 
   /**
@@ -508,11 +511,18 @@ export class SalesforceOrgConnection {
     }
     const key = objectName.toLowerCase();
     const cached = this.describeCache.get(key);
-    if (cached && cached.expires > Date.now()) return cached.value;
+    if (cached && cached.expires > Date.now()) {
+      recordSoqlCount("org.describe.cache_hits");
+      return cached.value;
+    }
     const inflight = this.pendingDescribes.get(key);
-    if (inflight) return inflight;
+    if (inflight) {
+      recordSoqlCount("org.describe.inflight_hits");
+      return inflight;
+    }
+    recordSoqlCount("org.describe.cache_misses");
 
-    const promise = (async () => {
+    const promise = timeSoqlPhase("org.describe.uncached_cumulative_ms", async () => {
       await this.connect();
       const originEpoch = this.epoch;
       const request = async (): Promise<Response> => {
@@ -526,9 +536,11 @@ export class SalesforceOrgConnection {
       };
       let response: Response;
       try {
+        recordSoqlCount("org.describe.http_requests");
         response = await request();
         if (response.status === 401) {
           await this.connect(true);
+          recordSoqlCount("org.describe.http_requests");
           response = await request();
         }
       } catch (error) {
@@ -548,7 +560,7 @@ export class SalesforceOrgConnection {
       }
       this.describeCache.set(key, { expires: Date.now() + 10 * 60 * 1000, value: data });
       return data;
-    })();
+    });
     this.pendingDescribes.set(key, promise);
     try { return await promise; }
     finally { this.pendingDescribes.delete(key); }
