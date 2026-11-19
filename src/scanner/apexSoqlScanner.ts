@@ -127,6 +127,10 @@ export function extractSoqlQueries(
   filePath: string
 ): SoqlQuery[] {
   const queries: SoqlQuery[] = [];
+  // The scanner only recognizes static bracketed [SELECT ...] queries.
+  // Most Apex classes have none. Skip expensive whole-file masking for them.
+  // A false positive in a comment/string still gets safely masked below.
+  if (!/\[\s*SELECT\b/i.test(source)) return queries;
   // Mask Apex strings/comments once: repeated prefix rescans were quadratic.
   const visible = maskSoql(source);
 
@@ -194,28 +198,11 @@ function findNextQueryOpeningBracket(
   source: string,
   startIndex: number
 ): number {
-  for (
-    let index = startIndex;
-    index < source.length;
-    index++
-  ) {
-    if (source[index] !== "[") {
-      continue;
-    }
-
-    const remainder =
-      source.slice(index + 1);
-
-    if (
-      /^\s*SELECT\b/i.test(
-        remainder
-      )
-    ) {
-      return index;
-    }
-  }
-
-  return -1;
+  // A single regex scan avoids allocating a suffix string for every Apex
+  // array/list bracket in files that also contain static SOQL.
+  const pattern = /\[\s*SELECT\b/gi;
+  pattern.lastIndex = startIndex;
+  return pattern.exec(source)?.index ?? -1;
 }
 
 function findMatchingBracket(
