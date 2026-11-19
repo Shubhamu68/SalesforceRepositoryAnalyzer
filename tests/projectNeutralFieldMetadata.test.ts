@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { OptionalFieldMetadataCache, FIELD_CACHE_MAX_AGE_MS } from "../src/services/OptionalFieldMetadataCache.js";
 import { SalesforceFieldMetadataService } from "../src/salesforce/SalesforceFieldMetadataService.js";
+import { SalesforceUserFieldAccessGateway } from "../src/salesforce/SalesforceUserFieldAccessGateway.js";
 import type { SalesforceOrgConnection } from "../src/salesforce/SalesforceOrgConnection.js";
 import { buildRelationshipMap } from "../src/analyzer/salesforceRelationshipResolver.js";
 import { createPersonaAccessEvaluator } from "../src/analyzer/personaAccessEvaluator.js";
@@ -104,6 +105,23 @@ test("successful current-org EntityParticle always wins over opt-in offline cach
     assert.deepEqual(await service.getField("Account", "Industry"),
       { permissionable: undefined, source: "UNKNOWN" },
       "absent from successful live result must not be borrowed from cache");
+  });
+});
+
+test("offline cache metadata is not misreported as live user-level Salesforce permission", async () => {
+  await withRoot(async root => {
+    const filename = path.join(root, "fields.local.json");
+    await writeFile(filename, JSON.stringify(cacheJson(ORG_A)));
+    const connection = {
+      status: { organizationId: ORG_A, instanceUrl: "https://example.my.salesforce.com" },
+      queryAll: async () => { throw new Error("Live metadata unavailable"); },
+      describeSObject: async () => { throw new Error("Describe unavailable"); },
+    } as unknown as SalesforceOrgConnection;
+    const metadata = new SalesforceFieldMetadataService(connection,
+      new OptionalFieldMetadataCache(filename, ORG_A, () => now));
+    const gateway = new SalesforceUserFieldAccessGateway(connection, metadata);
+    const result = await gateway.verifyUserField("005000000000001", "Account", "Name");
+    assert.deepEqual(result, { read: null, edit: null, nonPermissionableSource: "OPTIONAL_CACHE" });
   });
 });
 
