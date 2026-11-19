@@ -92,7 +92,7 @@ export async function writeAllPersonasHighPriorityReport(
     queryCount: section.queryCount,
     findings: buildConciseFindings(section.findings.filter(
       finding => finding.criticality === "High" && !isMetadataObject(finding.object),
-    )).filter(finding => finding.criticality === "High"),
+    )),
   })));
   const personas = grouped.map(section => ({
     personaName: section.personaName,
@@ -415,14 +415,7 @@ function appendSummaryFindingRows(sheet: ExcelJS.Worksheet, findings: ConciseFin
         finding.references
       );
   
-    const apexClasses =
-      groupedReferences
-        .map(
-          (reference) =>
-            `${reference.filePath} - Line Number ${reference.lineNumbers.join(", ")}`
-        )
-        .join("\n");
-  
+
     const row =
       sheet.addRow([
         finding.object,
