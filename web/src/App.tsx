@@ -1257,6 +1257,11 @@ function App() {
                     <div className="permission-row"><span>High Priority Occurrences</span><strong>{allPersonasResult.totalHighPriorityOccurrences}</strong></div>
                   </div>
                   <p className="soql-mode-explainer">Counts include each persona independently. Low and Unable to verify findings are not included in this report.</p>
+                  {allPersonasResult.verificationMode === "REPOSITORY_ONLY" && (
+                    <p className="soql-high-priority-warning" role="note">
+                      Repository-only analysis: Salesforce permissions were not verified. Zero High findings does not establish that access is safe.
+                    </p>
+                  )}
                 </div>
               </section>
             )}
