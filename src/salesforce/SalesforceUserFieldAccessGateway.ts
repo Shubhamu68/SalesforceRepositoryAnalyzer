@@ -227,8 +227,15 @@ export class SalesforceUserFieldAccessGateway {
         : { read: null, edit: null, nonPermissionableSource: "OPTIONAL_CACHE" };
     }
     const direct = await this.direct(userId, object, field);
-    if (direct.state !== "MISSING") return { read: direct.read, edit: direct.edit };
+    // A confirmed direct grant/denial always wins. A present row with null
+    // IsAccessible is not a denial: try a verified compound parent instead.
+    // Conflicting or failed direct evidence remains inconclusive.
+    if (direct.state === "INCONCLUSIVE" ||
+        (direct.state === "PRESENT" && direct.read !== null)) {
+      return { read: direct.read, edit: direct.edit };
+    }
     const parent = await this.compoundParent(object, field)
+      ?? await this.metadata?.getCompoundParent(object, field)
       ?? await this.metadata?.getCompoundNameParent(object, field) ?? null;
     if (!parent) return unknown;
     const parentAccess = await this.direct(userId, object, parent);
