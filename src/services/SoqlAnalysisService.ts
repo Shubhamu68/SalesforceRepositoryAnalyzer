@@ -124,7 +124,10 @@ export class SoqlAnalysisService {
    * Fail the entire report if a persona cannot be evaluated: never produce a
    * misleadingly incomplete "all personas" workbook.
    */
-  async analyzeAllHighPriority(personas: readonly Persona[]): Promise<AllPersonasHighPriorityResult> {
+  async analyzeAllHighPriority(
+    personas: readonly Persona[],
+    verificationMode: "ORG_AND_REPOSITORY" | "REPOSITORY_ONLY" = "ORG_AND_REPOSITORY",
+  ): Promise<AllPersonasHighPriorityResult> {
     if (personas.length === 0) throw new Error("No business personas are configured for SOQL analysis.");
     const names = new Set<string>();
     for (const persona of personas) {
@@ -162,7 +165,7 @@ export class SoqlAnalysisService {
       const outputDirectory = typeof this.outputDirectory === "function"
         ? this.outputDirectory() : this.outputDirectory;
       const report = await timeSoqlPhase("excel.total",
-        () => writeAllPersonasHighPriorityReport(outputDirectory, sections));
+        () => writeAllPersonasHighPriorityReport(outputDirectory, sections, verificationMode));
       return {
         reportPath: report.summaryReportPath,
         personaCount: sections.length,
