@@ -308,7 +308,7 @@ export async function buildRelationshipMap(
             }
           }
           for (const rel of Array.isArray(details.children) ? details.children : []) {
-            if (namePattern.test(rel.relationshipName) && namePattern.test(rel.childObject) &&
+            if (rel && namePattern.test(rel.relationshipName) && namePattern.test(rel.childObject) &&
               !graph.childObject(objectName, rel.relationshipName)) {
               graph.addChild(objectName, rel.relationshipName, rel.childObject, rel.sourceField ?? "");
             }
