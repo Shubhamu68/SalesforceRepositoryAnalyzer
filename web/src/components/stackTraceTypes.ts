@@ -6,7 +6,9 @@ export type Missing = {
   reason: "OBJECT_READ" | "FIELD_READ";
   orgOutcome?: "DENIED" | "UNVERIFIED";
   orgMessage?: string;
-  orgReason?: "NO_MATCHING_USERS" | "NO_LOGGED_IN_USERS";
+  deniedCompoundParent?: string;
+  dependentComponents?: string[];
+  orgReason?: "NO_MATCHING_USERS" | "NO_LOGGED_IN_USERS" | "NO_UNFROZEN_USERS";
 };
 export type OrgVerified = {
   object: string;
