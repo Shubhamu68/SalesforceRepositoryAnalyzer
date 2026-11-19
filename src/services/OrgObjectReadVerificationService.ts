@@ -103,14 +103,19 @@ export class OrgObjectReadVerificationService {
   private async limited<T>(work: () => Promise<T>): Promise<T> {
     if (this.inflight >= MAX_INFLIGHT_ORG_CHECKS) {
       recordSoqlCount("org.verification.queue_waits");
+      // The finishing worker hands its slot directly to this waiter.
+      // Do not increment inFlight again after waking: doing so can exceed
+      // the limit if another request arrives between release and resume.
       await timeSoqlPhase("org.verification.queue_cumulative_ms",
         () => new Promise<void>((resume) => this.waiting.push(resume)));
+    } else {
+      this.inflight++;
     }
-    this.inflight++;
     try { return await timeSoqlPhase("org.verification.work_cumulative_ms", work); }
     finally {
-      this.inflight--;
-      this.waiting.shift()?.();
+      const next = this.waiting.shift();
+      if (next) next();
+      else this.inflight--;
     }
   }
 
