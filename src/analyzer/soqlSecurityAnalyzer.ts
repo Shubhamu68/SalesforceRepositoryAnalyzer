@@ -19,7 +19,7 @@ import { recordSoqlCount, timeSoqlPhase, timeSoqlSync } from "../services/SoqlPe
 const CONCURRENCY = 4;
 const OBJECT_READ_FIELD = "(Object Read Missing)";
 
-type Decision = { source: ReadDecisionSource; message: string; readable: boolean };
+type Decision = { source: ReadDecisionSource; message: string; readable: boolean; deniedCompoundParent?: string };
 
 /**
  * Severity describes SOQL enforcement, while verificationSource retains the
@@ -158,7 +158,9 @@ export class SoqlSecurityAnalyzer {
       decision: Decision,
     ): SoqlSecurityFinding[] {
       const subject = type === "OBJECT_READ" ? `Object ${object}` : `Field ${object}.${field}`;
-      const detail = decision.source === "ORG_VERIFIED"
+      const detail = decision.deniedCompoundParent
+        ? `${subject}: Salesforce confirmed missing Read on compound parent ${object}.${decision.deniedCompoundParent}. The requested address/location component had no conclusive direct UserFieldAccess decision; this finding is attributed to the denied parent, not an independently proven component denial.`
+        : decision.source === "ORG_VERIFIED"
         ? `${subject}: Read permission wasn't established in repository metadata, but Salesforce confirmed access.${decision.message.includes("via compound parent") ? " " + decision.message : ""}`
         : decision.source === "ORG_DENIED"
           ? `${subject}: Repository metadata did not establish Read access; Salesforce confirmed it is missing for the selected user.`
@@ -258,10 +260,25 @@ export class SoqlSecurityAnalyzer {
         const fieldDecision = this.readVerification
           ? await this.readVerification.resolveFieldRead(persona, object, fieldName, false)
           : { source: "UNVERIFIED" as const, readable: false, message: "Salesforce verification unavailable." };
+        // The confirmed permission gap belongs to the parent, not the
+        // component with no direct access row. Report under the parent so the
+        // Excel writer groups repeated components with the existing High row.
+        const reportedField = fieldDecision.deniedCompoundParent ?? fieldName;
         fieldFindings.set(fieldKey,
-          findingFor(references, object, fieldName, "FIELD_READ", fieldDecision));
+          findingFor(references, object, reportedField, "FIELD_READ", fieldDecision));
       });
-      for (const [key] of uniqueFields) objectFindings.push(...(fieldFindings.get(key) ?? []));
+      // Multiple components of one inaccessible compound parent can occur
+      // on the same Apex line. Keep one reference per denied parent/location;
+      // distinct source lines still appear in the Excel occurrence list.
+      const groupedFieldFindings = new Map<string, SoqlSecurityFinding>();
+      for (const [key] of uniqueFields) {
+        for (const finding of fieldFindings.get(key) ?? []) {
+          const id = [finding.object, finding.field, finding.filePath,
+            finding.lineNumber, finding.relationshipPath ?? ""].join("|").toLowerCase();
+          if (!groupedFieldFindings.has(id)) groupedFieldFindings.set(id, finding);
+        }
+      }
+      objectFindings.push(...groupedFieldFindings.values());
       results.set(object, objectFindings);
       } finally {
         // A unit finishes only after all of its relevant field decisions.
