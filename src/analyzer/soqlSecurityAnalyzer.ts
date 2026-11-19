@@ -242,6 +242,7 @@ export class SoqlSecurityAnalyzer {
 
       const uniqueFields = [...fields.entries()];
       const fieldFindings = new Map<string, SoqlSecurityFinding[]>();
+      const deniedParentKeys = new Set<string>();
       await boundedMap(uniqueFields, async ([fieldKey, references]) => {
         const fieldName = references[0]?.field ?? fieldKey;
         const grant = evaluator.evaluateField(`${object}.${fieldName}`);
@@ -264,6 +265,7 @@ export class SoqlSecurityAnalyzer {
         // component with no direct access row. Report under the parent so the
         // Excel writer groups repeated components with the existing High row.
         const reportedField = fieldDecision.deniedCompoundParent ?? fieldName;
+        if (fieldDecision.deniedCompoundParent) deniedParentKeys.add(reportedField.toLowerCase());
         fieldFindings.set(fieldKey,
           findingFor(references, object, reportedField, "FIELD_READ", fieldDecision));
       });
@@ -272,9 +274,13 @@ export class SoqlSecurityAnalyzer {
       // distinct source lines still appear in the Excel occurrence list.
       const groupedFieldFindings = new Map<string, SoqlSecurityFinding>();
       for (const [key] of uniqueFields) {
-        for (const finding of fieldFindings.get(key) ?? []) {
-          const id = [finding.object, finding.field, finding.filePath,
-            finding.lineNumber, finding.relationshipPath ?? ""].join("|").toLowerCase();
+        for (const [index, finding] of (fieldFindings.get(key) ?? []).entries()) {
+          // Deduplicate ONLY confirmed compound-parent dependencies; unrelated
+          // field references can differ in clause/enforcement at one line.
+          const id = deniedParentKeys.has(finding.field.toLowerCase())
+            ? [finding.object, finding.field, finding.filePath,
+                finding.lineNumber, finding.relationshipPath ?? ""].join("|").toLowerCase()
+            : `direct|${key}|${index}`;
           if (!groupedFieldFindings.has(id)) groupedFieldFindings.set(id, finding);
         }
       }
