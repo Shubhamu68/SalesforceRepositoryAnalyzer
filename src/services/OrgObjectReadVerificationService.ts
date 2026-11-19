@@ -166,7 +166,7 @@ export class OrgObjectReadVerificationService {
     if (metadata?.permissionable === false) return {
       source: metadata.source === "LIVE" ? "ORG_VERIFIED" : "REPOSITORY",
       readable: true, field,
-      message: `${object}.${field} is non-permissionable (${metadata.source.toLowerCase()} field metadata); no individual FLS Read grant is needed.`,
+      message: `${object}.${field} is non-permissionable (${metadata.source === "LIVE" ? "current Salesforce org" : "explicit matching-org offline cache"}); no individual FLS Read grant is needed.`,
     };
     if (repositoryRead) return {
       source: "REPOSITORY", readable: true, field,
