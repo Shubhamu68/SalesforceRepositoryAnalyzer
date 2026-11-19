@@ -50,7 +50,9 @@ function AnalysisLoadingOverlay({ title, description, hint, progress }: Analysis
   const personaDetail = kind === "all" && personaTotal > 0
     ? `${personaDone} of ${personaTotal} personas completed · ${Math.max(0, personaTotal - personaDone)} remaining`
     : undefined;
-  const includeMatching = progress?.mode === "ORG_AND_REPOSITORY" && progress.userMatching !== "skipped";
+  // Only display this optional step when an actual Salesforce matching lookup occurred.
+  const includeMatching = progress?.mode === "ORG_AND_REPOSITORY" &&
+    (progress.userMatching === "in_progress" || progress.userMatching === "complete");
   const matchingState: StepState = progress?.userMatching === "complete" ? "complete"
     : progress?.userMatching === "in_progress" ? "active"
     : "pending";
