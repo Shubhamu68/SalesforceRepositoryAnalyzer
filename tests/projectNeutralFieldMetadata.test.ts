@@ -10,6 +10,9 @@ import { SalesforceFieldMetadataService } from "../src/salesforce/SalesforceFiel
 import type { SalesforceOrgConnection } from "../src/salesforce/SalesforceOrgConnection.js";
 import { buildRelationshipMap } from "../src/analyzer/salesforceRelationshipResolver.js";
 import { createPersonaAccessEvaluator } from "../src/analyzer/personaAccessEvaluator.js";
+import { SoqlSecurityAnalyzer } from "../src/analyzer/soqlSecurityAnalyzer.js";
+import type { PersonaPermissionResolver } from "../src/analyzer/PersonaPermissionResolver.js";
+import type { SoqlQuery } from "../src/models/SoqlQuery.js";
 import type { ResolvedPersonaPermissions } from "../src/analyzer/PersonaPermissionResolver.js";
 import type { Persona } from "../src/models/Persona.js";
 import type { PermissionSet } from "../src/models/PermissionSet.js";
@@ -160,6 +163,37 @@ test("relationship export is opt-in, org-scoped and cannot override repository r
       if (oldOrg === undefined) delete process.env.FIELD_METADATA_OFFLINE_ORG_ID;
       else process.env.FIELD_METADATA_OFFLINE_ORG_ID = oldOrg;
     }
+  });
+});
+
+test("repository-only SOQL missing unknown FLS is REVIEW, never falsely confirmed High", async () => {
+  await withRoot(async root => {
+    const persona: Persona = {
+      name: "Unrelated Project", permissionSets: [], permissionSetGroups: [], mutingPermissionSets: [],
+    };
+    const ps: PermissionSet = {
+      name: "Reader", label: "Reader",
+      objectPermissions: [{ object: "Unrelated__c", allowRead: true, allowCreate: false,
+        allowEdit: false, allowDelete: false, viewAllRecords: false,
+        modifyAllRecords: false, viewAllFields: false }],
+      fieldPermissions: [],
+    };
+    const resolved: ResolvedPersonaPermissions = {
+      persona, permissionSetGroups: [], directPermissionSets: [ps],
+      permissionSetGrants: [{ permissionSet: ps, type: "directPermissionSet" }],
+      mutingPermissionSets: [], mutesByGroup: new Map(),
+    };
+    const resolver = { resolve: async () => resolved } as unknown as PersonaPermissionResolver;
+    const query: SoqlQuery = {
+      object: "Unrelated__c", fields: ["PotentiallyProtected__c"],
+      filePath: "classes/Example.cls", lineNumber: 12,
+      query: "SELECT PotentiallyProtected__c FROM Unrelated__c WITH USER_MODE",
+      withUserMode: true, securityMode: "USER_MODE", subqueries: [],
+    };
+    const findings = await new SoqlSecurityAnalyzer(resolver, root).analyze(persona, [query]);
+    assert.ok(findings.some(f => f.field === "PotentiallyProtected__c"));
+    assert.ok(findings.every(f => f.criticality === "Unable to verify"));
+    assert.ok(findings.every(f => f.severity === "REVIEW"));
   });
 });
 
