@@ -44,7 +44,10 @@ jobs:
 
           Copy-Item -Path "dist" -Destination (Join-Path $package "app/dist") -Recurse -Force
           Copy-Item -Path "web/dist" -Destination (Join-Path $package "app/web/dist") -Recurse -Force
-          Copy-Item -Path "config" -Destination (Join-Path $package "config") -Recurse -Force
+          # Allowlist safe application config: never package locally generated
+          # per-org metadata caches or unrelated project exports.
+          New-Item -ItemType Directory -Force -Path (Join-Path $package "config") | Out-Null
+          Copy-Item -Path "config/personas.json","config/org-verification-status-policy.json" -Destination (Join-Path $package "config") -Force
           Copy-Item -Path "package.json","package-lock.json" -Destination (Join-Path $package "app") -Force
           Copy-Item -Path ".env.example" -Destination (Join-Path $package ".env.example") -Force
           Copy-Item -Path "desktop/windows/Start Analyzer.cmd" -Destination (Join-Path $package "Start Analyzer.cmd") -Force
