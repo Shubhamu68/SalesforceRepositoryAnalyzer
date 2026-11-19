@@ -273,3 +273,178 @@
   font-size: 12px;
   line-height: 1.6;
 }
+
+
+/* Shared SOQL progress overlay: compact reference illustration and honest work counters. */
+.analysis-overlay__dialog--progress {
+  width: min(610px, calc(100vw - 32px));
+  padding: 20px 28px 24px;
+  border-radius: 19px;
+  max-height: calc(100vh - 38px);
+  overflow-y: auto;
+}
+.analysis-overlay__illustration--compact {
+  width: 94px;
+  height: 90px;
+  margin: 0 auto 7px;
+  transform: scale(.52);
+  transform-origin: center;
+}
+.analysis-overlay__dialog--progress h2 {
+  margin: 0 0 6px;
+  font-size: 25px;
+}
+.analysis-overlay__dialog--progress > p {
+  font-size: 13px;
+}
+.soql-progress-summary {
+  width: 100%;
+  margin-top: 21px;
+  text-align: left;
+}
+.soql-progress-summary-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #172a47;
+  font-size: 13px;
+}
+.soql-progress-percent {
+  font-size: 21px;
+  font-variant-numeric: tabular-nums;
+}
+.soql-progress-bar {
+  margin-top: 10px;
+  height: 10px;
+  width: 100%;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e0e9f9;
+}
+.soql-progress-bar > span {
+  display: block;
+  background: #2468ea;
+  border-radius: inherit;
+  height: 100%;
+  transition: width .28s ease;
+}
+.soql-progress-personas {
+  display: grid;
+  gap: 5px;
+  margin-top: 20px;
+  padding: 13px 16px;
+  border: 1px solid #d6e6fe;
+  border-radius: 10px;
+  background: #eff5ff;
+  color: #145bd0;
+  font-size: 13px;
+}
+.soql-progress-personas small {
+  color: #607291;
+  font-size: 11px;
+}
+.soql-progress-steps {
+  list-style: none;
+  padding: 0;
+  margin: 16px 0 0;
+  width: 100%;
+  text-align: left;
+}
+.soql-progress-step {
+  min-height: 46px;
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 5px;
+  border-bottom: 1px solid #e8eef7;
+  color: #23354e;
+}
+.soql-progress-step--active {
+  background: #f1f6ff;
+  border-radius: 9px;
+  color: #145bd0;
+}
+.soql-progress-step--pending,
+.soql-progress-step--skipped { color: #70829e; }
+.soql-progress-step-icon {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  font-weight: 800;
+  color: #97a7be;
+  font-size: 18px;
+}
+.soql-progress-step--complete .soql-progress-step-icon {
+  background: #14a468;
+  color: #fff;
+  border-radius: 50%;
+  font-size: 13px;
+}
+.soql-progress-step-label {
+  font-size: 13px;
+  font-weight: 620;
+  min-width: 0;
+}
+.soql-progress-step-label small {
+  display: block;
+  margin-top: 3px;
+  color: #687a98;
+  font-size: 11px;
+  font-weight: 400;
+}
+.soql-progress-step-status {
+  background: #f0f2f7;
+  border-radius: 99px;
+  padding: 4px 8px;
+  color: #65738c;
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.soql-progress-step--complete .soql-progress-step-status {
+  color: #07814e;
+  background: #e2f6eb;
+}
+.soql-progress-step--active .soql-progress-step-status {
+  color: #155ed1;
+  background: #e2eeff;
+}
+.soql-progress-spin {
+  display: block;
+  height: 17px;
+  width: 17px;
+  border: 2px dotted #2c79ef;
+  border-radius: 50%;
+  animation: soqlProgressSpin 1.1s linear infinite;
+}
+@keyframes soqlProgressSpin { to { transform: rotate(360deg); } }
+.soql-progress-footer {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 14px;
+  color: #657794;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.soql-progress-footer span:last-child {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+@media (max-width: 580px) {
+  .analysis-overlay__dialog--progress { padding: 15px 17px 20px; }
+  .analysis-overlay__dialog--progress h2 { font-size: 20px; }
+  .soql-progress-summary { margin-top: 14px; }
+  .soql-progress-personas { font-size: 12px; padding: 11px; }
+  .soql-progress-step { grid-template-columns: 23px minmax(0,1fr); }
+  .soql-progress-step-status { grid-column: 2; justify-self: start; }
+  .soql-progress-footer { font-size: 10px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .soql-progress-bar > span { transition: none; }
+  .soql-progress-spin { animation: none; }
+}
