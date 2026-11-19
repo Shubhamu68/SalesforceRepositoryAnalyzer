@@ -304,7 +304,8 @@ test("parent Name denial cannot establish component FLS denial", async () => {
   const gateway = new SalesforceUserFieldAccessGateway(org.connection,
     new SalesforceFieldMetadataService(org.connection));
   assert.deepEqual(await gateway.verifyUserField(user, "User", "FirstName"),
-    { read: null, edit: null });
+    { read: null, edit: null, deniedCompoundParent: "Name" },
+    "parent denial is captured, but not attributed as a direct component denial");
 });
 
 test("missing or failed Name compound metadata does not yield inferred FLS Read", async () => {
