@@ -35,7 +35,27 @@ export type EffectiveUserFieldAccess = {
   readFromCompoundParent?: string;
   /** Origin of non-permissionable field metadata, never proof of user access by itself. */
   nonPermissionableSource?: "LIVE" | "OPTIONAL_CACHE";
+  /**
+   * Salesforce denied Read on this confirmed compound parent while the
+   * component itself had no conclusive direct UserFieldAccess result.
+   * read stays null: this is a parent dependency, NOT a direct field denial.
+   */
+  deniedCompoundParent?: string;
 };
+
+/**
+ * True only when EVERY checked user has the same independently verified
+ * compound-parent denial and no conclusive direct component Read decision.
+ * Partial, mixed, or conflicting evidence must remain UNVERIFIED.
+ */
+export function uniformlyDeniedCompoundParent(
+  results: readonly EffectiveUserFieldAccess[],
+): string | null {
+  if (!results.length || results.some((result) => result.read !== null || !result.deniedCompoundParent)) return null;
+  const parent = results[0].deniedCompoundParent!;
+  return results.every((result) => result.deniedCompoundParent?.toLowerCase() === parent.toLowerCase())
+    ? parent : null;
+}
 
 const CACHE_MS = 60_000;
 const MAX_CACHE_ENTRIES = 2000;
@@ -240,9 +260,14 @@ export class SalesforceUserFieldAccessGateway {
     if (!parent) return unknown;
     const parentAccess = await this.direct(userId, object, parent);
     if (parentAccess.state === "PRESENT" && parentAccess.read === true) {
-      // Only promote positive, metadata-backed parent READ. A parent denial is
-      // not enough proof to assert a component denial; parent EDIT is irrelevant.
+      // Only promote positive, metadata-backed parent READ; parent Edit is
+      // irrelevant to a component's independently configurable Edit FLS.
       return { read: true, edit: null, readFromCompoundParent: parent };
+    }
+    if (parentAccess.state === "PRESENT" && parentAccess.read === false) {
+      // Preserve a confirmed dependency without asserting that Salesforce
+      // returned an explicit denial for the individual component field.
+      return { ...unknown, deniedCompoundParent: parent };
     }
     return unknown;
   }
