@@ -119,7 +119,8 @@ export class SoqlAnalysisService {
   /**
    * One repository scan / relationship inventory for every configured persona.
    * Effective permissions are still evaluated independently for each persona.
-   * Evaluate sequentially to bound live Salesforce work across large orgs.
+   * Evaluate at most two personas concurrently; the shared verifier enforces
+   * its own global Salesforce request limit. Preserve configured output order.
    * Fail the entire report if a persona cannot be evaluated: never produce a
    * misleadingly incomplete "all personas" workbook.
    */
@@ -140,16 +141,23 @@ export class SoqlAnalysisService {
 
       const prepared = await timeSoqlPhase("security.prepare",
         () => this.soqlSecurityAnalyzer.prepare(queries));
-      const sections: PersonaHighPriorityReportSection[] = [];
-      for (const persona of personas) {
-        const findings = await timeSoqlPhase("security.personas_cumulative_ms",
-          () => this.soqlSecurityAnalyzer.analyzePrepared(persona, prepared));
-        // Only the analyzer's explicit effective High criticality qualifies.
-        // REVIEW/UNVERIFIED and Low references can never be elevated here.
-        const high = findings.filter((finding) => finding.criticality === "High");
-        recordSoqlCount("findings.high", high.length);
-        sections.push({ personaName: persona.name, queryCount: queries.length, findings: high });
-      }
+      const sections = new Array<PersonaHighPriorityReportSection>(personas.length);
+      let nextPersona = 0;
+      const worker = async (): Promise<void> => {
+        while (nextPersona < personas.length) {
+          const index = nextPersona++;
+          const persona = personas[index];
+          const findings = await timeSoqlPhase("security.personas_cumulative_ms",
+            () => this.soqlSecurityAnalyzer.analyzePrepared(persona, prepared));
+          // Only the analyzer's explicit effective High criticality qualifies.
+          // REVIEW/UNVERIFIED and Low references can never be elevated here.
+          const high = findings.filter((finding) => finding.criticality === "High");
+          recordSoqlCount("findings.high", high.length);
+          sections[index] = { personaName: persona.name, queryCount: queries.length, findings: high };
+        }
+      };
+      await timeSoqlPhase("security.all_personas_wall_ms", () =>
+        Promise.all(Array.from({ length: Math.min(2, personas.length) }, () => worker())));
 
       const outputDirectory = typeof this.outputDirectory === "function"
         ? this.outputDirectory() : this.outputDirectory;
