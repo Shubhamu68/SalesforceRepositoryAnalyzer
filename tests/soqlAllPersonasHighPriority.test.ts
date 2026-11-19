@@ -210,3 +210,23 @@ test("all-personas evaluations remain bounded to two concurrent workers and orde
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("repository-only high-priority report explicitly warns that zero confirmed issues is inconclusive", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "sf-high-repo-only-"));
+  try {
+    const file = path.join(root, "Missing.cls");
+    const result = await writeAllPersonasHighPriorityReport(root, [{
+      personaName: "Offline Persona",
+      queryCount: 1,
+      findings: [finding(file, 4, "Unable to verify")],
+    }], "REPOSITORY_ONLY");
+    assert.equal(result.totalHighPriorityFindings, 0);
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.readFile(result.summaryReportPath);
+    const sheet = workbook.worksheets[0];
+    assert.match(cellText(sheet.getCell("A5").value), /REPOSITORY-ONLY/i);
+    assert.match(cellText(sheet.getCell("A5").value), /does NOT mean permissions are safe/i);
+    assert.ok(sheet.getColumn(1).values.map(cellText).includes("No high-priority findings"));
+    assert.equal(sheet.getColumn(5).values.filter(value => value === "High").length, 0);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
