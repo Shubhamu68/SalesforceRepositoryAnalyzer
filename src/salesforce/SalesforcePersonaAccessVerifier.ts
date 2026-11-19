@@ -3,6 +3,7 @@ import type { OrgCheckedUser } from "../models/StackTraceImpact.js";
 import { SalesforceOrgConnection } from "./SalesforceOrgConnection.js";
 import { matchPersonaUsers, selectMostRecentlyLoggedInMatchedUser, type OrgAssignment, type OrgProfile, type OrgUser } from "./OrgPersonaMatcher.js";
 import { SalesforceUserFieldAccessGateway } from "./SalesforceUserFieldAccessGateway.js";
+import { noteSoqlUserMatching } from "../services/SoqlAnalysisProgress.js";
 
 export type OrgAccessOutcome = "VERIFIED" | "DENIED" | "UNVERIFIED";
 export interface OrgObjectAccessEvidence {
@@ -220,6 +221,8 @@ export class SalesforcePersonaAccessVerifier {
    * they do not attribute access to an individual Permission Set.
    */
   private async matchingUsers(persona: Persona): Promise<MatchedUsers> {
+    // Progress is request-scoped; this is emitted only for actual org lookups.
+    noteSoqlUserMatching();
     const inventory = await this.inventory();
     const cacheKey = JSON.stringify([
       normalized(persona.profile ?? ""),
