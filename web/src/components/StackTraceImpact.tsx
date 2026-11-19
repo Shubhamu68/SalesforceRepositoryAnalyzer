@@ -38,9 +38,11 @@ function FindingList({ items, confirmed }: { items: Missing[]; confirmed: boolea
   return <ul className="stack-ux-finding-list">
     {items.map((item) => <li className={confirmed ? "stack-ux-denied" : "stack-ux-unverified"} key={`${item.object}|${item.field ?? ""}|${item.reason}`}>
       <strong>{permissionLabel(item)}</strong>
-      <span>{confirmed
-        ? `${item.reason === "FIELD_READ" ? "Field" : "Object"} Read denied in Salesforce; no repository grant.`
-        : "No repository grant; Salesforce verification incomplete."}</span>
+      <span>{item.deniedCompoundParent
+        ? `Compound parent Read denied in Salesforce. Dependent components: ${(item.dependentComponents ?? []).join(", ") || "see query fields"}. Component FLS denial was not independently established.`
+        : confirmed
+          ? `${item.reason === "FIELD_READ" ? "Field" : "Object"} Read denied in Salesforce; no repository grant.`
+          : "No repository grant; Salesforce verification incomplete."}</span>
     </li>)}
   </ul>;
 }
