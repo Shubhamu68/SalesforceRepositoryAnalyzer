@@ -12,7 +12,7 @@ const order = ["starting", "scanning", "preparing", "permissions", "excel", "com
 
 function stepState(stage: SoqlProgressSnapshot["stage"], step: typeof order[number]): StepState {
   if (stage === "failed") return "pending";
-  const currentIndex = order.indexOf(stage);
+  const currentIndex = (order as readonly string[]).indexOf(stage);
   const stepIndex = order.indexOf(step);
   if (currentIndex > stepIndex) return "complete";
   return currentIndex === stepIndex ? "active" : "pending";
