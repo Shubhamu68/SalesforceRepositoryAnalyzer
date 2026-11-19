@@ -236,6 +236,8 @@ async function runSoqlAnalysisRequest(
     progress?.fail();
     handleApiError(error, res);
   } finally {
+    // Also finalize early validation/configuration exits from the existing POST.
+    if (progress && !progress.isFinished) progress.fail();
     if (progressId && progress) soqlProgressRegistry.finish(progressId);
     soqlAnalysisInProgress = false;
   }
