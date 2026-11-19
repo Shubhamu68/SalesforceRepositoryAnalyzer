@@ -26,6 +26,8 @@ function fakeConnection(options: { users: boolean; disconnected?: boolean; acces
         ? [{ Id: userId, Name: "Demo User", Username: "demo@example.org", ProfileId: profileId, LastLoginDate: "2026-11-10T18:00:00Z" }] as T[] : [];
       if (soql.startsWith("SELECT Id, Name, IsOwnedByProfile FROM PermissionSet")) return [];
       if (soql.startsWith("SELECT AssigneeId, PermissionSetId")) return [];
+      if (soql.includes("FROM UserLogin")) return options.users
+        ? [{ UserId: userId, IsFrozen: false }] as T[] : [];
       if (soql.includes("FROM UserEntityAccess")) return [{ UserId: userId, IsReadable: options.access ?? true }] as T[];
       return [];
     }
