@@ -179,7 +179,7 @@ async function runSoqlAnalysisRequest(
         // Always load from the canonical config on the server. Never trust the
         // selected dropdown or a client-supplied list of personas.
         const personas = await runtime.personas.getAllPersonas();
-        const result = await analyzer.soqlAnalysisService.analyzeAllHighPriority(personas);
+        const result = await analyzer.soqlAnalysisService.analyzeAllHighPriority(personas, verdict.mode);
         res.json({
           personaCount: result.personaCount,
           queryCount: result.queryCount,
