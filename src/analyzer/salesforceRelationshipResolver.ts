@@ -45,9 +45,22 @@ interface SnapshotChild {
   sourceField?: string;
 }
 interface RelationshipSnapshot {
-  version: 1;
+  version: 2;
+  organizationId: string;
+  capturedAt: string;
   objects: Record<string, { parents?: SnapshotParent[]; children?: SnapshotChild[] }>;
 }
+
+export interface RelationshipMetadataScope {
+  /** True means a selected org is in use; offline-org override is never used. */
+  connected?: boolean;
+  organizationId?: string;
+}
+const orgIdPattern = /^00D[A-Za-z0-9]{12}(?:[A-Za-z0-9]{3})?$/;
+const namePattern = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const CACHE_AGE_MS = 90 * 24 * 60 * 60 * 1000;
+const sameOrg = (a: string, b: string): boolean =>
+  a.slice(0, 15).toLowerCase() === b.slice(0, 15).toLowerCase();
 
 /**
  * Contains BOTH directions of Salesforce relationships.
@@ -208,7 +221,10 @@ export class RelationshipMap extends Map<string, Map<string, RelationshipMetadat
  * Salesforce Describe metadata. The latter is authoritative for standard and
  * renamed relationships missing from the local repository.
  */
-export async function buildRelationshipMap(objectsDirectory: string): Promise<RelationshipMap> {
+export async function buildRelationshipMap(
+  objectsDirectory: string,
+  scope: RelationshipMetadataScope = {},
+): Promise<RelationshipMap> {
   const graph = new RelationshipMap();
   let entries;
   try {
@@ -256,25 +272,47 @@ export async function buildRelationshipMap(objectsDirectory: string): Promise<Re
   // Salesforce Describe / an explicitly configured project-specific schema.
   // Never infer standard edges from an unrelated org's permissionability list.
 
-  const snapshotFile = path.resolve(process.env.SALESFORCE_RELATIONSHIP_SNAPSHOT_PATH?.trim()
-    || path.join(process.cwd(), "config", "relationship-schema.json"));
-  if (existsSync(snapshotFile)) {
-    let snapshot: RelationshipSnapshot;
-    try { snapshot = JSON.parse(readFileSync(snapshotFile, "utf8")) as RelationshipSnapshot; }
-    catch (error) { throw new Error(`Could not parse relationship snapshot ${snapshotFile}: ${String(error)}`); }
-    if (snapshot.version !== 1 || !snapshot.objects || typeof snapshot.objects !== "object") {
-      throw new Error(`Invalid relationship snapshot format at ${snapshotFile}`);
-    }
-    for (const [objectName, details] of Object.entries(snapshot.objects)) {
-      graph.registerObject(objectName);
-      for (const rel of details.parents ?? []) {
-        if (rel.relationshipName && rel.referenceTo?.length) {
-          graph.addParent(objectName, rel.relationshipName, rel.referenceTo, rel.sourceField);
+  // A project-specific relationship export is OPTIONAL and never picked up
+  // implicitly from the Analyzer's config directory. It must match the actual
+  // selected org (or an explicitly stated offline target org).
+  const selectedPath = process.env.SALESFORCE_RELATIONSHIP_SNAPSHOT_PATH?.trim();
+  const expectedOrg = scope.connected ? scope.organizationId
+    : process.env.FIELD_METADATA_OFFLINE_ORG_ID?.trim();
+  if (selectedPath && expectedOrg && orgIdPattern.test(expectedOrg)) {
+    const snapshotFile = path.resolve(selectedPath);
+    if (existsSync(snapshotFile)) {
+      let snapshot: RelationshipSnapshot | undefined;
+      try {
+        const parsed = JSON.parse(readFileSync(snapshotFile, "utf8")) as RelationshipSnapshot;
+        const timestamp = Date.parse(parsed.capturedAt);
+        const age = Date.now() - timestamp;
+        if (parsed.version === 2 && typeof parsed.organizationId === "string" &&
+          orgIdPattern.test(parsed.organizationId) && sameOrg(parsed.organizationId, expectedOrg) &&
+          Number.isFinite(timestamp) && age >= -5 * 60_000 && age <= CACHE_AGE_MS &&
+          parsed.objects && typeof parsed.objects === "object" && !Array.isArray(parsed.objects)) {
+          snapshot = parsed;
         }
+      } catch {
+        // Malformed optional cache cannot override repository metadata.
       }
-      for (const rel of details.children ?? []) {
-        if (rel.relationshipName && rel.childObject) {
-          graph.addChild(objectName, rel.relationshipName, rel.childObject, rel.sourceField);
+      if (snapshot) {
+        for (const [objectName, details] of Object.entries(snapshot.objects)) {
+          if (!namePattern.test(objectName) || !details || typeof details !== "object") continue;
+          graph.registerObject(objectName);
+          for (const rel of Array.isArray(details.parents) ? details.parents : []) {
+            if (namePattern.test(rel.relationshipName) &&
+              Array.isArray(rel.referenceTo) && rel.referenceTo.length > 0 &&
+              rel.referenceTo.every(target => namePattern.test(target)) &&
+              !graph.parentTargets(objectName, rel.relationshipName)) {
+              graph.addParent(objectName, rel.relationshipName, rel.referenceTo, rel.sourceField ?? "");
+            }
+          }
+          for (const rel of Array.isArray(details.children) ? details.children : []) {
+            if (namePattern.test(rel.relationshipName) && namePattern.test(rel.childObject) &&
+              !graph.childObject(objectName, rel.relationshipName)) {
+              graph.addChild(objectName, rel.relationshipName, rel.childObject, rel.sourceField ?? "");
+            }
+          }
         }
       }
     }
