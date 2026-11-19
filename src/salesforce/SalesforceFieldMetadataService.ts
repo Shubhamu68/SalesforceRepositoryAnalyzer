@@ -4,7 +4,8 @@ import { recordSoqlCount } from "../services/SoqlPerformanceMetrics.js";
 
 /**
  * One metadata source for every analysis workflow:
- *  1. current-org EntityParticle (authoritative for FLS applicability);
+ *  1. current-org EntityParticle (preferred), then current-org REST Describe
+ *     when Tooling metadata fails, omits a field or lacks IsPermissionable;
  *  2. an explicitly configured, org-scoped offline cache (never bundled);
  *  3. UNKNOWN, never an inferred permission grant.
  *
@@ -12,7 +13,7 @@ import { recordSoqlCount } from "../services/SoqlPerformanceMetrics.js";
  * A successful live lookup never falls back to offline cache metadata if
  * the field is absent from the queried org's EntityParticle response.
  */
-type Connection = Pick<SalesforceOrgConnection, "status" | "queryAll">;
+type Connection = Pick<SalesforceOrgConnection, "status" | "queryAll" | "describeSObject">;
 export type FieldMetadataSource = "LIVE" | "OPTIONAL_CACHE" | "UNKNOWN";
 
 export interface SalesforceFieldMetadata {
@@ -77,6 +78,7 @@ export function compoundParentFromMetadata(
 
 export class SalesforceFieldMetadataService {
   private readonly cachedObjects = new Map<string, CacheEntry>();
+  private readonly cachedDescribes = new Map<string, CacheEntry>();
 
   constructor(
     private readonly connection?: Connection,
@@ -135,11 +137,56 @@ export class SalesforceFieldMetadataService {
     return entry.value;
   }
 
+  /**
+   * REST sObject Describe supplies the same org's field.permissionable value.
+   * Use it when EntityParticle is inaccessible or missing this field, never
+   * an unrelated org's metadata or the presence of an address-like suffix.
+   */
+  private async getDescribeMetadata(object: string): Promise<Map<string, SalesforceFieldMetadata> | null> {
+    if (!VALID_NAME.test(object) || !this.connection) return null;
+    const key = this.cacheKey(object);
+    const hit = this.cachedDescribes.get(key);
+    if (hit && hit.until > Date.now()) return hit.value;
+    if (this.cachedDescribes.size >= MAX_ENTRIES) this.cachedDescribes.clear();
+
+    const entry: CacheEntry = { until: Date.now() + TTL_MS, value: Promise.resolve(null) };
+    entry.value = (async () => {
+      try {
+        const describe = await this.connection!.describeSObject(object);
+        const fields = new Map<string, SalesforceFieldMetadata>();
+        for (const item of describe.fields) {
+          if (!item.name || !VALID_NAME.test(item.name)) continue;
+          fields.set(norm(item.name), {
+            permissionable: typeof item.permissionable === "boolean" ? item.permissionable : undefined,
+            ...(typeof item.type === "string" ? { dataType: item.type } : {}),
+            source: "LIVE",
+          });
+        }
+        return fields;
+      } catch {
+        recordSoqlCount("org.field_metadata.describe_failures");
+        entry.until = Date.now() + ERROR_TTL_MS;
+        return null;
+      }
+    })();
+    this.cachedDescribes.set(key, entry);
+    return entry.value;
+  }
+
   async getField(object: string, field: string): Promise<SalesforceFieldMetadata> {
     const unknown: SalesforceFieldMetadata = { permissionable: undefined, source: "UNKNOWN" };
     if (!VALID_NAME.test(object) || !VALID_NAME.test(field)) return unknown;
     const live = await this.getObjectMetadata(object);
-    if (live !== null) return live.get(norm(field)) ?? unknown;
+    const toolingField = live?.get(norm(field));
+    if (typeof toolingField?.permissionable === "boolean") return toolingField;
+    // A successful Tooling response can omit compound components, while a
+    // failed Tooling query may be caused by missing View Setup access. REST
+    // Describe is independent current-org evidence, not an offline override.
+    const describeField = (await this.getDescribeMetadata(object))?.get(norm(field));
+    if (typeof describeField?.permissionable === "boolean") {
+      return { ...toolingField, ...describeField, source: "LIVE" };
+    }
+    if (live !== null) return toolingField ?? unknown;
     // Only opt-in metadata from the SAME org may supplement a failed live
     // request. Repository-only mode requires FIELD_METADATA_OFFLINE_ORG_ID.
     const connectedOrgId = this.connection?.status.organizationId;
