@@ -48,6 +48,32 @@ Set `SALESFORCE_RELATIONSHIP_SNAPSHOT_PATH` to this local export in `.env` and `
 
 The Analyzer **does not** assume that a `FooId` field always points to `Foo`, and it no longer hardcodes the OMS-specific `OriginalOrderItemId` relationship. When neither repository XML, current-org Describe, nor a valid optional schema can establish a relationship, analysis should report an unresolved-path **Review** instead of inventing an object.
 
+## Compound fields with confirmed denied-parent Read
+
+The shared `SalesforceUserFieldAccessGateway` uses the current org's
+Describe/EntityParticle compound metadata and the actual persona-matched user's
+`UserFieldAccess` evidence. It does **not** ignore all `__s` fields.
+
+- A conclusive direct component Read grant or denial takes precedence.
+- When a direct component row is absent (or Read is null) and the verified
+  compound parent's Read is **true**, component Read can be verified using
+  the parent. Parent Edit is never inherited.
+- When the parent Read is **false**, the gateway retains a distinct
+  `deniedCompoundParent` dependency. It does **not** claim Salesforce
+  independently denied the component. Only a unanimous parent-denial
+  dependency across every checked user may yield a parent-dependent denied
+  outcome; mixed, conflicting, or incomplete evidence remains Review.
+- SOQL groups such dependent components under the parent field's finding,
+  preventing repeated generic Unable-to-verify rows for the same denied
+  parent. Stack Trace groups parent dependencies while preserving the
+  original component names. Access Checker explains the same provenance.
+- If parent metadata or access is missing, the result stays **Unable to
+  verify**. No project-specific object names, Salesforce user IDs, or
+  unconditional FLS bypasses are introduced.
+
+This changes **report attribution**, not Salesforce permissions. A
+confirmed parent denial is not evidence of a direct component FLS denial.
+
 ## Why this preserves safety
 - Permissionability is **not** the same as field Read permission. A nonpermissionable field still requires object Read; a permissionable field requires FLS evidence.
 - Successful Tooling metadata lookup never borrows absent fields from any offline cache. The current org's REST Describe is a separate authoritative live metadata source, including for custom Address component fields when the Tooling result is incomplete.
