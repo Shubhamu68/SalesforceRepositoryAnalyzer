@@ -1,117 +1,128 @@
 import {
   readdir,
   readFile,
+  stat,
 } from "node:fs/promises";
 import path from "node:path";
 import { classifySoqlMode } from "../analyzer/soqlExecutionMode.js";
 import { parseNestedSoql, maskSoql } from "../analyzer/nestedSoqlScopes.js";
 
 import type { SoqlQuery } from "../models/SoqlQuery.js";
-import { recordSoqlCount } from "../services/SoqlPerformanceMetrics.js";
+import { recordSoqlCount, timeSoqlPhase } from "../services/SoqlPerformanceMetrics.js";
 
 // Bound filesystem concurrency: improve cold scans without opening hundreds of
 // Apex files simultaneously or changing deterministic query ordering.
 const READ_BATCH_SIZE = 12;
 
-export async function scanApexSoql(
-  repositoryPath: string
-): Promise<SoqlQuery[]> {
-  const apexFiles =
-    await findApexClasses(
-      repositoryPath
-    );
+/**
+ * Preserve the original repository-wide semantics (including class exclusion
+ * and source ordering) while avoiding repeated Apex parsing across personas.
+ * Every call stats every discovered class, so changed, deleted and newly added
+ * files invalidate the cached per-file parse without a stale global TTL.
+ */
+const FILE_CONCURRENCY = 16;
+const MAX_REPOSITORIES = 2;
+type CachedApexFile = { fingerprint: string; queries: SoqlQuery[] };
+const indexedRepositories = new Map<string, Map<string, CachedApexFile>>();
+const inFlightScans = new Map<string, Promise<SoqlQuery[]>>();
 
-  recordSoqlCount("scanner.apex_files", apexFiles.length);
-  const queries: SoqlQuery[] = [];
-
-  // Promise.all retains input order, so parallel reads cannot reorder findings.
-  // Using a fixed-size batch also bounds memory and file-handle usage.
-  for (let start = 0; start < apexFiles.length; start += READ_BATCH_SIZE) {
-    const batch = apexFiles.slice(start, start + READ_BATCH_SIZE);
-    const parsed = await Promise.all(batch.map(async (filePath) => {
-      const source = await readFile(filePath, "utf-8");
-      return extractSoqlQueries(source, filePath);
-    }));
-    for (const fileQueries of parsed) queries.push(...fileQueries);
-  }
-
-  return queries.sort(
-    (a, b) =>
-      a.filePath.localeCompare(
-        b.filePath
-      ) ||
-      a.lineNumber -
-        b.lineNumber
-  );
-}
-
-async function findApexClasses(
-  repositoryPath: string
-): Promise<string[]> {
-  const results: string[] = [];
-
-  await walkDirectory(
-    repositoryPath,
-    results
-  );
-
+async function parallelMap<T, R>(
+  input: readonly T[], task: (value: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(input.length);
+  let position = 0;
+  await Promise.all(Array.from({ length: Math.min(FILE_CONCURRENCY, input.length) }, async () => {
+    while (position < input.length) {
+      const index = position++;
+      results[index] = await task(input[index]);
+    }
+  }));
   return results;
 }
 
-async function walkDirectory(
-  directoryPath: string,
-  results: string[]
-): Promise<void> {
-  const entries =
-    await readdir(
-      directoryPath,
-      { withFileTypes: true }
-    );
-
-  for (const entry of entries) {
-    const fullPath =
-      path.join(
-        directoryPath,
-        entry.name
-      );
-
-    if (entry.isDirectory()) {
-      await walkDirectory(
-        fullPath,
-        results
-      );
-
-      continue;
-    }
-
-    if (!entry.isFile()) {
-      continue;
-    }
-
-    if (
-      !entry.name
-        .toLowerCase()
-        .endsWith(".cls")
-    ) {
-      continue;
-    }
-
-    /*
-     * Exclude test classes.
-     */
-    if (
-      entry.name
-        .toLowerCase()
-        .includes("test")
-    ) {
-      continue;
-    }
-
-    results.push(fullPath);
+export async function scanApexSoql(repositoryPath: string): Promise<SoqlQuery[]> {
+  const root = path.resolve(repositoryPath);
+  const pending = inFlightScans.get(root);
+  if (pending) {
+    recordSoqlCount("scanner.inflight_reuse");
+    return pending;
+  }
+  const work = scanRepositoryApex(root);
+  inFlightScans.set(root, work);
+  try {
+    return await work;
+  } finally {
+    if (inFlightScans.get(root) === work) inFlightScans.delete(root);
   }
 }
 
- export function extractSoqlQueries(
+async function scanRepositoryApex(repositoryPath: string): Promise<SoqlQuery[]> {
+  const apexFiles = await timeSoqlPhase("scanner.discovery", () => findApexClasses(repositoryPath));
+  apexFiles.sort((a, b) => a.localeCompare(b));
+  recordSoqlCount("scanner.apex_files", apexFiles.length);
+
+  const previous = indexedRepositories.get(repositoryPath);
+  let reused = 0;
+  const currentEntries = await timeSoqlPhase("scanner.stat_and_parse", () =>
+    parallelMap(apexFiles, async (filePath): Promise<[string, CachedApexFile]> => {
+      // Nanosecond mtime+ctime and size detect ordinary source edits even when
+      // content length is unchanged; directory traversal detects additions/deletions.
+      const info = await stat(filePath, { bigint: true });
+      const fingerprint = `${info.size}:${info.mtimeNs}:${info.ctimeNs}`;
+      const cached = previous?.get(filePath);
+      if (cached?.fingerprint === fingerprint) {
+        reused++;
+        return [filePath, cached];
+      }
+      const source = await readFile(filePath, "utf8");
+      return [filePath, { fingerprint, queries: extractSoqlQueries(source, filePath) }];
+    }));
+  recordSoqlCount("scanner.reused_files", reused);
+  recordSoqlCount("scanner.parsed_files", apexFiles.length - reused);
+  const nextIndex = new Map(currentEntries);
+  // Only publish a complete successful snapshot. Failed reads do not poison
+  // the previous cache, and deleted files are removed from the new index.
+  if (indexedRepositories.size >= MAX_REPOSITORIES && !indexedRepositories.has(repositoryPath)) {
+    indexedRepositories.delete(indexedRepositories.keys().next().value!);
+  }
+  indexedRepositories.set(repositoryPath, nextIndex);
+  const queries: SoqlQuery[] = [];
+  for (const [, entry] of currentEntries) queries.push(...entry.queries);
+  return queries.sort((a, b) =>
+    a.filePath.localeCompare(b.filePath) || a.lineNumber - b.lineNumber);
+}
+
+/**
+ * A breadth-first directory walker with bounded parallel readdir operations.
+ * Unlike an unbounded recursive Promise.all, concurrency and memory stay
+ * controlled across large metadata repositories.
+ */
+async function findApexClasses(repositoryPath: string): Promise<string[]> {
+  const results: string[] = [];
+  let directories = [repositoryPath];
+  while (directories.length) {
+    const currentLevel = directories;
+    directories = [];
+    const listed = await parallelMap(currentLevel, async directoryPath => ({
+      directoryPath,
+      entries: await readdir(directoryPath, { withFileTypes: true }),
+    }));
+    for (const { directoryPath, entries } of listed) {
+      for (const entry of entries) {
+        const fullPath = path.join(directoryPath, entry.name);
+        if (entry.isDirectory()) {
+          directories.push(fullPath);
+        } else if (entry.isFile() && entry.name.toLowerCase().endsWith(".cls") &&
+                   !entry.name.toLowerCase().includes("test")) {
+          results.push(fullPath);
+        }
+      }
+    }
+  }
+  return results;
+}
+
+export function extractSoqlQueries(
   source: string,
   filePath: string
 ): SoqlQuery[] {
