@@ -56,7 +56,10 @@ export class SalesforceFieldMetadataService {
 
   constructor(
     private readonly connection?: Connection,
-    private readonly offlineCache = new OptionalFieldMetadataCache(),
+    private readonly offlineCache = new OptionalFieldMetadataCache(
+      process.env.FIELD_PERMISSIONABILITY_SNAPSHOT_PATH?.trim(),
+      process.env.FIELD_METADATA_OFFLINE_ORG_ID?.trim(),
+    ),
   ) {}
 
   private cacheKey(object: string): string {
