@@ -218,7 +218,7 @@ export function createPersonaAccessEvaluator(
       // Universally required custom fields cannot have individual FLS entries
       // in Profile/PS XML. Object permission is still necessary. Required-on-
       // layout fields are NOT exempt from FLS.
-      readable: objectAccess.access.read && (schemaRequired || permissionable === false || readGrantedBy.length > 0),
+      readable: objectAccess.access.read && (schemaRequired || readGrantedBy.length > 0),
       editable: objectAccess.access.edit && (schemaRequired || editGrantedBy.length > 0),
       permissionable,
       schemaRequired,
