@@ -11,6 +11,11 @@ import { SalesforceOrgConnection } from "./SalesforceOrgConnection.js";
 export class SalesforceRelationshipMetadataService {
   constructor(private readonly connection: SalesforceOrgConnection) {}
 
+  /** Selected-org identity used to reject unrelated local relationship caches. */
+  getOrganizationId(): string | undefined {
+    return this.connection.status?.organizationId;
+  }
+
   createHydrator(graph: RelationshipMap): {
     hydrateQuery(query: SoqlQuery, unresolvedPaths?: string[]): Promise<string[]>;
   } {
