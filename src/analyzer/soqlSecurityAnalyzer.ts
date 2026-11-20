@@ -14,6 +14,7 @@ import type { SoqlFieldInventory, SoqlFieldReference } from "../models/SoqlField
 import { ApexExecutionSecurityModeResolver } from "../services/ApexExecutionSecurityModeResolver.js";
 import { runtimeImpactForFinding, type SoqlExecutionMode } from "./soqlExecutionMode.js";
 import { recordSoqlCount, timeSoqlPhase, timeSoqlSync } from "../services/SoqlPerformanceMetrics.js";
+import { writePreparedSoqlInventoryDiagnostic } from "./soqlInventoryDiagnostics.js";
 
 /** Prevent hundreds of simultaneous Salesforce requests on large repositories. */
 const CONCURRENCY = 4;
@@ -123,7 +124,14 @@ export class SoqlSecurityAnalyzer {
     const modeResults = await timeSoqlPhase("execution.modes", () => Promise.all(queries.map((query) =>
       this.executionModeResolver.resolve(query.query, query.filePath)
     )));
-    return { queries, inventory, unresolvedFields, parserLimitations, modeResults };
+    const prepared = { queries, inventory, unresolvedFields, parserLimitations, modeResults };
+    // Explicit diagnostic opt-in only; normal SOQL findings and Excel remain unchanged.
+    const diagnosticPath = process.env.SALESFORCE_SOQL_DIAGNOSTIC_EXPORT_PATH?.trim();
+    if (diagnosticPath) {
+      await writePreparedSoqlInventoryDiagnostic(diagnosticPath, prepared,
+        this.orgRelationshipMetadata?.getOrganizationId?.());
+    }
+    return prepared;
   }
 
   /** Persona-specific verification. Never reuse another persona's access decisions. */
