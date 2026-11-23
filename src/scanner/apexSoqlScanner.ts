@@ -80,13 +80,39 @@ export async function scanApexSoqlWithUnresolved(
   }
 }
 
+/**
+ * Restore the original dependency explanation when richer repository helper
+ * evaluation cannot traverse a query site's control flow. This is diagnostic
+ * only: never import any query, variant or resolved status from the fallback.
+ */
+function preserveDynamicFailureDiagnostics(
+  source:string,filePath:string,
+  analysis:ReturnType<typeof extractDynamicSoqlQueries>,
+):ReturnType<typeof extractDynamicSoqlQueries> {
+  if(!analysis.unresolved.some(finding=>
+    /Invocation is outside a supported method or execution path/i.test(finding.reason)))
+    return analysis;
+  const local=extractDynamicSoqlQueries(source,filePath);
+  const localReasons=new Map(local.unresolved.map(finding=>[finding.siteId,finding.reason]));
+  return {...analysis,unresolved:analysis.unresolved.map(finding=>{
+    if(!/Invocation is outside a supported method or execution path/i.test(finding.reason))
+      return finding;
+    const original=localReasons.get(finding.siteId);
+    if(!original || /Invocation is outside a supported method or execution path/i.test(original))
+      return finding;
+    return {...finding,reason:"Repository caller execution path not established; "+
+      "source-local dependency: "+original};
+  })};
+}
+
 /** Only a complete Salesforce Describe snapshot may supply dynamic fields. */
 async function scanDynamicSource(source:string,filePath:string,
   metadata?:ApexMetadataProvider,repositoryIndex?:ApexRepositoryMethodIndex) {
   const repositoryResolver=(name:string,args:ApexValue[]) =>
     repositoryIndex?.evaluateReturn(filePath,name,args);
   if(!metadata || !source.includes("getGlobalDescribe"))
-    return extractDynamicSoqlQueries(source,filePath,repositoryResolver,repositoryIndex);
+    return preserveDynamicFailureDiagnostics(source,filePath,
+      extractDynamicSoqlQueries(source,filePath,repositoryResolver,repositoryIndex));
   const requested=new Set<string>();
   const gatherBase=(name:string,args:ApexValue[])=>{
     if(name==="Schema.describeFields"&&args[0]?.kind==="text")
@@ -98,7 +124,8 @@ async function scanDynamicSource(source:string,filePath:string,
   // First pass only discovers metadata dependencies. It never executes Apex.
   extractDynamicSoqlQueries(source,filePath,gather,repositoryIndex);
   if(!requested.size)
-    return extractDynamicSoqlQueries(source,filePath,repositoryResolver,repositoryIndex);
+    return preserveDynamicFailureDiagnostics(source,filePath,
+      extractDynamicSoqlQueries(source,filePath,repositoryResolver,repositoryIndex));
   const snapshots=new Map<string,Awaited<ReturnType<ApexMetadataProvider["getObjectFieldNames"]>>>();
   await Promise.all([...requested].map(async object=>{
     snapshots.set(object,await metadata.getObjectFieldNames(object));
@@ -111,9 +138,10 @@ async function scanDynamicSource(source:string,filePath:string,
       unknown("Complete Salesforce Describe metadata unavailable for "+args[0].values[0]+
         ": "+(found?.reason??"Object identity was not established."));
   };
-  return extractDynamicSoqlQueries(source,filePath,
-    (name,args)=>metadataResolver(name,args) ??
-      repositoryIndex?.evaluateReturn(filePath,name,args,metadataResolver),repositoryIndex);
+  return preserveDynamicFailureDiagnostics(source,filePath,
+    extractDynamicSoqlQueries(source,filePath,
+      (name,args)=>metadataResolver(name,args) ??
+        repositoryIndex?.evaluateReturn(filePath,name,args,metadataResolver),repositoryIndex));
 }
 
 async function scanRepositoryApex(
