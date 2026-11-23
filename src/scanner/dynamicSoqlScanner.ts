@@ -39,7 +39,8 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
   for(const site of engine.sites){
     const siteId=filePath+"@"+site.offset;
     const fail=(reason:string)=>unresolved.push({filePath,lineNumber:site.line,siteId,reason});
-    if(flow.exceeded){fail("Apex analysis exceeded its bounded path or operation budget.");continue;}
+    const failure=flow.failures.get(site.offset);
+    if(failure){fail(failure);continue;}
     const captures=flow.captures.get(site.offset)??[];
     if(!captures.length){fail("Invocation is outside a supported method or execution path.");continue;}
     const mode=explicitMode(site);
