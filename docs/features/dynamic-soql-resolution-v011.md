@@ -194,3 +194,43 @@ This first Stage 3 slice implements only the metadata-driven field-list path. It
 Baseline before this slice: 519 analyzed queries, 79 unresolved, seven High, 237 Low for Order Management Specialist Core. Run with the same repository, connected org and persona. Inspect ProductSelectorController execution lines 129, 149, 224, 267, and 545 specifically. These are candidates, **not guaranteed resolutions**: runtime paths, Custom Metadata limits and unknown control flow may still block them. The five original sites must not disappear silently; either each is fully resolved and contributes its correct object/field findings, or retains a specific Unable-to-verify reason.
 
 `OMSQueryService` public runtime field-list queries remain subject to the open-caller restriction. Four `OTCInvoiceController` Custom Metadata sites and `DynamicReportController` Field Set/report metadata sites are **not implemented by this slice**. Extend those in subsequent Stage 3 slices only after this source-level and real-repository comparison is validated. Keep PR #55 Draft.
+
+
+## Stage 3 completed — implementation scope and Stage 4 handoff
+
+The three metadata-backed analysis components are implemented on the current feature branch. They all reuse the existing \`ApexDataFlowEngine\`, \`ApexMetadataProvider\`, repository caller index, and SOQL parser/permission evaluator.
+
+### Product Selector: Custom Labels and JSON map fields
+
+- Read the exact referenced \`System.Label.*\` values from the connected org through read-only Tooling API \`ExternalString\`; reject missing/ambiguous names and locale-dependent translations.
+- Parse nested JSON objects, iterate proven maps and collections, track source-level String constants only when their initializer is immutable/literal, and ignore comments embedded between Apex query fragments.
+- A static mutable \`public static String\` is **not** a proven compile-time constant. When \`AdvantageConstants.PRODUCT_APINAME\` or another field is non-final or not present in the indexed repository, it remains unknown. The analyzer must not substitute the user's sample JSON or a guessed API name.
+- Existing Product Selector methods may remain unresolved if a feasible path depends on runtime values or unmodeled operations. Source comment handling is corrected separately from metadata evaluation.
+
+### OTC Invoice: Custom Metadata record-driven field lists
+
+- Index source-local literal \`[SELECT fields FROM Object__mdt WHERE A = :knownValue AND B = true ...]\` iterators.
+- Fetch a complete set of selected/filter fields through the existing read-only Salesforce data API; apply **all** supported equality predicates using proven literal/immutable source constants; reject unknown predicates, missing data, invalid field paths, oversized row sets and unsupported query shapes.
+- Interpret bounded \`for (Metadata__mdt row : [SELECT ...])\` loops, typed row fields, and source-ordered \`Map.put()\`/query concatenations. Do not treat a dynamic WHERE filter or runtime input as a known mapping.
+- Metadata records and dependent dynamic execution sites refresh on every connected-org analysis; cross-class helper dependencies cannot reuse stale dynamic SELECT lists.
+
+### Field Sets: known object/name paths and field members
+
+- Resolve \`Object.SObjectType.getDescribe().fieldSets.getMap().get('Known_Set')\`, \`.getFields()\`, \`FieldSetMember.getFieldPath()\`, and \`Utils.getFieldListFromFieldSet('Object','Known_Set')\` when both identifiers and all returned members are proven.
+- Read ordered members through Tooling API when the complete \`Metadata.displayedFields\` inventory is exposed. When Tooling only exposes the FieldSet record, use the connected user's **read-only** Metadata SOAP \`readMetadata(FieldSet, Object.Set)\` as an optional fallback. No user permission changes or metadata writes are performed.
+- If the connected user lacks the Metadata API permission, the Field Set contains unsupported data, or object/name originates from an unknown report configuration, the result is UNVERIFIED. DynamicReportController receives no guessed Field Set or report configuration.
+
+### Stage 2 follow-up included
+
+- Recover source-level SOQL expression values across line/block comments without damaging quoted strings.
+- Distinguish unknown instance members (\`info.objectApiName\`) from indexed static Apex constants in diagnostics.
+- Preserve complete known List/Map inventories only across supported mutations; unmodeled \`.remove()\`, \`.putAll()\`, etc., and potentially mutating helper calls taint the structural field inventory.
+- Existing public/external Apex entry points, including \`OMSQueryService\`, remain open-world. Known repository callers alone do not prove all runtime query variants.
+
+### Release/acceptance gate
+
+Before merging PR #55, rerun the analyzer in the same private repository and org with the **Order Management Specialist Core** persona. The pre-Stage-3 baseline is 519 analyzed queries, 79 Unable to verify, seven High, and 237 Low findings. No category count reduction is guaranteed solely by source-level tests; some contexts are genuinely runtime-driven.
+
+Check these sites against the previous Excel: ProductSelectorController:129,149,224,267,545; OTCInvoiceController:435,440,452,463; DynamicReportController:307,318,454,899,958; OMSQueryService:2453,3733; CloseTransmittedSampleOrdersBatch:47; and OrderSummaryEnrichmentBatch:64. Existing verified High findings and their permission classifications must not disappear.
+
+The next planned engineering stage is **Stage 4: remaining provable runtime/caller variants, budget/path edge cases, full-repository security regression analysis, and final merge readiness**. Stage 3 metadata readers are feature-complete within the explicit bounded grammars above; new unsupported metadata patterns are labeled clearly and remain UNVERIFIED until separately designed and tested.
