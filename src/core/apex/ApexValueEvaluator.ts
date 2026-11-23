@@ -7,6 +7,7 @@ export type ApexValue =
   | { kind: "map"; entries: Array<[string,ApexValue]> }
   | { kind: "record"; entries: Array<[string,ApexValue]> }
   | { kind: "records"; items: Array<Array<[string,ApexValue]>> }
+  | { kind: "fieldSet"; objectApiName:string; developerName:string }
   | { kind: "number"; value: number }
   | { kind: "unknown"; reason: string };
 
@@ -70,7 +71,8 @@ function combinations(left: ApexValue,right: ApexValue): ApexValue {
   if(left.kind==="collection"||right.kind==="collection"||
      left.kind==="map"||right.kind==="map"||
      left.kind==="record"||right.kind==="record"||
-     left.kind==="records"||right.kind==="records")
+     left.kind==="records"||right.kind==="records"||
+     left.kind==="fieldSet"||right.kind==="fieldSet")
     return unknown("Cannot concatenate an Apex collection as text.");
   const from=(x:ApexValue):string[]=>
     x.kind==="text"?x.values:x.kind==="number"?[String(x.value)]:[];
@@ -195,6 +197,21 @@ export function evaluateApexExpression(
     return argument.kind==="collection"?listValue(argument.items,unique)
       :unknown("Collection constructor input is not resolved.");
   }
+  const fieldSet=/^([A-Za-z_]\w*)\.SObjectType\.getDescribe\(\)\.fieldSets\.getMap\(\)\.get\(([\s\S]+)\)$/i.exec(expr);
+  if(fieldSet){
+    const name=evaluateApexExpression(fieldSet[2],context,depth+1);
+    if(name.kind!=="text"||name.values.length!==1)
+      return unknown("Field Set name depends on unproven Apex runtime input.");
+    return {kind:"fieldSet",objectApiName:fieldSet[1],developerName:name.values[0]};
+  }
+  const fieldSetChain=/^([A-Za-z_]\w*)\.SObjectType\.getDescribe\(\)\.fieldSets\.getMap\(\)\.get\(([\s\S]+)\)\.getFields\(\)$/i.exec(expr);
+  if(fieldSetChain){
+    const name=evaluateApexExpression(fieldSetChain[2],context,depth+1);
+    return name.kind==="text"&&name.values.length===1
+      ?context.resolveCall?.("Schema.fieldSetFields",[textValue(fieldSetChain[1]),name]) ??
+        unknown("Complete Field Set members not available from connected org.")
+      :unknown("Field Set name not proven.");
+  }
   // Only custom-metadata SOQL used in a for-each iterable can be supplied as
   // a complete row set; ordinary bracketed SOQL is not a scalar expression.
   if(/^\[\s*SELECT\b[\s\S]*\]$/i.test(expr))
@@ -240,6 +257,19 @@ export function evaluateApexExpression(
     const pieces=call[2].trim()?splitApexTopLevel(call[2],","):[];
     const args=pieces.map(x=>evaluateApexExpression(x,context,depth+1));
     const lname=name.toLowerCase();
+    if(lname.endsWith(".getfields")&&args.length===0){
+      const receiver=evaluateApexExpression(name.slice(0,-10),context,depth+1);
+      if(receiver.kind==="fieldSet")
+        return context.resolveCall?.("Schema.fieldSetFields",[
+          textValue(receiver.objectApiName),textValue(receiver.developerName)]) ??
+          unknown("Field Set members not proven from authoritative metadata.");
+      if(receiver.kind==="unknown")return receiver;
+    }
+    if(lname.endsWith(".getfieldpath")&&args.length===0){
+      const receiver=evaluateApexExpression(name.slice(0,-13),context,depth+1);
+      if(receiver.kind==="text")return receiver;
+      if(receiver.kind==="unknown")return receiver;
+    }
     if(lname==="json.deserialize") {
       // Apex .class type expressions contain generic commas, which are not
       // runtime arguments. Reconstitute and validate the type token instead
