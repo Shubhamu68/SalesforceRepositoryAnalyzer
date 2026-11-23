@@ -47,6 +47,8 @@ export class ApexRepositoryMethodIndex {
   private readonly callers=new Map<string,Caller[]>();
   private readonly paths=new Map<string,IndexedSource>();
   private readonly callerEvidence=new Map<string,ApexCallerEvidence>();
+  private readonly privateContexts=new Map<string,ApexValue[][] | null>();
+  private readonly privateContextStack=new Set<string>();
   private readonly active=new Set<string>();
   private readonly summaries=new Map<string,ApexValue>();
   private readonly scopes=new WeakMap<Function,number>();
@@ -143,6 +145,104 @@ export class ApexRepositoryMethodIndex {
     if(this.summaries.size>=MAX_CACHED_SUMMARIES)this.summaries.clear();
     this.summaries.set(id,result);
     return result;
+  }
+
+  /**
+   * Exhaustive private-method argument tracing. Unlike the public caller
+   * provenance index, this can narrow an execution site: Apex private methods
+   * cannot be called by other classes. Every syntactically possible local
+   * invocation must have a complete, bounded argument context.
+   *
+   * Public callers with known local constants are accepted; runtime method
+   * parameters, unsupported invocation locations and missing dispatch proof
+   * invalidate the entire closure. Never union unknown and known paths.
+   */
+  resolvePrivateContexts(filePath:string,target:IndexedApexMethod,
+    resolveExternal?: (name:string,args:ApexValue[])=>ApexValue|undefined
+  ):ApexValue[][]|undefined {
+    if(target.visibility!=="private")return undefined;
+    const owner=this.paths.get(path.resolve(filePath));
+    if(!owner || !owner.methods.some(method=>method.start===target.start))return undefined;
+    const cacheKey=owner.filePath+"|"+target.start+"|"+this.scopeId(resolveExternal);
+    if(this.privateContexts.has(cacheKey))
+      return this.privateContexts.get(cacheKey)??undefined;
+    if(this.privateContextStack.has(cacheKey) ||
+        this.privateContextStack.size>=MAX_METHOD_DEPTH)return undefined;
+    this.privateContextStack.add(cacheKey);
+    let proven:ApexValue[][]|undefined;
+    try {
+      const masked=maskApexSource(owner.source);
+      const pattern=new RegExp("\\b"+target.name+"\\s*\\(","g");
+      const contexts:ApexValue[][]=[];
+      let callCount=0;
+      let failed=false;
+      let match:RegExpExecArray|null;
+      while((match=pattern.exec(masked))!==null){
+        const opening=masked.indexOf("(",match.index);
+        const closing=matchingPair(masked,opening);
+        if(closing<0){failed=true;break;}
+        const following=masked.slice(closing+1).match(/^\s*([\s\S]?)/)?.[1];
+        const containing=owner.methods.filter(method=>
+          method.start<=match!.index&&match!.index<method.end)
+          .sort((a,b)=>(a.end-a.start)-(b.end-b.start))[0];
+        if(!containing){
+          // Declaration, not invocation. A class-level initializer is an
+          // unknown invocation context and must not be silently skipped.
+          if(following==="{")continue;
+          failed=true;break;
+        }
+        const prior=masked.slice(Math.max(0,match.index-80),match.index);
+        if(/\.\s*$/.test(prior)){
+          const receiver=/\b([A-Za-z_]\w*)\.\s*$/.exec(prior)?.[1];
+          if(receiver!=="this"&&receiver?.toLowerCase()!==owner.className.toLowerCase()){
+            failed=true;break;
+          }
+        }
+        const argumentText=owner.source.slice(opening+1,closing);
+        const expressions=argumentText.trim()?splitApexTopLevel(argumentText,","):[];
+        if(expressions.length!==target.parameters.length){
+          // Another overload with a different arity is not this method.
+          continue;
+        }
+        const overloads=owner.methods.filter(method=>
+          method.name.toLowerCase()===target.name.toLowerCase()&&
+          method.parameters.length===expressions.length);
+        if(overloads.length!==1||containing===target){failed=true;break;}
+        callCount++;
+        const callerContexts=containing.visibility==="private"
+          ?this.resolvePrivateContexts(owner.filePath,containing,resolveExternal)
+          :undefined;
+        // A private caller with unproven inputs is not a closed context.
+        if(containing.visibility==="private"&&!callerContexts?.length){
+          failed=true;break;
+        }
+        const seeds=callerContexts?.length?callerContexts:[undefined];
+        for(const seed of seeds){
+          const engine=new ApexDataFlowEngine(owner.source,{
+            resolveExternal:(name,args)=>resolveExternal?.(name,args) ??
+              this.evaluateReturn(owner.filePath,name,args,resolveExternal),
+          });
+          const values=engine.evaluateArgumentsAt(containing,match.index,expressions,seed);
+          if(!values.length || values.some(args=>
+            args.length!==target.parameters.length||
+            args.some(value=>value.kind==="unknown"))){
+            failed=true;break;
+          }
+          contexts.push(...values);
+          if(contexts.length>MAX_CALL_CONTEXTS){failed=true;break;}
+        }
+        if(failed)break;
+      }
+      if(!failed&&callCount>0&&contexts.length>0){
+        const distinct=new Map(contexts.map(args=>[JSON.stringify(args),args]));
+        if(distinct.size<=MAX_CALL_CONTEXTS)proven=[...distinct.values()];
+      }
+    }finally{
+      this.privateContextStack.delete(cacheKey);
+    }
+    if(this.privateContexts.size>=MAX_CACHED_SUMMARIES)this.privateContexts.clear();
+    this.privateContexts.set(cacheKey,proven??null);
+    return proven;
   }
 
   /** Identify the declaring method of an execution site, without guessing dispatch. */
