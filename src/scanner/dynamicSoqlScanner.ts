@@ -1,4 +1,5 @@
 import { ApexDataFlowEngine, type ApexCallSite } from "../core/apex/ApexDataFlowEngine.js";
+import type { ApexValue } from "../core/apex/ApexValueEvaluator.js";
 import { classifySoqlMode } from "../analyzer/soqlExecutionMode.js";
 import { extractSoqlExpressionFields } from "../analyzer/soqlExpressionInventory.js";
 import { parseNestedSoql } from "../analyzer/nestedSoqlScopes.js";
@@ -27,10 +28,11 @@ function explicitMode(site:ApexCallSite):"USER_MODE"|"SYSTEM_MODE"|undefined|nul
  * All paths at a site must yield complete valid SOQL; otherwise one REVIEW
  * is emitted for the site. No partial resolved results are ever published.
  */
-export function extractDynamicSoqlQueries(source:string,filePath:string):DynamicSoqlScanResult {
+export function extractDynamicSoqlQueries(source:string,filePath:string,
+  resolveExternal?: (name:string,args:ApexValue[])=>ApexValue|undefined):DynamicSoqlScanResult {
   if(!/\bDatabase\s*\.\s*(?:query|countQuery|getQueryLocator)/i.test(source))
     return {queries:[],unresolved:[]};
-  const engine=new ApexDataFlowEngine(source);
+  const engine=new ApexDataFlowEngine(source,{resolveExternal});
   const flow=engine.analyze();
   const queries:SoqlQuery[]=[];
   const unresolved:UnresolvedDynamicSoql[]=[];
