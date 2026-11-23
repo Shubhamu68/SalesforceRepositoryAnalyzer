@@ -52,6 +52,38 @@ export function maskApexSource(source: string): string {
   }
   return out.join("");
 }
+/** Remove Apex comments while preserving single/double-quoted literals and newlines.
+ * Source query concatenation can contain // comments between string fragments;
+ * these must never be interpreted as query content or Apex expressions. */
+export function stripApexComments(source:string):string {
+  let result="",mode:"plain"|"single"|"double"|"line"|"block"="plain";
+  for(let i=0;i<source.length;i++){
+    const ch=source[i],next=source[i+1];
+    if(mode==="line"){
+      if(ch==="\n"){result+="\n";mode="plain";}
+      else result+=ch==="\r"?"\r":" ";
+      continue;
+    }
+    if(mode==="block"){
+      if(ch==="*"&&next==="/"){result+="  ";i++;mode="plain";}
+      else result+=ch==="\r"||ch==="\n"?ch:" ";
+      continue;
+    }
+    if(mode==="single"||mode==="double"){
+      result+=ch;
+      if(ch==="\\"&&i+1<source.length){result+=source[++i];continue;}
+      if(ch===(mode==="single"?"'":'"'))mode="plain";
+      continue;
+    }
+    if(ch==="/"&&next==="/"){result+="  ";i++;mode="line";continue;}
+    if(ch==="/"&&next==="*"){result+="  ";i++;mode="block";continue;}
+    result+=ch;
+    if(ch==="'")mode="single";
+    else if(ch==='"')mode="double";
+  }
+  return result;
+}
+
 export function matchingPair(masked: string, open: number, left = "(", right = ")"): number {
   let level = 0;
   for (let i = open; i < masked.length; i++) {
