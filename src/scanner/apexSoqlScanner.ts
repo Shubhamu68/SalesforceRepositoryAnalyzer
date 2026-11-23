@@ -88,11 +88,12 @@ export async function scanApexSoqlWithUnresolved(
 function preserveDynamicFailureDiagnostics(
   source:string,filePath:string,
   analysis:ReturnType<typeof extractDynamicSoqlQueries>,
+  standaloneResolver?: (name:string,args:ApexValue[])=>ApexValue|undefined,
 ):ReturnType<typeof extractDynamicSoqlQueries> {
   if(!analysis.unresolved.some(finding=>
     /Invocation is outside a supported method or execution path/i.test(finding.reason)))
     return analysis;
-  const local=extractDynamicSoqlQueries(source,filePath);
+  const local=extractDynamicSoqlQueries(source,filePath,standaloneResolver);
   const localReasons=new Map(local.unresolved.map(finding=>[finding.siteId,finding.reason]));
   return {...analysis,unresolved:analysis.unresolved.map(finding=>{
     if(!/Invocation is outside a supported method or execution path/i.test(finding.reason))
@@ -141,7 +142,8 @@ async function scanDynamicSource(source:string,filePath:string,
   return preserveDynamicFailureDiagnostics(source,filePath,
     extractDynamicSoqlQueries(source,filePath,
       (name,args)=>metadataResolver(name,args) ??
-        repositoryIndex?.evaluateReturn(filePath,name,args,metadataResolver),repositoryIndex));
+        repositoryIndex?.evaluateReturn(filePath,name,args,metadataResolver),repositoryIndex),
+      metadataResolver);
 }
 
 async function scanRepositoryApex(
