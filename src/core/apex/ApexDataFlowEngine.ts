@@ -318,8 +318,7 @@ export class ApexDataFlowEngine {
   private privateCallers(owner:IndexedApexMethod):
     Array<{offset:number;method:IndexedApexMethod}>{
     const masked=maskApexSource(this.source);
-    const safeName=owner.name.replace(/[^A-Za-z0-9_]/g,"\\  /**
-   * Analyze independently from each execution site; parse/index once.");
+    const safeName=owner.name; // Apex identifiers cannot contain regex punctuation.
     const pattern=new RegExp("\\b"+safeName+"\\s*\\(","g");
     const callers:Array<{offset:number;method:IndexedApexMethod}>=[];
     let match:RegExpExecArray|null;
