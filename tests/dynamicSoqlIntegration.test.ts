@@ -132,3 +132,66 @@ test("supported string-built getQueryLocator remains dynamic rather than being s
   assert.equal(scanned.queries.length,1);
   assert.equal(scanned.queries[0].object,"Account");
 });
+
+
+test("report RCA: provably private helper receives known List fields from its caller",()=>{
+ const code=[
+  "public class OMSQueryService {",
+  " private static List<SObject> fetch(List<String> orderFields){",
+  "   String query='SELECT Id, '+String.join(orderFields, ', ')+' FROM OrderSummary';",
+  "   return Database.query(query);",
+  " }",
+  " public static void run(){",
+  "   fetch(new List<String>{'Name','AccountId'});",
+  " }",
+  "}",
+ ].join("\n");
+ const scanned=extractDynamicSoqlQueries(code,"OMSQueryService.cls");
+ assert.equal(scanned.unresolved.length,0);
+ assert.equal(scanned.queries.length,1);
+ assert.equal(scanned.queries[0].query,"SELECT Id, Name, AccountId FROM OrderSummary");
+});
+test("report RCA: private helper accumulates every distinct known caller's query variant",()=>{
+ const code=[
+  "public class OMSQueryService {",
+  " private static void fetch(String field){",
+  "   Database.query('SELECT '+field+' FROM Account');",
+  " }",
+  " public static void run(){",
+  "   fetch('Id');",
+  "   fetch('Name');",
+  " }",
+  "}",
+ ].join("\n");
+ const scanned=extractDynamicSoqlQueries(code,"OMSQueryService.cls");
+ assert.equal(scanned.unresolved.length,0);
+ assert.deepEqual(scanned.queries.map(q=>q.query).sort(),
+   ["SELECT Id FROM Account","SELECT Name FROM Account"].sort());
+});
+test("report RCA: unrestricted public field-list input must remain unresolved",()=>{
+ const code=[
+  "public class OMSQueryService {",
+  " public static void fetchOrderSummaries(List<String> fields){",
+  "   Database.query('SELECT Id, '+String.join(fields, ', ')+' FROM OrderSummary');",
+  " }",
+  "}",
+ ].join("\n");
+ const scanned=extractDynamicSoqlQueries(code,"OMSQueryService.cls");
+ assert.equal(scanned.queries.length,0);
+ assert.equal(scanned.unresolved.length,1);
+ assert.match(scanned.unresolved[0].reason,/String\.join/i);
+});
+test("report RCA: private helper with one unknown caller is not falsely Resolved",()=>{
+ const code=[
+  "public class Helper {",
+  " private static void fetch(String field){",
+  "   Database.query('SELECT '+field+' FROM Account');",
+  " }",
+  " public static void known(){fetch('Id');}",
+  " public static void unknown(String field){fetch(field);}",
+  "}",
+ ].join("\n");
+ const scanned=extractDynamicSoqlQueries(code,"Helper.cls");
+ assert.equal(scanned.queries.length,0);
+ assert.equal(scanned.unresolved.length,1);
+});
