@@ -104,3 +104,7 @@ Read [Architecture](docs/architecture.md) for the module-level flow.
 
 ---
 For issues or feature requests, use the [issue templates](https://github.com/Shubhamu68/SalesforceRepositoryAnalyzer/issues/new/choose). Please redact organization IDs, field values and credentials from reports or logs.
+
+## In-progress v0.1.1 dynamic SOQL analysis
+
+The [v0.1.1 design and implementation notes](docs/features/dynamic-soql-resolution-v011.md) describe the reusable Apex dependency engine, bounded query-variant resolution, metadata support, and known limitations. The feature is in a **draft PR**: unknown runtime fields and incomplete metadata remain **Unable to verify**, never fabricated permission grants. This source change does not alter the separately released **Windows Portable** version or its download instructions.
