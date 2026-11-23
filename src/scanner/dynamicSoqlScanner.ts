@@ -1,5 +1,6 @@
 import { classifySoqlMode, type DeclaredSoqlMode } from "../analyzer/soqlExecutionMode.js";
 import { maskSoql } from "../analyzer/soqlMask.js";
+import { extractSoqlExpressionFields } from "../analyzer/soqlExpressionInventory.js";
 import { parseNestedSoql } from "../analyzer/nestedSoqlScopes.js";
 import type { SoqlQuery } from "../models/SoqlQuery.js";
 
@@ -19,7 +20,6 @@ const IDENTIFIER = /^[A-Za-z_]\w*$/;
 const LITERAL = /^'(?:\\.|[^'\\])*'$/s;
 const MAX_EXPRESSION_LENGTH = 100_000;
 const MAX_STATEMENTS = 1000;
-const MAX_RESOLUTION_DEPTH = 24;
 
 function lineAt(source: string, position: number): number {
   let line = 1;
@@ -204,8 +204,9 @@ export function extractDynamicSoqlQueries(source: string, filePath: string): Dyn
       continue;
     }
     const parsed = parseNestedSoql(queryText, lineNumber);
-    if (!parsed) {
-      sites.push({ lineNumber, reason: "Constructed SOQL could not be parsed as a complete query." });
+    const expressions = extractSoqlExpressionFields(queryText);
+    if (!parsed || !expressions.parsed || expressions.limitations.length) {
+      sites.push({ lineNumber, reason: "Constructed SOQL could not be parsed completely by the existing SOQL parser." });
       EXECUTION.lastIndex = end + 1;
       continue;
     }
