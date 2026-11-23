@@ -252,3 +252,19 @@ test("Stage 2: incompatible List-return paths remain unresolved",()=>{
   assert.equal(result.unresolved.length,1);
   assert.match(result.unresolved[0].reason,/collection|unknown|unresolved/i);
 });
+
+test("Stage 3 final: unsupported collection mutation cannot preserve stale field list",()=>{
+  const code=[
+    "public class UnsafeList {",
+    " public static void run(){",
+    "   List<String> fields=new List<String>{'Id','Name'};",
+    "   fields.remove(0);",
+    "   Database.query('SELECT '+String.join(fields, ',')+' FROM Account');",
+    " }",
+    "}",
+  ].join("\n");
+  const result=extractDynamicSoqlQueries(code,"UnsafeList.cls");
+  assert.equal(result.queries.length,0);
+  assert.equal(result.unresolved.length,1);
+  assert.match(result.unresolved[0].reason,/unsupported mutation/i);
+});
