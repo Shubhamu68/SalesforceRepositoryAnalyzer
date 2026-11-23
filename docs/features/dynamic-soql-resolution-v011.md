@@ -123,7 +123,7 @@ The feature branch now includes:
 - Internal `queryVariantId` propagation through inventory, security analysis and deduplication to avoid same-line variant misattribution, with no Excel format changes.
 - New regression suites for dynamic discovery and single/multi-variant construction.
 
-**Do not interpret a successful code push as proof that this implementation handles all 13 supplied examples.** The live-org metadata adapters and full cross-class/caller-context tracing are **not yet wired**. Metadata-driven or runtime-parameter-dependent queries must remain UNRESOLVED instead of being guessed. An arbitrary `for` loop, complex `try/finally`, runtime `String.format` or unknown utility method is not a proven resolved query.
+**Do not interpret a successful code push as proof that this implementation handles all 13 supplied examples.** Live Salesforce **Describe-based complete field lists are now wired** where the object name is provable, using the read-only, org-scoped `SalesforceApexMetadataProvider`. A generic queryable Custom Metadata read method is available for reuse, but full `__mdt` utility-method interpretation, Field Sets, class-instance-state tracking and cross-class/caller-context tracing are **not yet wired**. These queries must remain UNRESOLVED instead of being guessed. An arbitrary `for` loop, complex `try/finally`, runtime `String.format` or unknown utility method is not a proven resolved query.
 
 ### Validation gate before merging
 
