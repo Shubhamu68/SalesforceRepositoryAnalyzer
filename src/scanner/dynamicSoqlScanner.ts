@@ -34,7 +34,10 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
   repositoryIndex?: ApexRepositoryMethodIndex):DynamicSoqlScanResult {
   if(!/\bDatabase\s*\.\s*(?:query|countQuery|getQueryLocator)/i.test(source))
     return {queries:[],unresolved:[]};
-  const engine=new ApexDataFlowEngine(source,{resolveExternal});
+  const engine=new ApexDataFlowEngine(source,{
+    resolveExternal,
+    resolvePrivateContexts:owner=>repositoryIndex?.resolvePrivateContexts(filePath,owner,resolveExternal),
+  });
   const flow=engine.analyze();
   const queries:SoqlQuery[]=[];
   const unresolved:UnresolvedDynamicSoql[]=[];
