@@ -167,7 +167,8 @@ export function evaluateApexExpression(
         unknown("Map keySet() depends on unresolved metadata.");
     }
     if(lname==="string.join"&&args.length===2){
-      if(args[0].kind!=="collection")return unknown("String.join collection is not known.");
+      if(args[0].kind!=="collection")return unknown("String.join collection is not known: "+
+        (args[0].kind==="unknown"?args[0].reason:"input is not a collection."));
       const sep=onlyText(args[1]);
       return sep!==null?textValue(args[0].items.join(sep)):unknown("String.join delimiter is unknown.");
     }
@@ -177,7 +178,8 @@ export function evaluateApexExpression(
       return textValue(String(lname==="string.isblank"?blank:!blank));
     }
     if(lname==="string.escapesinglequotes"&&args.length===1){
-      if(args[0].kind!=="text")return unknown("escapeSingleQuotes input unknown.");
+      if(args[0].kind!=="text")return unknown("escapeSingleQuotes input unknown: "+
+        (args[0].kind==="unknown"?args[0].reason:"input is not text."));
       return merged(args[0].values.map(x=>x.replace(/'/g,"\\'")));
     }
     const methods=["removeend","trim","tolowercase","touppercase","isempty","split","equalsignorecase","containsignorecase"];
@@ -186,7 +188,8 @@ export function evaluateApexExpression(
     if(dot>=0&&methods.includes(operation)){
       const receiver=evaluateApexExpression(name.slice(0,dot),context,depth+1);
       if(operation==="isempty"&&receiver.kind==="collection")return textValue(String(receiver.items.length===0));
-      if(receiver.kind!=="text")return unknown("Receiver for "+operation+" not resolved.");
+      if(receiver.kind!=="text")return unknown("Receiver for "+operation+" not resolved: "+
+        (receiver.kind==="unknown"?receiver.reason:"receiver is not text."));
       const argument=args.length?onlyText(args[0]):null;
       if(operation==="trim")return merged(receiver.values.map(x=>x.trim()));
       if(operation==="tolowercase")return merged(receiver.values.map(x=>x.toLowerCase()));
