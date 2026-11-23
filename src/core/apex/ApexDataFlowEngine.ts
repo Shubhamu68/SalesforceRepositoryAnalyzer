@@ -134,6 +134,39 @@ export class ApexDataFlowEngine {
       }};
     return evaluateApexExpression(expr,context);
   }
+  /**
+   * Apex passes mutable collection references into helpers. If we cannot prove
+   * a call is side-effect free, a known List/Set used later in SELECT is no
+   * longer a safe complete field inventory. Scalars remain immutable.
+   */
+  private taintCollectionsPassedToUnknownCalls(source:string,state:State):void{
+    if(!source.includes("(") || ![...state.values.values()].some(v=>v.kind==="collection"))return;
+    const masked=maskApexSource(source);
+    const call=/\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(/g;
+    const pure=/^(?:String\.(?:join|isBlank|isNotBlank|escapeSingleQuotes)|System\.debug|Math\.\w+|Database\.(?:query|queryWithBinds|countQuery|countQueryWithBinds|getQueryLocator|getQueryLocatorWithBinds))$/i;
+    let match:RegExpExecArray|null;
+    while((match=call.exec(masked))!==null){
+      const name=match[1], open=masked.indexOf("(",match.index);
+      const close=matchingPair(masked,open);
+      if(close<0)continue;
+      if(pure.test(name)){call.lastIndex=open+1;continue;}
+      const receiver=name.includes(".")?name.slice(0,name.lastIndexOf(".")):"";
+      // add/addAll/clear are handled explicitly as ordered mutations above.
+      if(["add","addAll","clear"].includes(name.slice(name.lastIndexOf(".")+1)) &&
+        state.values.get(receiver)?.kind==="collection"){
+        call.lastIndex=open+1;continue;
+      }
+      const argumentText=source.slice(open+1,close);
+      for(const [identifier,value] of state.values){
+        if(value.kind!=="collection")continue;
+        if(new RegExp("\\b"+identifier+"\\b").test(argumentText)){
+          state.values.set(identifier,unknown(
+            "Mutable collection "+identifier+" may be changed by unsupported method "+name+"."));
+        }
+      }
+      call.lastIndex=open+1;
+    }
+  }
   private captureCalls(start:number,end:number,state:State,depth:number):void{
     // Sites are sorted by source offset. Binary-search instead of walking
     // every Database call for every parsed Apex statement.
@@ -204,6 +237,7 @@ export class ApexDataFlowEngine {
           state.values.set(name,{kind:"text",values:[...new Set(values)]});
         }else state.values.set(name,unknown("Cannot determine += value of "+name));
       }
+      this.taintCollectionsPassedToUnknownCalls(rhs,state);
       return;
     }
     const declaration=/^(?:final\s+)?(?:String|List<[^>]+>|Set<[^>]+>|Integer|Boolean)\s+([A-Za-z_]\w*)$/i.exec(original);
@@ -212,6 +246,7 @@ export class ApexDataFlowEngine {
     // their body. Evaluate their arguments without executing arbitrary Apex.
     if(/^(?:(?:this|[A-Za-z_]\w*)\.)?[A-Za-z_]\w*\s*\(/.test(original)){
       this.evaluate(original,state,depth);
+      this.taintCollectionsPassedToUnknownCalls(original,state);
     }
   }
   private runNode(node:SourceNode,state:State,depth:number):
