@@ -302,7 +302,14 @@ export class ApexDataFlowEngine {
             }
           }
           state.values.set(name,{kind:"text",values:[...new Set(values)]});
-        }else state.values.set(name,unknown("Cannot determine += value of "+name));
+        }else {
+          const previousReason=former?.kind==="unknown"?former.reason:
+            former?"Previous value is not a proven String.":"No proven previous assignment.";
+          const appendedReason=value.kind==="unknown"?value.reason:
+            value.kind!=="text"?"Appended expression is not a proven String.":undefined;
+          state.values.set(name,unknown("Cannot determine += value of "+name+": "+
+            [previousReason,appendedReason].filter(Boolean).join("; ")));
+        }
       }
       this.taintCollectionsPassedToUnknownCalls(rhs,state);
       return;
