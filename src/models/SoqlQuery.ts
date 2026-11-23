@@ -63,4 +63,6 @@ export interface SoqlQuery {
   withUserMode: boolean;
 
   securityMode: SoqlSecurityMode;
+  /** Explicit AccessLevel on a dynamic Database method; overrides API default. */
+  dynamicAccessLevel?: "USER_MODE" | "SYSTEM_MODE";
 }
