@@ -247,11 +247,14 @@ async function scanRepositoryApex(
   const currentEntries=await timeSoqlPhase("scanner.stat_and_parse",()=>parallelMap(sources,
     async (entry:typeof sources[number]):Promise<[string,CachedApexFile]>=>{
       const existing=previous?.get(entry.filePath);
+      // A metadata value may flow from a different class into this method.
+      // With a connected org, re-evaluate ALL dynamic execution classes on
+      // each new user-initiated scan, while reusing unchanged static-only
+      // classes. No stale cross-class label/fieldset/CMDT result may survive.
+      const hasDynamicCall=/\bDatabase\s*\.\s*(?:query|countQuery|getQueryLocator)(?:WithBinds)?\s*\(/i
+        .test(maskApexSource(entry.source));
       if(entry.reused && graphUnchanged && existing &&
-         !(metadata && (
-           /\bSystem\s*\.\s*Label\s*\./.test(maskApexSource(entry.source)) ||
-           /\bFieldSet\b|\.fieldSets\.getMap\(\)|getFieldListFromFieldSet|\bFROM\s+\w+__mdt\b/i.test(entry.source)
-         )))
+         !(metadata && hasDynamicCall))
         return [entry.filePath,existing];
       const staticQueries=entry.reused && existing
         ?existing.queries.filter(query=>!query.dynamicOrigin)
