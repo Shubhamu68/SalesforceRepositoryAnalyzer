@@ -87,12 +87,15 @@ export class ApexDataFlowEngine {
   private exceeded = false;
   /** Per-site failure attribution: a large unrelated method never taints other sites. */
   private readonly failures=new Map<number,string>();
-  private activeSiteOffset:number|undefined;
+  private activeStopOffset:number|undefined;
+  private activeQueryOffset:number|undefined;
+  private readonly className:string|undefined;
   constructor(readonly source:string,options:ApexFlowOptions={}) {
     this.options={maxPaths:options.maxPaths??DEFAULT_PATHS,
       maxOperations:options.maxOperations??DEFAULT_OPERATIONS,
       maxDepth:options.maxDepth??DEFAULT_DEPTH,...options};
     const masked=maskApexSource(source);
+    this.className=/\bclass\s+([A-Za-z_]\w*)\b/i.exec(masked)?.[1];
     this.sites=findCalls(source,masked);
     this.methods=indexApexMethods(source);
   }
@@ -102,7 +105,9 @@ export class ApexDataFlowEngine {
         const external=this.options.resolveExternal?.(name,args);
         if(external!==undefined)return external;
         const ownName=name.replace(/^this\./i,"");
-        const candidates=this.methods.filter(m=>m.name.toLowerCase()===ownName.toLowerCase()
+        const sameClass=this.className&&ownName.startsWith(this.className+".")
+          ?ownName.slice(this.className.length+1):ownName;
+        const candidates=this.methods.filter(m=>m.name.toLowerCase()===sameClass.toLowerCase()
           && m.parameters.length===args.length);
         if(candidates.length!==1)return undefined;
         if(depth>=this.options.maxDepth)return unknown("Apex helper recursion depth exceeded.");
@@ -140,7 +145,7 @@ export class ApexDataFlowEngine {
     }
     for(let i=low;i<this.sites.length&&this.sites[i].offset<end;i++){
       const site=this.sites[i];
-      if(this.activeSiteOffset!==undefined&&site.offset!==this.activeSiteOffset)continue;
+      if(this.activeQueryOffset!==undefined&&site.offset!==this.activeQueryOffset)continue;
       const value=this.evaluate(site.argument,state,depth);
       const access=site.accessLevelArgument?
         this.evaluate(site.accessLevelArgument,state,depth):textValue("(default)");
@@ -202,7 +207,12 @@ export class ApexDataFlowEngine {
       return;
     }
     const declaration=/^(?:final\s+)?(?:String|List<[^>]+>|Set<[^>]+>|Integer|Boolean)\s+([A-Za-z_]\w*)$/i.exec(original);
-    if(declaration)state.values.set(declaration[1],unknown("Declared but not assigned."));
+    if(declaration){state.values.set(declaration[1],unknown("Declared but not assigned."));return;}
+    // Standalone same-class helper calls may contain a Database.query() inside
+    // their body. Evaluate their arguments without executing arbitrary Apex.
+    if(/^(?:(?:this|[A-Za-z_]\w*)\.)?[A-Za-z_]\w*\s*\(/.test(original)){
+      this.evaluate(original,state,depth);
+    }
   }
   private runNode(node:SourceNode,state:State,depth:number):
     {states:State[];returns:ApexValue[]}{
@@ -289,7 +299,7 @@ export class ApexDataFlowEngine {
     for(const node of nodes){
       // Only the source prefix leading to this execution site can contribute
       // to its query value. Helpers (depth>0) must evaluate their full body.
-      if(depth===0&&this.activeSiteOffset!==undefined&&node.start>this.activeSiteOffset)break;
+      if(depth===0&&this.activeStopOffset!==undefined&&node.start>this.activeStopOffset)break;
       if(this.exceeded)break;
       const next:State[]=[];
       for(const state of states){
@@ -303,6 +313,28 @@ export class ApexDataFlowEngine {
       }else states=next;
     }
     return {states,returns};
+  }
+  /** Collect only lexical same-class callers of an explicitly private helper. */
+  private privateCallers(owner:IndexedApexMethod):
+    Array<{offset:number;method:IndexedApexMethod}>{
+    const masked=maskApexSource(this.source);
+    const safeName=owner.name.replace(/[^A-Za-z0-9_]/g,"\\  /**
+   * Analyze independently from each execution site; parse/index once.");
+    const pattern=new RegExp("\\b"+safeName+"\\s*\\(","g");
+    const callers:Array<{offset:number;method:IndexedApexMethod}>=[];
+    let match:RegExpExecArray|null;
+    while((match=pattern.exec(masked))!==null){
+      const containing=this.methods.find(m=>m!==owner&&m.start<=match!.index&&match!.index<m.end);
+      if(!containing)continue;
+      const prior=masked.slice(Math.max(0,match.index-100),match.index);
+      const dot=/\.\s*$/.test(prior);
+      if(dot){
+        const receiver=/\b([A-Za-z_]\w*)\.\s*$/.exec(prior)?.[1];
+        if(receiver!=="this"&&receiver!==this.className)continue;
+      }
+      callers.push({offset:match.index,method:containing});
+    }
+    return callers;
   }
   /**
    * Analyze independently from each execution site; parse/index once.
@@ -318,17 +350,38 @@ export class ApexDataFlowEngine {
     for(const site of this.sites){
       this.operationCount=0;
       this.exceeded=false;
-      this.activeSiteOffset=site.offset;
+      this.activeQueryOffset=site.offset;
+      this.activeStopOffset=site.offset;
       this.activeCalls.clear();
+      this.summaries.clear();
       const owner=this.methods.filter(m=>m.start<=site.offset&&site.offset<m.end)
         .sort((a,b)=>(a.end-a.start)-(b.end-b.start))[0];
       if(!owner){
         this.failures.set(site.offset,"Execution site is outside a recognized Apex method.");
         continue;
       }
-      const env=new Map<string,ApexValue>();
-      for(const p of owner.parameters)env.set(p,unknown("Runtime method parameter: "+p));
-      this.execute(owner.body,[{values:env}],0);
+      const callers=owner.visibility==="private"
+        ?this.privateCallers(owner):[];
+      if(callers.length){
+        // A private method cannot be invoked externally; every visible
+        // call-site must supply a proven argument context to claim RESOLVED.
+        for(const caller of callers){
+          this.activeStopOffset=caller.offset;
+          const before=this.captures.get(site.offset)?.length??0;
+          const env=new Map<string,ApexValue>();
+          for(const p of caller.method.parameters)
+            env.set(p,unknown("Runtime caller parameter: "+p));
+          this.execute(caller.method.body,[{values:env}],0);
+          if((this.captures.get(site.offset)?.length??0)===before)
+            this.failures.set(site.offset,
+              "Private helper caller did not establish a complete query execution context.");
+          if(this.exceeded)break;
+        }
+      }else{
+        const env=new Map<string,ApexValue>();
+        for(const p of owner.parameters)env.set(p,unknown("Runtime method parameter: "+p));
+        this.execute(owner.body,[{values:env}],0);
+      }
       if(this.exceeded){
         this.failures.set(site.offset,
           "This execution site's dependency path exceeded its bounded analysis budget.");
@@ -338,7 +391,8 @@ export class ApexDataFlowEngine {
         this.captures.delete(site.offset);
       }
     }
-    this.activeSiteOffset=undefined;
+    this.activeStopOffset=undefined;
+    this.activeQueryOffset=undefined;
     return {captures:this.captures,exceeded:anyExceeded,failures:this.failures};
   }
 }
