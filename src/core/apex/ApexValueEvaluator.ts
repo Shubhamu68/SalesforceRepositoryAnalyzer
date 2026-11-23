@@ -1,0 +1,170 @@
+import { splitApexTopLevel } from "./ApexSourceModel.js";
+
+/** Portable abstract Apex values: no Salesforce API calls and no eval(). */
+export type ApexValue =
+  | { kind: "text"; values: string[] }
+  | { kind: "collection"; items: string[]; unique: boolean }
+  | { kind: "unknown"; reason: string };
+
+export type ApexEnvironment = Map<string, ApexValue>;
+export const unknown = (reason: string): ApexValue => ({kind:"unknown",reason});
+export const textValue = (value: string): ApexValue => ({kind:"text",values:[value]});
+export const listValue = (items: string[], unique = false): ApexValue => ({
+  kind:"collection", items:unique?[...new Set(items)]:items, unique,
+});
+export const MAX_ALTERNATIVES = 32;
+const MAX_CHARS = 100_000;
+
+export interface ApexExpressionContext {
+  values: ReadonlyMap<string,ApexValue>;
+  resolveCall?: (name: string, args: ApexValue[]) => ApexValue | undefined;
+}
+
+function unescapeApex(token: string): string | null {
+  if (!/^'(?:\\.|[^'\\])*'$/s.test(token)) return null;
+  return token.slice(1,-1).replace(/\\([nrt'\\])/g,(_whole: string,v: string)=>
+    v==="n"?"\n":v==="r"?"\r":v==="t"?"\t":v);
+}
+function merged(values: string[]): ApexValue {
+  const unique=[...new Set(values)];
+  if(unique.length>MAX_ALTERNATIVES || unique.some(x=>x.length>MAX_CHARS))
+    return unknown("Query expression exceeds the bounded alternative/length limit.");
+  return {kind:"text",values:unique};
+}
+function combinations(left: ApexValue,right: ApexValue): ApexValue {
+  if(left.kind==="unknown")return left;
+  if(right.kind==="unknown")return right;
+  if(left.kind!=="text"||right.kind!=="text")return unknown("Cannot concatenate an Apex collection as text.");
+  const joined:string[]=[];
+  for(const a of left.values)for(const b of right.values){
+    if(joined.length>=MAX_ALTERNATIVES)return unknown("Too many query expression alternatives.");
+    joined.push(a+b);
+  }
+  return merged(joined);
+}
+function onlyText(value: ApexValue): string | null {
+  return value.kind==="text"&&value.values.length===1?value.values[0]:null;
+}
+function unwrap(source: string): string {
+  let value=source.trim();
+  for(;;){
+    if(!value.startsWith("(")||!value.endsWith(")"))return value;
+    let depth=0, closing=-1, literal=false;
+    for(let i=0;i<value.length;i++){
+      const c=value[i];
+      if(literal&&c==="\\"&&i+1<value.length){i++;continue;}
+      if(c==="'")literal=!literal;
+      if(literal)continue;
+      if(c==="(")depth++;
+      if(c===")"&&--depth===0){closing=i;break;}
+    }
+    if(closing!==value.length-1)return value;
+    value=value.slice(1,-1).trim();
+  }
+}
+export function evaluateApexExpression(
+  expression: string, context: ApexExpressionContext, depth = 0,
+): ApexValue {
+  if(depth>32)return unknown("Expression nesting exceeded the limit.");
+  const expr=unwrap(expression);
+  if(!expr)return unknown("Empty expression.");
+  const literal=unescapeApex(expr);
+  if(literal!==null)return textValue(literal);
+  if(/^-?\d+(?:\.\d+)?$/.test(expr))return textValue(expr);
+  if(/^(true|false)$/i.test(expr))return textValue(expr.toLowerCase());
+  if(expr==="null")return textValue("null");
+  if(/^[A-Za-z_]\w*$/.test(expr))return context.values.get(expr)??unknown("Apex symbol "+expr+" has no proven value.");
+  const alternatives=splitApexTopLevel(expr,"?");
+  if(alternatives.length===2){
+    const branch=splitApexTopLevel(alternatives[1],":");
+    if(branch.length===2){
+      const condition=evaluateApexExpression(alternatives[0],context,depth+1);
+      const value=onlyText(condition);
+      if(value==="true")return evaluateApexExpression(branch[0],context,depth+1);
+      if(value==="false")return evaluateApexExpression(branch[1],context,depth+1);
+      const a=evaluateApexExpression(branch[0],context,depth+1);
+      const b=evaluateApexExpression(branch[1],context,depth+1);
+      return a.kind==="text"&&b.kind==="text"
+        ?merged([...a.values,...b.values])
+        :unknown("Unknown ternary expression alternatives.");
+    }
+  }
+  for(const operator of ["==","!="]){
+    const parts=splitApexTopLevel(expr,operator);
+    if(parts.length===2){
+      const a=onlyText(evaluateApexExpression(parts[0],context,depth+1));
+      const b=onlyText(evaluateApexExpression(parts[1],context,depth+1));
+      return a!==null&&b!==null?textValue(String(operator==="=="?a===b:a!==b))
+        :unknown("Runtime conditional comparison "+expr);
+    }
+  }
+  const plus=splitApexTopLevel(expr,"+");
+  if(plus.length>1){
+    return plus.reduce<ApexValue>((a,item)=>
+      combinations(a,evaluateApexExpression(item,context,depth+1)),textValue(""));
+  }
+  const create=/^new\s+(List|Set)<[\w\s,.<>]+>\s*(?:\(([\s\S]*)\)|\{([\s\S]*)\})$/i.exec(expr);
+  if(create){
+    const unique=create[1].toLowerCase()==="set";
+    if(create[3]!==undefined){
+      const items=splitApexTopLevel(create[3],",");
+      const values:string[]=[];
+      for(const item of items){
+        if(!item.trim())continue;
+        const result=evaluateApexExpression(item,context,depth+1);
+        const s=onlyText(result);
+        if(s===null)return unknown("Collection initializer contains a runtime value.");
+        values.push(s);
+      }
+      return listValue(values,unique);
+    }
+    if(!create[2]?.trim())return listValue([],unique);
+    const argument=evaluateApexExpression(create[2],context,depth+1);
+    return argument.kind==="collection"?listValue(argument.items,unique)
+      :unknown("Collection constructor input is not resolved.");
+  }
+  const call=/^([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(([\s\S]*)\)$/s.exec(expr);
+  if(call){
+    const name=call[1];
+    const pieces=call[2].trim()?splitApexTopLevel(call[2],","):[];
+    const args=pieces.map(x=>evaluateApexExpression(x,context,depth+1));
+    const lname=name.toLowerCase();
+    if(lname==="string.join"&&args.length===2){
+      if(args[0].kind!=="collection")return unknown("String.join collection is not known.");
+      const sep=onlyText(args[1]);
+      return sep!==null?textValue(args[0].items.join(sep)):unknown("String.join delimiter is unknown.");
+    }
+    if((lname==="string.isblank"||lname==="string.isnotblank")&&args.length===1){
+      const text=onlyText(args[0]);if(text===null)return unknown("String blankness depends on runtime input.");
+      const blank=text.trim().length===0;
+      return textValue(String(lname==="string.isblank"?blank:!blank));
+    }
+    if(lname==="string.escapesinglequotes"&&args.length===1){
+      if(args[0].kind!=="text")return unknown("escapeSingleQuotes input unknown.");
+      return merged(args[0].values.map(x=>x.replace(/'/g,"\\'")));
+    }
+    const methods=["removeend","trim","tolowercase","touppercase","isempty","split","equalsignorecase","containsignorecase"];
+    const dot=name.lastIndexOf(".");
+    const operation=name.slice(dot+1).toLowerCase();
+    if(dot>=0&&methods.includes(operation)){
+      const receiver=evaluateApexExpression(name.slice(0,dot),context,depth+1);
+      if(operation==="isempty"&&receiver.kind==="collection")return textValue(String(receiver.items.length===0));
+      if(receiver.kind!=="text")return unknown("Receiver for "+operation+" not resolved.");
+      const argument=args.length?onlyText(args[0]):null;
+      if(operation==="trim")return merged(receiver.values.map(x=>x.trim()));
+      if(operation==="tolowercase")return merged(receiver.values.map(x=>x.toLowerCase()));
+      if(operation==="touppercase")return merged(receiver.values.map(x=>x.toUpperCase()));
+      if(operation==="isempty")return merged(receiver.values.map(x=>String(x.length===0)));
+      if(argument===null)return unknown("Argument for "+operation+" is not resolved.");
+      if(operation==="removeend")return merged(receiver.values.map(x=>x.endsWith(argument)?x.slice(0,-argument.length):x));
+      if(operation==="equalsignorecase")return merged(receiver.values.map(x=>String(x.toLowerCase()===argument.toLowerCase())));
+      if(operation==="containsignorecase")return merged(receiver.values.map(x=>String(x.toLowerCase().includes(argument.toLowerCase()))));
+      if(operation==="split"){
+        const one=onlyText(receiver);
+        return one!==null?listValue(one.split(argument)):unknown("Split has multiple possible inputs.");
+      }
+    }
+    return context.resolveCall?.(name,args)??unknown("Unsupported or external Apex method: "+name);
+  }
+  return unknown("Unsupported Apex expression: "+expr.slice(0,100));
+}
