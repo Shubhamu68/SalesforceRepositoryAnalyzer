@@ -100,17 +100,11 @@ async function scanRepositoryApex(repositoryPath: string): Promise<SoqlScanInven
       const source = cold ? cold[1] : await readFile(filePath, "utf8");
       const staticQueries = extractSoqlQueries(source, filePath);
       const dynamic = extractDynamicSoqlQueries(source, filePath);
-      const staticLines = new Set(staticQueries.map(query => query.lineNumber));
-      // The existing v0.1.0 inventory uses file+line attribution. Avoid
-      // accepting a dynamic query that collides with a static query on one line.
-      const dynamicQueries = dynamic.queries.filter(query => !staticLines.has(query.lineNumber));
-      const collisions = dynamic.queries.filter(query => staticLines.has(query.lineNumber)).map(query => ({
-        filePath, lineNumber: query.lineNumber,
-        reason: "Static and dynamic SOQL share the same line; query attribution is ambiguous."
-      }));
+      // Every dynamic execution site and branch variant has its own identity,
+      // so multiple queries can correctly share the same physical Apex line.
       return [filePath, {
-        fingerprint, queries: [...staticQueries, ...dynamicQueries],
-        unresolvedDynamic: [...dynamic.unresolved, ...collisions],
+        fingerprint, queries: [...staticQueries, ...dynamic.queries],
+        unresolvedDynamic: dynamic.unresolved,
       }];
     }));
   recordSoqlCount("scanner.reused_files", reused);
