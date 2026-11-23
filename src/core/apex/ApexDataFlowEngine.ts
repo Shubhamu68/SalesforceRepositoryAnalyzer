@@ -204,12 +204,23 @@ export class ApexDataFlowEngine {
       const result=this.statement(node,state,depth);
       return {states:[state],returns:result?[result]:[]};
     }
-    if(node.kind==="block")return this.execute(node.body??[],[clone(state)],depth);
+    const scoped=(nodes:SourceNode[]):FrameResult=>{
+      const before=new Set(state.values.keys());
+      const result=this.execute(nodes,[clone(state)],depth);
+      for(const frame of result.states){
+        // Locals introduced by a nested branch/block must not escape scope.
+        // Assignments to existing symbols remain visible after the block.
+        for(const key of frame.values.keys())
+          if(!before.has(key))frame.values.delete(key);
+      }
+      return result;
+    };
+    if(node.kind==="block")return scoped(node.body??[]);
     if(node.kind==="if"){
       const condition=this.evaluate(node.condition??"",state,depth);
       const known=bool(condition);
-      const paths=[...(known!==false?[this.execute(node.body??[],[clone(state)],depth)]:[]),
-        ...(known!==true?[this.execute(node.otherwise??[],[clone(state)],depth)]:[])];
+      const paths=[...(known!==false?[scoped(node.body??[])]:[]),
+        ...(known!==true?[scoped(node.otherwise??[])]:[])];
       return {states:paths.flatMap(x=>x.states),returns:paths.flatMap(x=>x.returns)};
     }
     if(node.kind==="for"){
@@ -225,6 +236,10 @@ export class ApexDataFlowEngine {
           });
           const result=this.execute(node.body??[],states,depth);
           states=result.states; returns.push(...result.returns);
+        }
+        for(const frame of states){
+          if(!state.values.has(node.loopVariable!))frame.values.delete(node.loopVariable!);
+          else frame.values.set(node.loopVariable!,state.values.get(node.loopVariable!)!);
         }
         return {states,returns};
       }
