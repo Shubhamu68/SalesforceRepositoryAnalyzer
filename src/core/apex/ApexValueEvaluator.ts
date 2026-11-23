@@ -1,4 +1,4 @@
-import { splitApexTopLevel } from "./ApexSourceModel.js";
+import { splitApexTopLevel, stripApexComments } from "./ApexSourceModel.js";
 
 /** Portable abstract Apex values: no Salesforce API calls and no eval(). */
 export type ApexValue =
@@ -102,7 +102,7 @@ export function evaluateApexExpression(
   expression: string, context: ApexExpressionContext, depth = 0,
 ): ApexValue {
   if(depth>32)return unknown("Expression nesting exceeded the limit.");
-  const expr=unwrap(expression);
+  const expr=unwrap(stripApexComments(expression));
   if(!expr)return unknown("Empty expression.");
   const literal=unescapeApex(expr);
   if(literal!==null)return textValue(literal);
@@ -115,7 +115,9 @@ export function evaluateApexExpression(
     unknown("Custom Label "+label[1]+" is not available from complete org metadata.");
   const constant=/^([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/.exec(expr);
   if(constant)return context.resolveCall?.("Apex.constant",[textValue(expr)]) ??
-    unknown("Repository Apex constant "+expr+" has no proven literal value.");
+    unknown(/^[a-z]/.test(constant[1])
+      ?"Instance member expression "+expr+" depends on runtime object state."
+      :"Repository Apex constant "+expr+" has no proven immutable literal value.");
   if(expr.startsWith("!") && !expr.startsWith("!=")){
     const result=evaluateApexExpression(expr.slice(1),context,depth+1);
     const simple=onlyText(result);
