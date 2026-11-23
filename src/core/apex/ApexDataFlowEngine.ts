@@ -56,6 +56,12 @@ function findCalls(source:string,masked:string):ApexCallSite[]{
       continue;
     }
     const args=splitApexTopLevel(source.slice(open+1,end),",");
+    // Bracketed SOQL is already parsed by the existing static scanner.
+    // Database.getQueryLocator([SELECT ...]) is not a string-built query.
+    if(/^\s*\[\s*SELECT\b/i.test(args[0]??"")){
+      EXECUTION.lastIndex=end+1;
+      continue;
+    }
     const index=/withbinds$/i.test(match[1])?2:1;
     sites.push({offset:match.index,line:sourceLine(source,match.index),
       method:match[1],argument:args[0]??"",
@@ -79,6 +85,9 @@ export class ApexDataFlowEngine {
   private readonly activeCalls = new Set<string>();
   private operationCount = 0;
   private exceeded = false;
+  /** Per-site failure attribution: a large unrelated method never taints other sites. */
+  private readonly failures=new Map<number,string>();
+  private activeSiteOffset:number|undefined;
   constructor(readonly source:string,options:ApexFlowOptions={}) {
     this.options={maxPaths:options.maxPaths??DEFAULT_PATHS,
       maxOperations:options.maxOperations??DEFAULT_OPERATIONS,
@@ -131,6 +140,7 @@ export class ApexDataFlowEngine {
     }
     for(let i=low;i<this.sites.length&&this.sites[i].offset<end;i++){
       const site=this.sites[i];
+      if(this.activeSiteOffset!==undefined&&site.offset!==this.activeSiteOffset)continue;
       const value=this.evaluate(site.argument,state,depth);
       const access=site.accessLevelArgument?
         this.evaluate(site.accessLevelArgument,state,depth):textValue("(default)");
@@ -277,6 +287,10 @@ export class ApexDataFlowEngine {
   private execute(nodes:SourceNode[],initial:State[],depth:number):FrameResult{
     let states=initial,returns:ApexValue[]=[];
     for(const node of nodes){
+      // Only the source prefix leading to this execution site can contribute
+      // to its query value. Helpers (depth>0) must evaluate their full body.
+      if(depth===0&&this.activeSiteOffset!==undefined&&node.start>this.activeSiteOffset)break;
+      if(this.exceeded)break;
       const next:State[]=[];
       for(const state of states){
         const result=this.runNode(node,state,depth);
@@ -290,13 +304,41 @@ export class ApexDataFlowEngine {
     }
     return {states,returns};
   }
-  /** Every method is an entry candidate; unknown public input is not guessed. */
-  analyze(): {captures:Map<number,ApexCallValue[]>; exceeded:boolean} {
-    for(const method of this.methods){
+  /**
+   * Analyze independently from each execution site; parse/index once.
+   * The tightest enclosing method owns the site. Unknown entry parameters
+   * remain unknown unless a caller is proven, never guessed as constants.
+   */
+  analyze(): {
+    captures:Map<number,ApexCallValue[]>;
+    exceeded:boolean;
+    failures:Map<number,string>;
+  } {
+    let anyExceeded=false;
+    for(const site of this.sites){
+      this.operationCount=0;
+      this.exceeded=false;
+      this.activeSiteOffset=site.offset;
+      this.activeCalls.clear();
+      const owner=this.methods.filter(m=>m.start<=site.offset&&site.offset<m.end)
+        .sort((a,b)=>(a.end-a.start)-(b.end-b.start))[0];
+      if(!owner){
+        this.failures.set(site.offset,"Execution site is outside a recognized Apex method.");
+        continue;
+      }
       const env=new Map<string,ApexValue>();
-      for(const p of method.parameters)env.set(p,unknown("Runtime method parameter: "+p));
-      this.execute(method.body,[{values:env}],0);
+      for(const p of owner.parameters)env.set(p,unknown("Runtime method parameter: "+p));
+      this.execute(owner.body,[{values:env}],0);
+      if(this.exceeded){
+        this.failures.set(site.offset,
+          "This execution site's dependency path exceeded its bounded analysis budget.");
+        anyExceeded=true;
+        // A bounded helper summary should not be reused for another site.
+        this.summaries.clear();
+        this.captures.delete(site.offset);
+      }
     }
-    return {captures:this.captures,exceeded:this.exceeded};
+    this.activeSiteOffset=undefined;
+    return {captures:this.captures,exceeded:anyExceeded,failures:this.failures};
   }
 }
