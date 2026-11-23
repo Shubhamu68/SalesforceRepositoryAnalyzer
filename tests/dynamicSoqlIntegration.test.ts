@@ -300,3 +300,46 @@ test("optional FROM built only on one feasible path must not be assumed uncondit
   assert.equal(result.queries.length,0);
   assert.equal(result.unresolved.length,1);
 });
+
+test("Stage 1 regression: outer query declaration survives both OrderSummary batch branches",()=>{
+  const code=[
+    "public class OrderSummaryEnrichmentBatch {",
+    " private List<Id> orderSummaryIds;",
+    " public Database.QueryLocator start(Database.BatchableContext bc) {",
+    "   String query;",
+    "   if (orderSummaryIds != null && orderSummaryIds.size() > 0) {",
+    "     query = 'SELECT Id, Status FROM OrderSummary WHERE Id IN :orderSummaryIds';",
+    "   } else {",
+    "     Integer minimumAgeMinutes = getOrderSummaryMinimumAgeMinutes();",
+    "     Datetime eligibleCreatedDate = System.now().addMinutes(-minimumAgeMinutes);",
+    "     query = 'SELECT Id, Status FROM OrderSummary ' +",
+    "             'WHERE Status = :status ' +",
+    "             'AND CreatedDate >= :createdOnOrAfter ' +",
+    "             'AND CreatedDate <= :eligibleCreatedDate';",
+    "   }",
+    "   return Database.getQueryLocator(query);",
+    " }",
+    "}"
+  ].join("\n");
+  const result=extractDynamicSoqlQueries(code,"OrderSummaryEnrichmentBatch.cls");
+  assert.equal(result.unresolved.length,0);
+  assert.deepEqual(result.queries.map(q=>q.query).sort(),[
+    "SELECT Id, Status FROM OrderSummary WHERE Id IN :orderSummaryIds",
+    "SELECT Id, Status FROM OrderSummary WHERE Status = :status AND CreatedDate >= :createdOnOrAfter AND CreatedDate <= :eligibleCreatedDate",
+  ].sort());
+});
+
+test("Stage 1 scope: branch-only variable cannot escape without outer declaration",()=>{
+  const code=[
+    "public class BranchScope {",
+    " public static void run(Boolean flag) {",
+    "   if(flag) { String query = 'SELECT Id FROM Account'; }",
+    "   else { String query = 'SELECT Id FROM Contact'; }",
+    "   Database.query(query);",
+    " }",
+    "}"
+  ].join("\n");
+  const result=extractDynamicSoqlQueries(code,"BranchScope.cls");
+  assert.equal(result.queries.length,0);
+  assert.equal(result.unresolved.length,1);
+});
