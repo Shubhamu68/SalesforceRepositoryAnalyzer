@@ -14,6 +14,8 @@ export interface ApexMetadataProvider {
   getObjectFieldNames(objectApiName: string): Promise<MetadataResult<string[]>>;
   /** Custom Label master value from the connected org; not a guessed local fixture. */
   getCustomLabelValue?(labelApiName: string): Promise<MetadataResult<string>>;
+  /** Ordered SOQL-ready field paths from a uniquely identified Field Set. */
+  getFieldSetFields?(objectApiName:string,fieldSetDeveloperName:string):Promise<MetadataResult<string[]>>;
   /** For future record-driven loops; callers must supply proven filters. */
   getCustomMetadataRecords(
     objectApiName: string, fields: readonly string[],
