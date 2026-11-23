@@ -189,7 +189,7 @@ export class ApexDataFlowEngine {
     if(state.stopped)return {states:[state],returns:[]};
     if(++this.operationCount>this.options.maxOperations){
       this.exceeded=true;
-      return {states:[{values:new Map([...state.values.keys()].map(k=>
+      return {states:[{values:new Map([...state.values.keys()].map((k):[string,ApexValue]=>
         [k,unknown("Apex operation budget exceeded.")]))}],returns:[]};
     }
     if(node.kind==="statement"){
@@ -259,7 +259,7 @@ export class ApexDataFlowEngine {
       }
       if(next.length>this.options.maxPaths){
         this.exceeded=true;
-        states=[{values:new Map([...next[0].values.keys()].map(k=>[k,
+        states=[{values:new Map([...next[0].values.keys()].map((k):[string,ApexValue]=>[k,
           unknown("Query path enumeration budget exceeded.")]))}];
       }else states=next;
     }
