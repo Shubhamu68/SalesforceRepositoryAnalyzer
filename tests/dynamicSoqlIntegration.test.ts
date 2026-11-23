@@ -767,3 +767,161 @@ test("Stage 3: same-source org label edits invalidate cached dynamic query",asyn
     assert.equal(second.unresolvedDynamic.length,0);
   }finally{await rm(dir,{recursive:true,force:true});}
 });
+
+test("Stage 3 final: Custom Metadata WHERE filters reconstruct OTC field maps",async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),"v011-metadata-fields-"));
+  try{
+    await writeFile(path.join(dir,"MetadataConstants.cls"),[
+      "public class MetadataConstants {",
+      " public static final String EDI = '945';",
+      " public static final String TYPE = 'Draft Invoice';",
+      " public static final String SOURCE = 'OrderSummary';",
+      " public static final String TARGET = 'Invoice__c';",
+      "}",
+    ].join("\n"));
+    await writeFile(path.join(dir,"MetadataInvoice.cls"),[
+      "public class MetadataInvoice {",
+      " public static void run(){",
+      "   Map<String,String> fields=new Map<String,String>();",
+      "   String q='SELECT Id,';",
+      "   for(Field_Mapping__mdt field : [SELECT Source_Field__c, Source_Object__c,",
+      "       Target_Field__c, Target_Object__c FROM Field_Mapping__mdt",
+      "       WHERE EDI_Code__c = :MetadataConstants.EDI",
+      "       AND Type__c = :MetadataConstants.TYPE AND Active__c = true WITH SECURITY_ENFORCED]){",
+      "     if(field.Source_Object__c == MetadataConstants.SOURCE &&",
+      "        field.Target_Object__c == MetadataConstants.TARGET){",
+      "       fields.put(field.Source_Field__c,field.Target_Field__c);",
+      "       q += field.Source_Field__c + ',';",
+      "     }",
+      "   }",
+      "   if(!fields.isEmpty()){Database.query(q.removeEnd(',')+' FROM OrderSummary WHERE Id IN :orderIds');}",
+      " }",
+      "}",
+    ].join("\n"));
+    const allRecords=[
+      {Source_Field__c:"Status",Source_Object__c:"OrderSummary",
+        Target_Field__c:"Invoice_Status__c",Target_Object__c:"Invoice__c",
+        EDI_Code__c:"945",Type__c:"Draft Invoice",Active__c:true,DeveloperName:"One"},
+      {Source_Field__c:"OrderNumber",Source_Object__c:"OrderSummary",
+        Target_Field__c:"Invoice_Order__c",Target_Object__c:"Invoice__c",
+        EDI_Code__c:"945",Type__c:"Draft Invoice",Active__c:true,DeveloperName:"Two"},
+      {Source_Field__c:"Secret__c",Source_Object__c:"OrderSummary",
+        Target_Field__c:"Invoice_Secret__c",Target_Object__c:"Invoice__c",
+        EDI_Code__c:"946",Type__c:"Draft Invoice",Active__c:true,DeveloperName:"Excluded"},
+    ];
+    const provider={
+      scopeKey:"org-metadata/connection-1",
+      getObjectFieldNames:async()=>({complete:false as const,source:"LIVE_ORG" as const}),
+      getCustomMetadataRecords:async()=>({complete:true as const,source:"LIVE_ORG" as const,value:allRecords}),
+    };
+    const inventory=await scanApexSoqlWithUnresolved(dir,provider);
+    const dynamic=inventory.queries.filter(x=>x.dynamicOrigin);
+    assert.equal(inventory.unresolvedDynamic.length,0,JSON.stringify(inventory.unresolvedDynamic));
+    assert.equal(dynamic.length,1);
+    assert.match(dynamic[0].query,/SELECT Id,OrderNumber,Status FROM OrderSummary/);
+    assert.doesNotMatch(dynamic[0].query,/Secret__c/);
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test("Stage 3 final: unproven Custom Metadata WHERE bind cannot manufacture fields",async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),"v011-metadata-unknown-"));
+  try{
+    await writeFile(path.join(dir,"RuntimeMetadata.cls"),[
+      "public class RuntimeMetadata {",
+      " public static void run(String edi){",
+      "   String q='SELECT Id,';",
+      "   for(Field_Mapping__mdt field : [SELECT Source_Field__c FROM Field_Mapping__mdt",
+      "       WHERE EDI_Code__c = :edi AND Active__c = true]){",
+      "     q += field.Source_Field__c + ',';",
+      "   }",
+      "   Database.query(q.removeEnd(',')+' FROM OrderSummary');",
+      " }",
+      "}",
+    ].join("\n"));
+    const provider={
+      scopeKey:"org-metadata-unknown",
+      getObjectFieldNames:async()=>({complete:false as const,source:"LIVE_ORG" as const}),
+      getCustomMetadataRecords:async()=>({complete:true as const,source:"LIVE_ORG" as const,value:[
+        {Source_Field__c:"Secret__c",EDI_Code__c:"945",Active__c:true},
+      ]}),
+    };
+    const inventory=await scanApexSoqlWithUnresolved(dir,provider);
+    assert.equal(inventory.queries.filter(x=>x.dynamicOrigin).length,0);
+    assert.equal(inventory.unresolvedDynamic.length,1);
+    assert.match(inventory.unresolvedDynamic[0].reason,/runtime|unproven|metadata/i);
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test("Stage 3 final: Field Set Describe members generate exact field list",async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),"v011-fieldset-fields-"));
+  try{
+    await writeFile(path.join(dir,"FieldSetConsumer.cls"),[
+      "public class FieldSetConsumer {",
+      " public static void run(){",
+      "   Schema.FieldSet fs=Account.SObjectType.getDescribe().fieldSets.getMap().get('Export_Fields');",
+      "   List<Schema.FieldSetMember> members=fs.getFields();",
+      "   List<String> fields=new List<String>();",
+      "   for(Schema.FieldSetMember m : members){",
+      "     fields.add(m.getFieldPath());",
+      "   }",
+      "   Database.query('SELECT '+String.join(fields, ',')+' FROM Account WITH USER_MODE');",
+      " }",
+      "}",
+    ].join("\n"));
+    const provider={
+      scopeKey:"org-fieldset/connection-1",
+      getFieldSetFields:async()=>({complete:true as const,source:"LIVE_ORG" as const,value:["Id","Name","Phone"]}),
+      getObjectFieldNames:async()=>({complete:false as const,source:"LIVE_ORG" as const}),
+      getCustomMetadataRecords:async()=>({complete:false as const,source:"LIVE_ORG" as const}),
+    };
+    const inventory=await scanApexSoqlWithUnresolved(dir,provider);
+    assert.equal(inventory.unresolvedDynamic.length,0,JSON.stringify(inventory.unresolvedDynamic));
+    assert.equal(inventory.queries.filter(x=>x.dynamicOrigin)[0].query,
+      "SELECT Id,Name,Phone FROM Account WITH USER_MODE");
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test("Stage 3 final: inaccessible Field Set members cannot be used as verified query fields",async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),"v011-fieldset-missing-"));
+  try{
+    await writeFile(path.join(dir,"FieldSetConsumer.cls"),[
+      "public class FieldSetConsumer {",
+      " public static void run(){",
+      "   List<String> fields=Utils.getFieldListFromFieldSet('Account','Export_Fields');",
+      "   Database.query('SELECT '+String.join(fields,',')+' FROM Account');",
+      " }",
+      "}",
+    ].join("\n"));
+    const provider={
+      scopeKey:"org-fieldset/missing",
+      getFieldSetFields:async()=>({complete:false as const,source:"LIVE_ORG" as const,
+        reason:"Field Set metadata permission denied"}),
+      getObjectFieldNames:async()=>({complete:false as const,source:"LIVE_ORG" as const}),
+      getCustomMetadataRecords:async()=>({complete:false as const,source:"LIVE_ORG" as const}),
+    };
+    const inventory=await scanApexSoqlWithUnresolved(dir,provider);
+    assert.equal(inventory.queries.filter(x=>x.dynamicOrigin).length,0);
+    assert.equal(inventory.unresolvedDynamic.length,1);
+    assert.match(inventory.unresolvedDynamic[0].reason,/Field Set|permission/i);
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test("Stage 2 hardening: multiline SOQL concatenation ignores Apex source comments",()=>{
+  const code=[
+    "public class CommentedQuery {",
+    " public static void run(){",
+    "   String q='SELECT Id, ';",
+    "   q += // internal note, not a field name",
+    "       'Name FROM Account ' +",
+    "       // ignored line between terms",
+    "       'WHERE IsDeleted = false';",
+    "   Database.query(q);",
+    " }",
+    "}",
+  ].join("\n");
+  const result=extractDynamicSoqlQueries(code,"CommentedQuery.cls");
+  assert.equal(result.unresolved.length,0,JSON.stringify(result.unresolved));
+  assert.equal(result.queries.length,1);
+  assert.equal(result.queries[0].query,
+    "SELECT Id, Name FROM Account WHERE IsDeleted = false");
+});
