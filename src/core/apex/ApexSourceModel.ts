@@ -19,6 +19,8 @@ export interface IndexedApexMethod {
   start: number;
   end: number;
   parameters: string[];
+  /** Only explicitly private methods permit exhaustive same-class caller tracing. */
+  visibility: "private" | "public" | "protected" | "global" | "unspecified";
   body: SourceNode[];
 }
 const CONTROL = new Set(["if","else","for","while","switch","catch","try","do","synchronized"]);
@@ -209,7 +211,9 @@ export function indexApexMethods(source: string): IndexedApexMethod[] {
     const args=splitApexTopLevel(source.slice(opening+1,closing),",")
       .map(v=>v.trim().match(/([A-Za-z_]\w*)\s*$/)?.[1]??"")
       .filter(Boolean);
+    const visibility=/\b(private|public|protected|global)\b/i.exec(prefix);
     methods.push({name:match[1],start:brace+1,end:closeBrace,parameters:args,
+      visibility:(visibility?.[1].toLowerCase()??"unspecified") as IndexedApexMethod["visibility"],
       body:parseApexStatements(source,brace+1,closeBrace,masked)});
     call.lastIndex=brace+1;
   }
