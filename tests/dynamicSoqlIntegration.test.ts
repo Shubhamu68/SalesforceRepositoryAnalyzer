@@ -195,3 +195,38 @@ test("report RCA: private helper with one unknown caller is not falsely Resolved
  assert.equal(scanned.queries.length,0);
  assert.equal(scanned.unresolved.length,1);
 });
+
+
+test("mutable SELECT-field collection passed to unknown helper must not appear fully resolved",()=>{
+ const code=[
+  "public class CollectionMutations {",
+  " public static void run(){",
+  "   List<String> fields = new List<String>{'Id'};",
+  "   UnknownUtility.addMoreColumns(fields);",
+  "   String q = 'SELECT '+String.join(fields, ', ')+' FROM Account';",
+  "   Database.query(q);",
+  " }",
+  "}",
+ ].join("\n");
+ const scanned=extractDynamicSoqlQueries(code,"CollectionMutations.cls");
+ assert.equal(scanned.queries.length,0);
+ assert.equal(scanned.unresolved.length,1);
+ assert.match(scanned.unresolved[0].reason,/mutable collection|String\.join/i);
+});
+test("known local collection operations remain resolvable after mutation guard",()=>{
+ const code=[
+  "public class CollectionMutations {",
+  " public static void run(){",
+  "   Set<String> fields = new Set<String>();",
+  "   fields.add('Id');",
+  "   fields.add('Name');",
+  "   String q = 'SELECT '+String.join(new List<String>(fields), ', ')+' FROM Account';",
+  "   Database.query(q);",
+  " }",
+  "}",
+ ].join("\n");
+ const scanned=extractDynamicSoqlQueries(code,"CollectionMutations.cls");
+ assert.equal(scanned.unresolved.length,0);
+ assert.equal(scanned.queries.length,1);
+ assert.match(scanned.queries[0].query,/^SELECT Id, Name FROM Account$/);
+});
