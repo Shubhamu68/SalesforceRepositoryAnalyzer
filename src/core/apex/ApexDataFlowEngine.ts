@@ -198,16 +198,26 @@ export class ApexDataFlowEngine {
         this.activeCalls.add(key);
         const env=new Map<string,ApexValue>();
         candidates[0].parameters.forEach((p,i)=>env.set(p,args[i]));
-        const result=this.execute(candidates[0].body,[{values:env}],depth+1);
-        this.activeCalls.delete(key);
+        let result:FrameResult;
+        try {
+          result=this.execute(candidates[0].body,[{values:env}],depth+1);
+        }finally{this.activeCalls.delete(key);}
         let value:ApexValue;
-        if(result.returns.length===0)value=unknown("Helper has no provable returned value: "+ownName);
-        else if(result.returns.some(v=>v.kind!=="text"))value=unknown("Helper returns unknown query fragment: "+ownName);
-        else {
+        if(result.returns.length===0||result.states.some(s=>!s.stopped))
+          value=unknown("Helper has an execution path without a proven return: "+ownName);
+        else if(result.returns.some(v=>v.kind==="unknown"))
+          value=result.returns.find(v=>v.kind==="unknown")!;
+        else if(result.returns.every(v=>v.kind==="text")){
           const alternatives=[...new Set(result.returns.flatMap(v=>v.kind==="text"?v.values:[]))];
           value=alternatives.length>this.options.maxPaths
             ?unknown("Too many helper return alternatives.")
             :{kind:"text",values:alternatives};
+        }else{
+          // A List/Set or number is safe only when every return path has the
+          // same complete value. Never merge different collections by union.
+          const distinct=new Map(result.returns.map(v=>[JSON.stringify(v),v]));
+          value=distinct.size===1?distinct.values().next().value!:
+            unknown("Helper returns incompatible collection or numeric alternatives: "+ownName);
         }
         this.summaries.set(key,value);
         return value;
