@@ -30,6 +30,12 @@ export interface ApexFlowOptions {
 interface State { values: ApexEnvironment; stopped?: boolean }
 interface FrameResult { states: State[]; returns: ApexValue[] }
 
+/** Shared declaration recognizer for source slicing and symbolic execution. */
+function trackedStandaloneDeclaration(statement:string):string|undefined {
+  return /^(?:final\s+)?(?:String|List<[^>]+>|Set<[^>]+>|Integer|Boolean)\s+([A-Za-z_]\w*)\s*;?\s*$/i
+    .exec(statement.trim())?.[1];
+}
+
 /** Identical symbolic states do not represent additional structural query variants. */
 function mergeEquivalentStates(states:State[]):State[] {
   const distinct=new Map<string,State>();
@@ -63,11 +69,15 @@ function queryDependencySlice(nodes:SourceNode[], offset:number, expression:stri
       const assignment=/\b([A-Za-z_]\w*)\s*(\+?=)\s*([\s\S]+?);?\s*$/.exec(statement);
       const mutation=/\b([A-Za-z_]\w*)\s*\.\s*(?:add|addAll|clear|remove|put|putAll)\s*\(/i.exec(statement);
       const write=assignment?.[1]??mutation?.[1];
+      // Keeping a referenced outer declaration preserves its lexical scope:
+      // otherwise branch cleanup incorrectly deletes assignments to it.
+      const declaration=trackedStandaloneDeclaration(statement);
       // Methods may mutate collections by reference or instance state.
       // Keep calls until an explicit side-effect model proves them harmless.
       const containsCall=/\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\s*\(/.test(maskApexSource(statement));
       const safeDebug=/^System\.debug\s*\(/i.test(statement);
       const needed=includesCall||terminates||(write!==undefined&&relevant.has(write))||
+        (declaration!==undefined&&relevant.has(declaration))||
         (containsCall&&!safeDebug)||(!write&&/[\[\]{}]/.test(statement));
       if(!needed)return false;
       live.add(node);
@@ -316,8 +326,8 @@ export class ApexDataFlowEngine {
       this.taintCollectionsPassedToUnknownCalls(rhs,state);
       return;
     }
-    const declaration=/^(?:final\s+)?(?:String|List<[^>]+>|Set<[^>]+>|Integer|Boolean)\s+([A-Za-z_]\w*)$/i.exec(original);
-    if(declaration){state.values.set(declaration[1],unknown("Declared but not assigned."));return;}
+    const declaration=trackedStandaloneDeclaration(original);
+    if(declaration){state.values.set(declaration,unknown("Declared but not assigned."));return;}
     // Standalone same-class helper calls may contain a Database.query() inside
     // their body. Evaluate their arguments without executing arbitrary Apex.
     if(/^(?:(?:this|[A-Za-z_]\w*)\.)?[A-Za-z_]\w*\s*\(/.test(original)){
