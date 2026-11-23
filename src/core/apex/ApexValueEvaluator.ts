@@ -147,12 +147,25 @@ export function evaluateApexExpression(
     return argument.kind==="collection"?listValue(argument.items,unique)
       :unknown("Collection constructor input is not resolved.");
   }
+  // Schema Describe is a metadata dependency, not a method to execute.
+  // A caller-supplied read-only snapshot must prove the complete field list.
+  const describe=/^Schema\\.getGlobalDescribe\\(\\)\\.get\\(([^)]*)\\)\\.getDescribe\\(\\)\\.fields\\.getMap\\(\\)$/i.exec(expr);
+  if(describe){
+    const object=evaluateApexExpression(describe[1],context,depth+1);
+    return context.resolveCall?.("Schema.describeFields",[object]) ??
+      unknown("Schema Describe fields are unavailable for the target object.");
+  }
   const call=/^([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(([\s\S]*)\)$/s.exec(expr);
   if(call){
     const name=call[1];
     const pieces=call[2].trim()?splitApexTopLevel(call[2],","):[];
     const args=pieces.map(x=>evaluateApexExpression(x,context,depth+1));
     const lname=name.toLowerCase();
+    if(lname.endsWith(".keyset")&&args.length===0){
+      const receiver=evaluateApexExpression(name.slice(0,-7),context,depth+1);
+      return receiver.kind==="collection"?listValue(receiver.items,true):
+        unknown("Map keySet() depends on unresolved metadata.");
+    }
     if(lname==="string.join"&&args.length===2){
       if(args[0].kind!=="collection")return unknown("String.join collection is not known.");
       const sep=onlyText(args[1]);
