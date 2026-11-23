@@ -343,7 +343,7 @@ export class ApexDataFlowEngine {
     // Declarations, reassignment and += are independently versioned by state.
     const assignment=/\b([A-Za-z_]\w*)\s*(\+?=)\s*([\s\S]+)$/.exec(original);
     const prefix=assignment?original.slice(0,assignment.index).trim():"";
-    const validPrefix=!prefix || /^(?:(?:final|static|public|private|protected|global)\s+)*(?:[A-Za-z_]\w*(?:\s*<[\w\s,.<>?]+>)?(?:\[\])?)$/.test(prefix);
+    const validPrefix=!prefix || /^(?:(?:final|static|public|private|protected|global)\s+)*(?:[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*(?:\s*<[\w\s,.<>?]+>)?(?:\[\])?)$/.test(prefix);
     if(assignment&&validPrefix){
       const [,name,operator,rhs]=assignment;
       const value=this.evaluate(rhs,state,depth);
