@@ -136,7 +136,7 @@ async function scanRepositoryApex(
       const reused=stable && cached?.fingerprint===fingerprint;
       return {filePath,fingerprint,reused,
         source:reused?cached!.source:await readFile(filePath,"utf8")};
-    })));
+    }));
   const signature=sources.map(item=>item.filePath+"@"+item.fingerprint).join("|");
   const previousGraph=repositoryGraphs.get(cacheKey);
   const graphUnchanged=previousGraph?.signature===signature;
@@ -146,7 +146,7 @@ async function scanRepositoryApex(
   // A changed caller invalidates a callee's dynamic query analysis even if
   // the callee source is unchanged. Never retain a stale cross-class result.
   const currentEntries=await timeSoqlPhase("scanner.stat_and_parse",()=>parallelMap(sources,
-    async entry:typeof sources[number]):Promise<[string,CachedApexFile]>=>{
+    async (entry:typeof sources[number]):Promise<[string,CachedApexFile]>=>{
       const existing=previous?.get(entry.filePath);
       if(entry.reused && graphUnchanged && existing)
         return [entry.filePath,existing];
