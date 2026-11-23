@@ -197,7 +197,7 @@ export function evaluateApexExpression(
     return argument.kind==="collection"?listValue(argument.items,unique)
       :unknown("Collection constructor input is not resolved.");
   }
-  const fieldSet=/^([A-Za-z_]\w*)\.SObjectType\.getDescribe\(\)\.fieldSets\.getMap\(\)\.get\(([\s\S]+)\)$/i.exec(expr);
+  const fieldSet=/^([A-Za-z_]\w*)\.SObjectType\.getDescribe\(\)\.fieldSets\.getMap\(\)\.get\(([^()]*)\)$/i.exec(expr);
   if(fieldSet){
     const name=evaluateApexExpression(fieldSet[2],context,depth+1);
     if(name.kind!=="text"||name.values.length!==1)
