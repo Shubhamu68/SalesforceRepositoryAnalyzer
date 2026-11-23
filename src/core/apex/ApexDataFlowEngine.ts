@@ -29,6 +29,71 @@ export interface ApexFlowOptions {
 }
 interface State { values: ApexEnvironment; stopped?: boolean }
 interface FrameResult { states: State[]; returns: ApexValue[] }
+
+/** Identical symbolic states do not represent additional structural query variants. */
+function mergeEquivalentStates(states:State[]):State[] {
+  const distinct=new Map<string,State>();
+  for(const state of states) {
+    const variables=[...state.values.entries()].sort(([a],[b])=>a.localeCompare(b));
+    const key=JSON.stringify([state.stopped===true,variables]);
+    if(!distinct.has(key))distinct.set(key,state);
+  }
+  return [...distinct.values()];
+}
+
+/**
+ * Query-site backward dependency slice. Only simple, provably side-effect-free
+ * statements are eligible for pruning. Calls, control-flow exits and opaque
+ * Apex remain live unless explicitly demonstrated irrelevant.
+ */
+function queryDependencySlice(nodes:SourceNode[], offset:number, expression:string):Set<SourceNode> {
+  const live=new Set<SourceNode>();
+  const relevant=new Set<string>();
+  const identifiers=(text:string):string[]=>[...maskApexSource(text).matchAll(/\b[A-Za-z_]\w*\b/g)]
+    .map(match=>match[0]);
+  for(const name of identifiers(expression))relevant.add(name);
+  const mark=(node:SourceNode):boolean=>{
+    if(node.start>offset)return false;
+    const isTarget=node.start<=offset&&node.end>offset;
+    if(node.kind==="opaque"){live.add(node);return true;}
+    if(node.kind==="statement") {
+      const statement=(node.text??"").trim();
+      const includesCall=isTarget||/\bDatabase\s*\.\s*(?:query|countQuery|getQueryLocator)/i.test(statement);
+      const terminates=/^(?:return|throw|break|continue)\b/i.test(statement);
+      const assignment=/\b([A-Za-z_]\w*)\s*(\+?=)\s*([\s\S]+?);?\s*$/.exec(statement);
+      const mutation=/\b([A-Za-z_]\w*)\s*\.\s*(?:add|addAll|clear|remove|put|putAll)\s*\(/i.exec(statement);
+      const write=assignment?.[1]??mutation?.[1];
+      // Methods may mutate collections by reference or instance state.
+      // Keep calls until an explicit side-effect model proves them harmless.
+      const containsCall=/\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\s*\(/.test(maskApexSource(statement));
+      const safeDebug=/^System\.debug\s*\(/i.test(statement);
+      const needed=includesCall||terminates||(write!==undefined&&relevant.has(write))||
+        (containsCall&&!safeDebug)||(!write&&/[\[\]{}]/.test(statement));
+      if(!needed)return false;
+      live.add(node);
+      if(write!==undefined&&relevant.has(write)) {
+        for(const name of identifiers(assignment?.[3]??statement))relevant.add(name);
+      }
+      // A retained unknown call may mutate a relevant collection or shared state.
+      if(containsCall&&!safeDebug)for(const name of identifiers(statement))relevant.add(name);
+      return true;
+    }
+    let childNeeded=false;
+    const children=[...(node.body??[]),...(node.otherwise??[])];
+    for(let i=children.length-1;i>=0;i--)if(mark(children[i]))childNeeded=true;
+    const condition=(node.condition??"")+" "+(node.iterable??"");
+    const opaqueCondition=/\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\s*\(/.test(maskApexSource(condition)) &&
+      !/\b(?:String\.(?:isBlank|isNotBlank)|Math\.\w+)\s*\(/i.test(condition);
+    const needed=isTarget||childNeeded||opaqueCondition;
+    if(needed) {
+      live.add(node);
+      if(childNeeded)for(const name of identifiers(condition))relevant.add(name);
+    }
+    return needed;
+  };
+  for(let i=nodes.length-1;i>=0;i--)mark(nodes[i]);
+  return live;
+}
 const EXECUTION = /\bDatabase\s*\.\s*(queryWithBinds|countQueryWithBinds|getQueryLocatorWithBinds|query|countQuery|getQueryLocator)\s*\(/gi;
 const DEFAULT_PATHS = 32, DEFAULT_OPERATIONS = 5000, DEFAULT_DEPTH = 6;
 const MAX_LOOP_ITEMS = 100;
@@ -89,6 +154,8 @@ export class ApexDataFlowEngine {
   private readonly failures=new Map<number,string>();
   private activeStopOffset:number|undefined;
   private activeQueryOffset:number|undefined;
+  /** Per-site, per-method optimization: never applied to helper summaries. */
+  private activeSlice:Set<SourceNode>|undefined;
   private readonly className:string|undefined;
   constructor(readonly source:string,options:ApexFlowOptions={}) {
     this.options={maxPaths:options.maxPaths??DEFAULT_PATHS,
@@ -252,6 +319,7 @@ export class ApexDataFlowEngine {
   private runNode(node:SourceNode,state:State,depth:number):
     {states:State[];returns:ApexValue[]}{
     if(state.stopped)return {states:[state],returns:[]};
+    if(depth===0&&this.activeSlice&&!this.activeSlice.has(node))return {states:[state],returns:[]};
     if(++this.operationCount>this.options.maxOperations){
       this.exceeded=true;
       return {states:[{values:new Map([...state.values.keys()].map((k):[string,ApexValue]=>
@@ -341,11 +409,12 @@ export class ApexDataFlowEngine {
         const result=this.runNode(node,state,depth);
         next.push(...result.states);returns.push(...result.returns);
       }
-      if(next.length>this.options.maxPaths){
+      const distinct=mergeEquivalentStates(next);
+      if(distinct.length>this.options.maxPaths){
         this.exceeded=true;
-        states=[{values:new Map([...next[0].values.keys()].map((k):[string,ApexValue]=>[k,
+        states=[{values:new Map([...distinct[0].values.keys()].map((k):[string,ApexValue]=>[k,
           unknown("Query path enumeration budget exceeded.")]))}];
-      }else states=next;
+      }else states=distinct;
     }
     return {states,returns};
   }
@@ -388,6 +457,7 @@ export class ApexDataFlowEngine {
       this.activeStopOffset=site.offset;
       this.activeCalls.clear();
       this.summaries.clear();
+      this.activeSlice=undefined;
       const owner=this.methods.filter(m=>m.start<=site.offset&&site.offset<m.end)
         .sort((a,b)=>(a.end-a.start)-(b.end-b.start))[0];
       if(!owner){
@@ -414,7 +484,12 @@ export class ApexDataFlowEngine {
       }else{
         const env=new Map<string,ApexValue>();
         for(const p of owner.parameters)env.set(p,unknown("Runtime method parameter: "+p));
+        // Restrict the query's root method to statements that can affect its
+        // argument. Calls and opaque operations are deliberately retained.
+        this.activeSlice=queryDependencySlice(owner.body,site.offset,
+          site.argument+" "+(site.accessLevelArgument??""));
         this.execute(owner.body,[{values:env}],0);
+        this.activeSlice=undefined;
       }
       if(this.exceeded){
         this.failures.set(site.offset,
@@ -427,6 +502,7 @@ export class ApexDataFlowEngine {
     }
     this.activeStopOffset=undefined;
     this.activeQueryOffset=undefined;
+    this.activeSlice=undefined;
     return {captures:this.captures,exceeded:anyExceeded,failures:this.failures};
   }
 }
