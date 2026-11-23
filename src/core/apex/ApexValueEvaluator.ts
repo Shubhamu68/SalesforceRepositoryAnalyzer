@@ -4,6 +4,7 @@ import { splitApexTopLevel } from "./ApexSourceModel.js";
 export type ApexValue =
   | { kind: "text"; values: string[] }
   | { kind: "collection"; items: string[]; unique: boolean }
+  | { kind: "map"; entries: Array<[string,ApexValue]> }
   | { kind: "number"; value: number }
   | { kind: "unknown"; reason: string };
 
@@ -14,6 +15,33 @@ export const listValue = (items: string[], unique = false): ApexValue => ({
   kind:"collection", items:unique?[...new Set(items)]:items, unique,
 });
 export const MAX_ALTERNATIVES = 32;
+const MAX_MAP_ENTRIES = 200;
+const MAX_JSON_DEPTH = 6;
+
+/** JSON only, with bounded values; never execute a label as source code. */
+export function parseKnownJsonMap(source:string):ApexValue {
+  if(source.length>100_000)return unknown("Custom Label JSON exceeds the size limit.");
+  let decoded:unknown;
+  try{decoded=JSON.parse(source);}catch{return unknown("Custom Label contains invalid JSON.");}
+  const convert=(value:unknown,depth:number):ApexValue=>{
+    if(depth>MAX_JSON_DEPTH)return unknown("JSON nesting depth exceeded.");
+    if(typeof value==="string")return textValue(value);
+    if(typeof value==="number"&&Number.isFinite(value))return {kind:"number",value};
+    if(!value||typeof value!=="object"||Array.isArray(value))
+      return unknown("Only JSON objects of scalar values are supported.");
+    const data=value as Record<string,unknown>;
+    const keys=Object.keys(data);
+    if(keys.length>MAX_MAP_ENTRIES)return unknown("JSON map entry limit exceeded.");
+    const entries:Array<[string,ApexValue]>=[];
+    for(const key of keys) {
+      const item=convert(data[key],depth+1);
+      if(item.kind==="unknown")return item;
+      entries.push([key,item]);
+    }
+    return {kind:"map",entries};
+  };
+  return convert(decoded,0);
+}
 const MAX_CHARS = 100_000;
 
 export interface ApexExpressionContext {
@@ -37,7 +65,8 @@ function combinations(left: ApexValue,right: ApexValue): ApexValue {
   if(right.kind==="unknown")return right;
   if(left.kind==="number"&&right.kind==="number")
     return {kind:"number",value:left.value+right.value};
-  if(left.kind==="collection"||right.kind==="collection")
+  if(left.kind==="collection"||right.kind==="collection"||
+     left.kind==="map"||right.kind==="map")
     return unknown("Cannot concatenate an Apex collection as text.");
   const from=(x:ApexValue):string[]=>
     x.kind==="text"?x.values:x.kind==="number"?[String(x.value)]:[];
@@ -81,6 +110,12 @@ export function evaluateApexExpression(
   if(/^(true|false)$/i.test(expr))return textValue(expr.toLowerCase());
   if(expr==="null")return textValue("null");
   if(/^[A-Za-z_]\w*$/.test(expr))return context.values.get(expr)??unknown("Apex symbol "+expr+" has no proven value.");
+  const label=/^System\.Label\.([A-Za-z_]\w*)$/i.exec(expr);
+  if(label)return context.resolveCall?.("System.Label",[textValue(label[1])]) ??
+    unknown("Custom Label "+label[1]+" is not available from complete org metadata.");
+  const constant=/^([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/.exec(expr);
+  if(constant)return context.resolveCall?.("Apex.constant",[textValue(expr)]) ??
+    unknown("Repository Apex constant "+expr+" has no proven literal value.");
   if(expr.startsWith("!") && !expr.startsWith("!=")){
     const result=evaluateApexExpression(expr.slice(1),context,depth+1);
     const simple=onlyText(result);
@@ -155,22 +190,62 @@ export function evaluateApexExpression(
     return context.resolveCall?.("Schema.describeFields",[object]) ??
       unknown("Schema Describe fields are unavailable for the target object.");
   }
+  // Apex allows a generic Map cast on JSON.deserialize results. Only remove
+  // a type cast directly attached to a JSON call, never arbitrary expressions.
+  const cast=/^\(Map\s*<[\w\s,.<>]+>\)\s*(JSON\.deserialize\([\s\S]*\))$/i.exec(expr);
+  if(cast)return evaluateApexExpression(cast[1],context,depth+1);
+  const mapLiteral=/^new\s+Map\s*<[\w\s,.<>]+>\s*\{([\s\S]*)\}$/i.exec(expr);
+  if(mapLiteral){
+    const entries:Array<[string,ApexValue]>=[];
+    for(const item of splitApexTopLevel(mapLiteral[1],",")){
+      if(!item.trim())continue;
+      const pair=splitApexTopLevel(item,"=>");
+      if(pair.length!==2)return unknown("Apex map initializer is malformed.");
+      const key=onlyText(evaluateApexExpression(pair[0],context,depth+1));
+      const val=evaluateApexExpression(pair[1],context,depth+1);
+      if(key===null||val.kind==="unknown")
+        return unknown("Apex map initializer contains unproven key/value.");
+      entries.push([key,val]);
+      if(entries.length>MAX_MAP_ENTRIES)return unknown("Apex map entry limit exceeded.");
+    }
+    return {kind:"map",entries};
+  }
   const call=/^([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(([\s\S]*)\)$/s.exec(expr);
   if(call){
     const name=call[1];
     const pieces=call[2].trim()?splitApexTopLevel(call[2],","):[];
     const args=pieces.map(x=>evaluateApexExpression(x,context,depth+1));
     const lname=name.toLowerCase();
+    if(lname==="json.deserialize"&&args.length===2) {
+      if(args[0].kind!=="text"||args[0].values.length!==1)
+        return unknown("JSON.deserialize input must be a single proven label value.");
+      return parseKnownJsonMap(args[0].values[0]);
+    }
     if(lname.endsWith(".keyset")&&args.length===0){
       const receiver=evaluateApexExpression(name.slice(0,-7),context,depth+1);
-      return receiver.kind==="collection"?listValue(receiver.items,true):
+      return receiver.kind==="map"?listValue(receiver.entries.map(([key])=>key),true):
+        receiver.kind==="collection"?listValue(receiver.items,true):
         unknown("Map keySet() depends on unresolved metadata.");
+    }
+    if(lname.endsWith(".get")&&args.length===1){
+      const receiver=evaluateApexExpression(name.slice(0,-4),context,depth+1);
+      if(receiver.kind==="map"){
+        const key=onlyText(args[0]);
+        if(key===null)return unknown("Map.get key depends on runtime input.");
+        return receiver.entries.find(([item])=>item===key)?.[1] ??
+          unknown("Map.get key "+key+" absent from proven configuration.");
+      }
     }
     if(lname==="string.join"&&args.length===2){
       if(args[0].kind!=="collection")return unknown("String.join collection is not known: "+
         (args[0].kind==="unknown"?args[0].reason:"input is not a collection."));
       const sep=onlyText(args[1]);
       return sep!==null?textValue(args[0].items.join(sep)):unknown("String.join delimiter is unknown.");
+    }
+    if(lname==="string.isempty"&&args.length===1){
+      const s=onlyText(args[0]);
+      return s!==null?textValue(String(s.length===0)):
+        unknown("String.isEmpty input depends on runtime value.");
     }
     if((lname==="string.isblank"||lname==="string.isnotblank")&&args.length===1){
       const text=onlyText(args[0]);if(text===null)return unknown("String blankness depends on runtime input.");
