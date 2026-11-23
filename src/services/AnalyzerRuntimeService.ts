@@ -14,6 +14,7 @@ import { SalesforcePersonaAccessVerifier } from "../salesforce/SalesforcePersona
 import { SalesforceEffectivePermissionVerifier } from "../salesforce/SalesforceEffectivePermissionVerifier.js";
 import { SalesforceUserFieldAccessGateway } from "../salesforce/SalesforceUserFieldAccessGateway.js";
 import { SalesforceFieldMetadataService } from "../salesforce/SalesforceFieldMetadataService.js";
+import { SalesforceApexMetadataProvider } from "../salesforce/SalesforceApexMetadataProvider.js";
 import { OrgPermissionFallbackService } from "./OrgPermissionFallbackService.js";
 import { SalesforceRelationshipMetadataService } from "../salesforce/SalesforceRelationshipMetadataService.js";
 import type { SalesforceOrgConnection } from "../salesforce/SalesforceOrgConnection.js";
@@ -100,6 +101,7 @@ export class AnalyzerRuntimeService {
         fieldMetadata,
       ),
       () => this.reportOutput.requireConfiguredDirectory(),
+      useOrg ? new SalesforceApexMetadataProvider(this.connection) : undefined,
     );
     const objectAccessMatrixService = new ObjectAccessMatrixService(this.personas, resolver, verification, fallback);
     const stackTraceImpactService = new StackTraceImpactService(
