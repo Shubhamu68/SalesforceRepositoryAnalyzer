@@ -12,7 +12,7 @@ import type { SalesforceRelationshipMetadataService } from "../salesforce/Salesf
 import type { SalesforceFieldMetadataService } from "../salesforce/SalesforceFieldMetadataService.js";
 import type { SoqlFieldInventory, SoqlFieldReference } from "../models/SoqlFieldInventory.js";
 import { ApexExecutionSecurityModeResolver } from "../services/ApexExecutionSecurityModeResolver.js";
-import { runtimeImpactForFinding, type SoqlExecutionMode } from "./soqlExecutionMode.js";
+import { resolveSoqlExecutionMode, runtimeImpactForFinding, type SoqlExecutionMode } from "./soqlExecutionMode.js";
 import { recordSoqlCount, timeSoqlPhase, timeSoqlSync } from "../services/SoqlPerformanceMetrics.js";
 
 /** Prevent hundreds of simultaneous Salesforce requests on large repositories. */
@@ -121,7 +121,10 @@ export class SoqlSecurityAnalyzer {
     // Version lookup is cached per class, so hundreds of queries do not trigger
     // hundreds of metadata reads. The same resolver serves Stack Trace analysis.
     const modeResults = await timeSoqlPhase("execution.modes", () => Promise.all(queries.map((query) =>
-      this.executionModeResolver.resolve(query.query, query.filePath)
+      this.executionModeResolver.resolve(query.query, query.filePath).then(mode =>
+        query.dynamicAccessLevel && mode.declaredMode === "UNSPECIFIED"
+          ? resolveSoqlExecutionMode(query.dynamicAccessLevel, mode.apiVersion)
+          : mode)
     )));
     return { queries, inventory, unresolvedFields, parserLimitations, modeResults };
   }
