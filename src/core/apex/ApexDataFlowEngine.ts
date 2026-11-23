@@ -82,8 +82,10 @@ function queryDependencySlice(nodes:SourceNode[], offset:number, expression:stri
     const children=[...(node.body??[]),...(node.otherwise??[])];
     for(let i=children.length-1;i>=0;i--)if(mark(children[i]))childNeeded=true;
     const condition=(node.condition??"")+" "+(node.iterable??"");
-    const opaqueCondition=/\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\s*\(/.test(maskApexSource(condition)) &&
-      !/\b(?:String\.(?:isBlank|isNotBlank)|Math\.\w+)\s*\(/i.test(condition);
+    const conditionCalls=[...maskApexSource(condition).matchAll(
+      /\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(/g)].map(match=>match[1]);
+    const opaqueCondition=conditionCalls.some(name=>
+      !/^(?:String\.(?:isBlank|isNotBlank)|Math\.\w+)$/i.test(name));
     const needed=isTarget||childNeeded||opaqueCondition;
     if(needed) {
       live.add(node);
