@@ -29,8 +29,9 @@ export function findCustomMetadataLoops(source:string):MetadataLoopQuery[] {
     const end=matchingPair(visible,i,"[","]");
     if(end<0)continue;
     const expression=clean.slice(i,end+1).trim();
-    const body=expression.slice(1,-1).trim();
-    const parsed=/^SELECT\s+([\w\s,]+?)\s+FROM\s+([A-Za-z_]\w*__mdt)\s+WHERE\s+([\s\S]+?)\s*(?:WITH\s+SECURITY_ENFORCED)?$/i.exec(body);
+    const body=expression.slice(1,-1).trim()
+      .replace(/\s+WITH\s+SECURITY_ENFORCED\s*$/i,"");
+    const parsed=/^SELECT\s+([\w\s,]+?)\s+FROM\s+([A-Za-z_]\w*__mdt)\s+WHERE\s+([\s\S]+)$/i.exec(body);
     if(!parsed){i=end;continue;}
     const fields=parsed[1].split(",").map(x=>x.trim());
     if(!fields.length||fields.some(x=>!API.test(x))){i=end;continue;}
