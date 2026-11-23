@@ -1,4 +1,5 @@
 import { ApexDataFlowEngine, type ApexCallSite } from "../core/apex/ApexDataFlowEngine.js";
+import type { ApexRepositoryMethodIndex } from "../core/apex/ApexRepositoryMethodIndex.js";
 import type { ApexValue } from "../core/apex/ApexValueEvaluator.js";
 import { classifySoqlMode } from "../analyzer/soqlExecutionMode.js";
 import { extractSoqlExpressionFields } from "../analyzer/soqlExpressionInventory.js";
@@ -29,7 +30,8 @@ function explicitMode(site:ApexCallSite):"USER_MODE"|"SYSTEM_MODE"|undefined|nul
  * is emitted for the site. No partial resolved results are ever published.
  */
 export function extractDynamicSoqlQueries(source:string,filePath:string,
-  resolveExternal?: (name:string,args:ApexValue[])=>ApexValue|undefined):DynamicSoqlScanResult {
+  resolveExternal?: (name:string,args:ApexValue[])=>ApexValue|undefined,
+  repositoryIndex?: ApexRepositoryMethodIndex):DynamicSoqlScanResult {
   if(!/\bDatabase\s*\.\s*(?:query|countQuery|getQueryLocator)/i.test(source))
     return {queries:[],unresolved:[]};
   const engine=new ApexDataFlowEngine(source,{resolveExternal});
@@ -38,7 +40,20 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
   const unresolved:UnresolvedDynamicSoql[]=[];
   for(const site of engine.sites){
     const siteId=filePath+"@"+site.offset;
-    const fail=(reason:string)=>unresolved.push({filePath,lineNumber:site.line,siteId,reason});
+    const fail=(reason:string)=>{
+      let explanation=reason;
+      const owner=repositoryIndex?.methodAt(filePath,site.offset);
+      if(owner?.arity && /dependency|runtime|symbol|join|parameter|helper|unsupported/i.test(reason)){
+        const evidence=repositoryIndex!.inspectCallers(owner.className,owner.methodName,owner.arity);
+        if(evidence.candidateCalls)explanation +=
+          " Repository caller index: "+evidence.knownCalls+" known and "+
+          evidence.unknownCalls+" unproven explicit caller(s)."+
+          (evidence.externallyCallable
+            ?" Method is externally callable; complete caller coverage cannot be established from repository metadata."
+            :"");
+      }
+      unresolved.push({filePath,lineNumber:site.line,siteId,reason:explanation});
+    };
     const failure=flow.failures.get(site.offset);
     if(failure){fail(failure);continue;}
     const captures=flow.captures.get(site.offset)??[];
