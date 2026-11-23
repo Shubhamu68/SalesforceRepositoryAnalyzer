@@ -8,15 +8,13 @@ import { classifySoqlMode } from "../analyzer/soqlExecutionMode.js";
 import { parseNestedSoql, maskSoql } from "../analyzer/nestedSoqlScopes.js";
 import { extractDynamicSoqlQueries, type UnresolvedDynamicSoql } from "./dynamicSoqlScanner.js";
 import { listValue, unknown, type ApexValue } from "../core/apex/ApexValueEvaluator.js";
+import { ApexRepositoryMethodIndex } from "../core/apex/ApexRepositoryMethodIndex.js";
 import type { ApexMetadataProvider } from "../core/metadata/ApexMetadataProvider.js";
 
 import type { SoqlQuery } from "../models/SoqlQuery.js";
 import { recordSoqlCount, timeSoqlPhase } from "../services/SoqlPerformanceMetrics.js";
 
-// Bound filesystem concurrency: improve cold scans without opening hundreds of
-// Apex files simultaneously or changing deterministic query ordering.
-const READ_BATCH_SIZE = 12;
-
+ 
 /**
  * Preserve the original repository-wide semantics (including class exclusion
  * and source ordering) while avoiding repeated Apex parsing across personas.
@@ -33,7 +31,14 @@ export interface SoqlScanInventory {
   queries: SoqlQuery[];
   unresolvedDynamic: UnresolvedDynamicSoql[];
 }
-type CachedApexFile = { fingerprint: string; queries: SoqlQuery[]; unresolvedDynamic: UnresolvedDynamicSoql[] };
+type CachedApexFile = {
+  fingerprint: string;
+  source: string;
+  queries: SoqlQuery[];
+  unresolvedDynamic: UnresolvedDynamicSoql[];
+};
+type CachedRepositoryGraph = { signature: string; index: ApexRepositoryMethodIndex };
+const repositoryGraphs = new Map<string,CachedRepositoryGraph>();
 const indexedRepositories = new Map<string, Map<string, CachedApexFile>>();
 const inFlightScans = new Map<string, Promise<SoqlScanInventory>>();
 
@@ -76,30 +81,39 @@ export async function scanApexSoqlWithUnresolved(
 }
 
 /** Only a complete Salesforce Describe snapshot may supply dynamic fields. */
-async function scanDynamicSource(source:string,filePath:string,metadata?:ApexMetadataProvider) {
-  if (!metadata || !source.includes("getGlobalDescribe"))
-    return extractDynamicSoqlQueries(source,filePath);
+async function scanDynamicSource(source:string,filePath:string,
+  metadata?:ApexMetadataProvider,repositoryIndex?:ApexRepositoryMethodIndex) {
+  const repositoryResolver=(name:string,args:ApexValue[]) =>
+    repositoryIndex?.evaluateReturn(filePath,name,args);
+  if(!metadata || !source.includes("getGlobalDescribe"))
+    return extractDynamicSoqlQueries(source,filePath,repositoryResolver,repositoryIndex);
   const requested=new Set<string>();
-  const gather=(name:string,args:ApexValue[])=>{
+  const gatherBase=(name:string,args:ApexValue[])=>{
     if(name==="Schema.describeFields"&&args[0]?.kind==="text")
       for(const object of args[0].values)requested.add(object);
     return undefined;
   };
-  // First pass asks for dependencies without making REST calls in the Apex engine.
-  extractDynamicSoqlQueries(source,filePath,gather);
-  if(!requested.size)return extractDynamicSoqlQueries(source,filePath);
+  const gather=(name:string,args:ApexValue[]) =>
+    gatherBase(name,args) ?? repositoryIndex?.evaluateReturn(filePath,name,args,gatherBase);
+  // First pass only discovers metadata dependencies. It never executes Apex.
+  extractDynamicSoqlQueries(source,filePath,gather,repositoryIndex);
+  if(!requested.size)
+    return extractDynamicSoqlQueries(source,filePath,repositoryResolver,repositoryIndex);
   const snapshots=new Map<string,Awaited<ReturnType<ApexMetadataProvider["getObjectFieldNames"]>>>();
   await Promise.all([...requested].map(async object=>{
     snapshots.set(object,await metadata.getObjectFieldNames(object));
   }));
-  return extractDynamicSoqlQueries(source,filePath,(name,args)=>{
+  const metadataResolver=(name:string,args:ApexValue[]):ApexValue|undefined=>{
     if(name!=="Schema.describeFields"||args[0]?.kind!=="text"||args[0].values.length!==1)
       return undefined;
     const found=snapshots.get(args[0].values[0]);
     return found?.complete&&found.value?listValue(found.value,true):
       unknown("Complete Salesforce Describe metadata unavailable for "+args[0].values[0]+
         ": "+(found?.reason??"Object identity was not established."));
-  });
+  };
+  return extractDynamicSoqlQueries(source,filePath,
+    (name,args)=>metadataResolver(name,args) ??
+      repositoryIndex?.evaluateReturn(filePath,name,args,metadataResolver),repositoryIndex);
 }
 
 async function scanRepositoryApex(
@@ -109,58 +123,65 @@ async function scanRepositoryApex(
   apexFiles.sort((a, b) => a.localeCompare(b));
   recordSoqlCount("scanner.apex_files", apexFiles.length);
 
-  const previous = indexedRepositories.get(cacheKey);
-  let reused = 0;
-  const currentEntries = await timeSoqlPhase("scanner.stat_and_parse", () =>
-    parallelMap(apexFiles, async (filePath): Promise<[string, CachedApexFile]> => {
-      // Nanosecond mtime+ctime and size detect ordinary source edits even when
-      // content length is unchanged; directory traversal detects additions/deletions.
-      // Cold scans need both source bytes and metadata anyway. Fetch them
-      // concurrently rather than serializing thousands of stat+read pairs.
-      // Warm scans stat first, avoiding file reads when reuse is safe.
-      const cold = previous ? undefined : await Promise.all([
-        stat(filePath, { bigint: true }), readFile(filePath, "utf8"),
-      ]);
-      const info = cold ? cold[0] : await stat(filePath, { bigint: true });
-      const fingerprint = `${info.size}:${info.mtimeNs}:${info.ctimeNs}`;
-      const cached = previous?.get(filePath);
-      const nowNs = BigInt(Date.now()) * 1_000_000n;
-      const lastChanged = info.ctimeNs > info.mtimeNs ? info.ctimeNs : info.mtimeNs;
-      const timestampStable = nowNs - lastChanged >= FILE_TIMESTAMP_SAFETY_NS;
-      if (cached?.fingerprint === fingerprint && timestampStable) {
-        reused++;
-        return [filePath, cached];
-      }
-      const source = cold ? cold[1] : await readFile(filePath, "utf8");
-      const staticQueries = extractSoqlQueries(source, filePath);
-      const dynamic = await scanDynamicSource(source, filePath, metadata);
-      // Every dynamic execution site and branch variant has its own identity,
-      // so multiple queries can correctly share the same physical Apex line.
-      return [filePath, {
-        fingerprint, queries: [...staticQueries, ...dynamic.queries],
-        unresolvedDynamic: dynamic.unresolved,
+  const previous=indexedRepositories.get(cacheKey);
+  // Preserve source bytes in the repository-scoped cache so cross-class caller
+  // indexes can be refreshed without rereading unchanged files on warm scans.
+  const sources=await timeSoqlPhase("scanner.source_index",()=>parallelMap(apexFiles,
+    async filePath=>{
+      const info=await stat(filePath,{bigint:true});
+      const fingerprint=`${info.size}:${info.mtimeNs}:${info.ctimeNs}`;
+      const lastChanged=info.ctimeNs>info.mtimeNs?info.ctimeNs:info.mtimeNs;
+      const stable=BigInt(Date.now())*1_000_000n-lastChanged>=FILE_TIMESTAMP_SAFETY_NS;
+      const cached=previous?.get(filePath);
+      const reused=stable && cached?.fingerprint===fingerprint;
+      return {filePath,fingerprint,reused,
+        source:reused?cached!.source:await readFile(filePath,"utf8")};
+    })));
+  const signature=sources.map(item=>item.filePath+"@"+item.fingerprint).join("|");
+  const previousGraph=repositoryGraphs.get(cacheKey);
+  const graphUnchanged=previousGraph?.signature===signature;
+  const repositoryIndex=graphUnchanged?previousGraph!.index:
+    new ApexRepositoryMethodIndex(sources.map(({filePath,source})=>({filePath,source})));
+
+  // A changed caller invalidates a callee's dynamic query analysis even if
+  // the callee source is unchanged. Never retain a stale cross-class result.
+  const currentEntries=await timeSoqlPhase("scanner.stat_and_parse",()=>parallelMap(sources,
+    async entry:typeof sources[number]):Promise<[string,CachedApexFile]>=>{
+      const existing=previous?.get(entry.filePath);
+      if(entry.reused && graphUnchanged && existing)
+        return [entry.filePath,existing];
+      const staticQueries=entry.reused && existing
+        ?existing.queries.filter(query=>!query.dynamicOrigin)
+        :extractSoqlQueries(entry.source,entry.filePath);
+      const dynamic=await scanDynamicSource(entry.source,entry.filePath,metadata,repositoryIndex);
+      return [entry.filePath,{
+        fingerprint:entry.fingerprint,source:entry.source,
+        queries:[...staticQueries,...dynamic.queries],
+        unresolvedDynamic:dynamic.unresolved,
       }];
     }));
-  recordSoqlCount("scanner.reused_files", reused);
-  recordSoqlCount("scanner.parsed_files", apexFiles.length - reused);
-  const nextIndex = new Map(currentEntries);
-  // Only publish a complete successful snapshot. Failed reads do not poison
-  // the previous cache, and deleted files are removed from the new index.
-  if (indexedRepositories.size >= MAX_REPOSITORIES && !indexedRepositories.has(cacheKey)) {
-    indexedRepositories.delete(indexedRepositories.keys().next().value!);
+  recordSoqlCount("scanner.reused_files",graphUnchanged?sources.filter(s=>s.reused).length:0);
+  recordSoqlCount("scanner.parsed_files",
+    graphUnchanged?sources.filter(s=>!s.reused).length:sources.length);
+  const nextIndex=new Map(currentEntries);
+  // Publish both caches together only after every scan succeeds.
+  if(indexedRepositories.size>=MAX_REPOSITORIES&&!indexedRepositories.has(cacheKey)) {
+    const oldest=indexedRepositories.keys().next().value!;
+    indexedRepositories.delete(oldest);
+    repositoryGraphs.delete(oldest);
   }
-  indexedRepositories.set(cacheKey, nextIndex);
-  const queries: SoqlQuery[] = [];
-  const unresolvedDynamic: UnresolvedDynamicSoql[] = [];
-  for (const [, entry] of currentEntries) {
+  indexedRepositories.set(cacheKey,nextIndex);
+  repositoryGraphs.set(cacheKey,{signature,index:repositoryIndex});
+  const queries:SoqlQuery[]=[];
+  const unresolvedDynamic:UnresolvedDynamicSoql[]=[];
+  for(const [,entry] of currentEntries) {
     queries.push(...entry.queries);
     unresolvedDynamic.push(...entry.unresolvedDynamic);
   }
   return {
-    queries: queries.sort((a, b) =>
-      a.filePath.localeCompare(b.filePath) || a.lineNumber - b.lineNumber),
-    unresolvedDynamic: unresolvedDynamic.sort((a, b) =>
-      a.filePath.localeCompare(b.filePath) || a.lineNumber - b.lineNumber),
+    queries:queries.sort((a,b)=>a.filePath.localeCompare(b.filePath)||a.lineNumber-b.lineNumber),
+    unresolvedDynamic:unresolvedDynamic.sort((a,b)=>
+      a.filePath.localeCompare(b.filePath)||a.lineNumber-b.lineNumber),
   };
 }
 
