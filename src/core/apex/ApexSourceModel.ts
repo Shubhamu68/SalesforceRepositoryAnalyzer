@@ -140,9 +140,24 @@ export function parseApexStatements(
       const body = parseBody(source,masked,at,end);
       nodes.push({kind:"block",start:at,end:body.next,body:body.nodes});
       cursor=body.next;
-    } else if (["while","switch","try","catch","do"].some(k=>keyword(masked,at,k))) {
-      // Never misinterpret unsupported control flow as unconditional statements.
-      // Include the remainder as opaque; downstream queries will be unresolved.
+    } else if(keyword(masked,at,"try")){
+      const normal=parseBody(source,masked,at+3,end);
+      let cursorAfter=skip(masked,normal.next,end);
+      let otherwise:SourceNode[]=[];
+      if(keyword(masked,cursorAfter,"catch")){
+        const open=skip(masked,cursorAfter+5,end);
+        const close=masked[open]==="("?matchingPair(masked,open):-1;
+        if(close<0){nodes.push({kind:"opaque",start:at,end,text:"Invalid Apex catch"});break;}
+        const caught=parseBody(source,masked,close+1,end);
+        otherwise=caught.nodes;cursorAfter=skip(masked,caught.next,end);
+      }
+      // A try/catch represents normal and exception paths; neither may
+      // silently be discarded when it mutates a query string.
+      nodes.push({kind:"if",start:at,end:cursorAfter,
+        condition:"__apex_exception_path_unknown__",body:normal.nodes,otherwise});
+      cursor=cursorAfter;
+    } else if (["while","switch","catch","do"].some(k=>keyword(masked,at,k))) {
+      // Unknown control flow never turns into an unconditional assignment.
       nodes.push({kind:"opaque",start:at,end,text:"Unsupported Apex control flow"});
       cursor=end;
     } else {
