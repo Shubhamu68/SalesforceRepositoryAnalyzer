@@ -28,6 +28,8 @@ function explicitMode(site:ApexCallSite):"USER_MODE"|"SYSTEM_MODE"|undefined|nul
  * is emitted for the site. No partial resolved results are ever published.
  */
 export function extractDynamicSoqlQueries(source:string,filePath:string):DynamicSoqlScanResult {
+  if(!/\bDatabase\s*\.\s*(?:query|countQuery|getQueryLocator)/i.test(source))
+    return {queries:[],unresolved:[]};
   const engine=new ApexDataFlowEngine(source);
   const flow=engine.analyze();
   const queries:SoqlQuery[]=[];
@@ -79,6 +81,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string):Dynamic
         fields:parsed.fields,subqueries:parsed.subqueries,
         withUserMode:declared==="USER_MODE"||mode==="USER_MODE",
         securityMode:declared,
+        dynamicOrigin:true,
         querySiteId:siteId,
         queryVariantId:siteId+"#"+index,
         ...(mode?{dynamicAccessLevel:mode}:{})
