@@ -4,6 +4,7 @@ import { splitApexTopLevel } from "./ApexSourceModel.js";
 export type ApexValue =
   | { kind: "text"; values: string[] }
   | { kind: "collection"; items: string[]; unique: boolean }
+  | { kind: "number"; value: number }
   | { kind: "unknown"; reason: string };
 
 export type ApexEnvironment = Map<string, ApexValue>;
@@ -34,16 +35,22 @@ function merged(values: string[]): ApexValue {
 function combinations(left: ApexValue,right: ApexValue): ApexValue {
   if(left.kind==="unknown")return left;
   if(right.kind==="unknown")return right;
-  if(left.kind!=="text"||right.kind!=="text")return unknown("Cannot concatenate an Apex collection as text.");
+  if(left.kind==="number"&&right.kind==="number")
+    return {kind:"number",value:left.value+right.value};
+  if(left.kind==="collection"||right.kind==="collection")
+    return unknown("Cannot concatenate an Apex collection as text.");
+  const from=(x:ApexValue):string[]=>
+    x.kind==="text"?x.values:x.kind==="number"?[String(x.value)]:[];
   const joined:string[]=[];
-  for(const a of left.values)for(const b of right.values){
+  for(const a of from(left))for(const b of from(right)){
     if(joined.length>=MAX_ALTERNATIVES)return unknown("Too many query expression alternatives.");
     joined.push(a+b);
   }
   return merged(joined);
 }
 function onlyText(value: ApexValue): string | null {
-  return value.kind==="text"&&value.values.length===1?value.values[0]:null;
+  return value.kind==="text"&&value.values.length===1?value.values[0]:
+    value.kind==="number"?String(value.value):null;
 }
 function unwrap(source: string): string {
   let value=source.trim();
@@ -70,7 +77,7 @@ export function evaluateApexExpression(
   if(!expr)return unknown("Empty expression.");
   const literal=unescapeApex(expr);
   if(literal!==null)return textValue(literal);
-  if(/^-?\d+(?:\.\d+)?$/.test(expr))return textValue(expr);
+  if(/^-?\d+(?:\.\d+)?$/.test(expr))return {kind:"number",value:Number(expr)};
   if(/^(true|false)$/i.test(expr))return textValue(expr.toLowerCase());
   if(expr==="null")return textValue("null");
   if(/^[A-Za-z_]\w*$/.test(expr))return context.values.get(expr)??unknown("Apex symbol "+expr+" has no proven value.");
@@ -100,8 +107,8 @@ export function evaluateApexExpression(
   }
   const plus=splitApexTopLevel(expr,"+");
   if(plus.length>1){
-    return plus.reduce<ApexValue>((a,item)=>
-      combinations(a,evaluateApexExpression(item,context,depth+1)),textValue(""));
+    const parts=plus.map(item=>evaluateApexExpression(item,context,depth+1));
+    return parts.slice(1).reduce<ApexValue>((a,b)=>combinations(a,b),parts[0]);
   }
   const create=/^new\s+(List|Set)<[\w\s,.<>]+>\s*(?:\(([\s\S]*)\)|\{([\s\S]*)\})$/i.exec(expr);
   if(create){
