@@ -710,3 +710,33 @@ test("Stage 3: invalid JSON cannot be promoted to a verified SOQL field inventor
   assert.equal(parseKnownJsonMap("{ invalid").kind,"unknown");
   assert.equal(parseKnownJsonMap('{"Account":["Id"]}').kind,"unknown");
 });
+
+test("Stage 3: direct SObjectType Describe supplies field whitelist for dynamic SELECT",async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),"v011-direct-describe-"));
+  try{
+    await writeFile(path.join(dir,"DescribeFields.cls"),[
+      "public class DescribeFields {",
+      " public static void run(){",
+      "   Map<String, Schema.SObjectField> fieldMap=OrderItemSummary.SObjectType.getDescribe().fields.getMap();",
+      "   List<String> fields=new List<String>();",
+      "   if(fieldMap.containsKey('Id')){fields.add('Id');}",
+      "   if(fieldMap.containsKey('Status')){fields.add('Status');}",
+      "   Database.query('SELECT '+String.join(fields, ',')+' FROM OrderItemSummary');",
+      " }",
+      "}",
+    ].join("\n"));
+    const provider={
+      scopeKey:"org-describe-x/connection-1",
+      getObjectFieldNames:async(name:string)=>name==="OrderItemSummary"
+        ?{complete:true as const,source:"LIVE_ORG" as const,value:["Id","Status"]}
+        :{complete:false as const,source:"LIVE_ORG" as const,reason:"Not found"},
+      getCustomMetadataRecords:async()=>({complete:false as const,source:"LIVE_ORG" as const}),
+    };
+    const resolved=await scanApexSoqlWithUnresolved(dir,provider);
+    assert.equal(resolved.unresolvedDynamic.length,0,JSON.stringify(resolved.unresolvedDynamic));
+    assert.equal(resolved.queries[0].query,"SELECT Id,Status FROM OrderItemSummary");
+    const noOrg=await scanApexSoqlWithUnresolved(dir);
+    assert.equal(noOrg.queries.length,0);
+    assert.equal(noOrg.unresolvedDynamic.length,1);
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
