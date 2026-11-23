@@ -8,6 +8,7 @@ import { SoqlSecurityFinding } from "../models/SoqlSecurityFinding.js";
 import { SoqlSecurityAnalyzer } from "../analyzer/soqlSecurityAnalyzer.js";
 import { scanApexSoqlWithUnresolved } from "../scanner/apexSoqlScanner.js";
 import type { UnresolvedDynamicSoql } from "../scanner/dynamicSoqlScanner.js";
+import type { ApexMetadataProvider } from "../core/metadata/ApexMetadataProvider.js";
 import { writeSoqlReport, writeAllPersonasHighPriorityReport, type PersonaHighPriorityReportSection } from "../reporter/soqlReportWriter.js";
 import { recordSoqlCount, timeSoqlPhase, withSoqlPerformance } from "./SoqlPerformanceMetrics.js";
 import type { SoqlAnalysisProgress } from "./SoqlAnalysisProgress.js";
@@ -70,7 +71,8 @@ export class SoqlAnalysisService {
   constructor(
   private readonly repositoryPath: string,
   private readonly soqlSecurityAnalyzer: SoqlSecurityAnalyzer,
-  private readonly outputDirectory: string | (() => string)
+  private readonly outputDirectory: string | (() => string),
+  private readonly metadata?: ApexMetadataProvider,
 ) {}
 
   async analyze(
@@ -80,7 +82,7 @@ export class SoqlAnalysisService {
     return withSoqlPerformance(async () => {
     progress?.moveTo("scanning");
     const scanned = await timeSoqlPhase("repository.scan", () => scanApexSoqlWithUnresolved(
-      this.repositoryPath
+      this.repositoryPath, this.metadata
     ));
     const queries: SoqlQuery[] = scanned.queries
       .filter((query) => isDataAccessAnalysisObject(query.object));
@@ -175,7 +177,7 @@ export class SoqlAnalysisService {
       progress?.setTotalPersonas(personas.length);
       progress?.moveTo("scanning");
       const scanned = await timeSoqlPhase("repository.scan",
-        () => scanApexSoqlWithUnresolved(this.repositoryPath));
+        () => scanApexSoqlWithUnresolved(this.repositoryPath, this.metadata));
       const queries = scanned.queries
         .filter((query) => isDataAccessAnalysisObject(query.object));
       recordSoqlCount("queries.analyzed", queries.length);
