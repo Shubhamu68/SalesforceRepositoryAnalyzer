@@ -176,6 +176,7 @@ interface ConciseFinding {
   references: Array<{
     filePath: string;
     lineNumber: number;
+    queryVariantId?: string;
     securityMode: string;
     effectiveMode: string;
     runtimeImpact: string;
@@ -238,6 +239,7 @@ function buildConciseFindings(
             finding.filePath &&
           reference.lineNumber ===
             finding.lineNumber &&
+          (reference.queryVariantId ?? "") === (finding.queryVariantId ?? "") &&
           (reference.relationshipPath ?? "") === (finding.relationshipPath ?? "")
       );
 
@@ -247,6 +249,7 @@ function buildConciseFindings(
           finding.filePath,
         lineNumber:
           finding.lineNumber,
+        ...(finding.queryVariantId ? { queryVariantId: finding.queryVariantId } : {}),
         securityMode,
         effectiveMode: finding.effectiveMode ?? "UNKNOWN",
         runtimeImpact: finding.runtimeImpact ?? "Undetermined",
