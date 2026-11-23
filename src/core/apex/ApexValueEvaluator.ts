@@ -229,6 +229,9 @@ export function evaluateApexExpression(
     }
     if(lname.endsWith(".get")&&args.length===1){
       const receiver=evaluateApexExpression(name.slice(0,-4),context,depth+1);
+      // Preserve the actual missing metadata/helper dependency instead of
+      // reporting a misleading "unsupported map.get" error.
+      if(receiver.kind==="unknown")return receiver;
       if(receiver.kind==="map"){
         const key=onlyText(args[0]);
         if(key===null)return unknown("Map.get key depends on runtime input.");
