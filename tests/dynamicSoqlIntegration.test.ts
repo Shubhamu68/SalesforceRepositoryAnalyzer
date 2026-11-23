@@ -100,7 +100,7 @@ test("report RCA: a busy unrelated method cannot exhaust another site's budget",
   assert.equal(scanned.queries.length,1);
   assert.equal(scanned.queries[0].object,"Account");
 });
-test("report RCA: expensive query only affects its own site, not a neighboring simple query",()=>{
+test("report RCA: irrelevant statements within the queried method no longer exhaust the site budget",()=>{
   const noise=Array.from({length:5205},(_,i)=>"Integer unused"+i+" = "+i+";").join("\n");
   const code=[
     "public class ReportBudget {",
@@ -110,14 +110,13 @@ test("report RCA: expensive query only affects its own site, not a neighboring s
     " public static void cheap(){",
     "   Database.query('SELECT Id FROM Contact');",
     " }",
-    "}",
+    "}"
   ].join("\n");
   const scanned=extractDynamicSoqlQueries(code,"ReportBudget.cls");
-  assert.equal(scanned.unresolved.length,1);
-  assert.match(scanned.unresolved[0].reason,/execution site's dependency path exceeded/i);
-  assert.equal(scanned.queries.length,1);
-  assert.equal(scanned.queries[0].object,"Contact");
+  assert.equal(scanned.unresolved.length,0);
+  assert.deepEqual(scanned.queries.map(q=>q.object).sort(),["Account","Contact"]);
 });
+
 test("supported string-built getQueryLocator remains dynamic rather than being suppressed",()=>{
   const code=[
     "public class DynamicLocator {",
@@ -229,4 +228,75 @@ test("known local collection operations remain resolvable after mutation guard",
  assert.equal(scanned.unresolved.length,0);
  assert.equal(scanned.queries.length,1);
  assert.match(scanned.queries[0].query,/^SELECT Id, Name FROM Account$/);
+});
+
+test("site slicing prunes unrelated conditional mutations without losing relevant variants",()=>{
+  const unrelated=Array.from({length:45},(_,i)=>
+    "if (flag"+i+") { String note"+i+" = 'unused"+i+"'; }").join("\n");
+  const code=[
+    "public class SelectiveBudget {",
+    " public static void run(Boolean useName) {",
+    "   String query = 'SELECT Id FROM Account';",
+    unrelated,
+    "   if(useName){query += ' WHERE Name = :name';}",
+    "   Database.query(query);",
+    " }",
+    "}"
+  ].join("\n");
+  const result=extractDynamicSoqlQueries(code,"SelectiveBudget.cls");
+  assert.equal(result.unresolved.length,0);
+  assert.deepEqual(result.queries.map(q=>q.query).sort(),[
+    "SELECT Id FROM Account",
+    "SELECT Id FROM Account WHERE Name = :name",
+  ]);
+});
+
+test("query-relevant conditional paths are not discarded to satisfy a budget",()=>{
+  const branches=Array.from({length:7},(_,i)=>
+    "if (flag"+i+") {query += ' AND Field"+i+"__c = null';}").join("\n");
+  const code=[
+    "public class QueryPathBudget {",
+    " public static void run(){",
+    "   String query='SELECT Id FROM Account WHERE Name != null';",
+    branches,
+    "   Database.query(query);",
+    " }",
+    "}"
+  ].join("\n");
+  const result=extractDynamicSoqlQueries(code,"QueryPathBudget.cls");
+  assert.equal(result.queries.length,0);
+  assert.equal(result.unresolved.length,1);
+  assert.match(result.unresolved[0].reason,/budget|limit|alternatives/i);
+});
+
+test("unresolved += retains original metadata or caller dependency",()=>{
+  const code=[
+    "public class RootCause {",
+    " public static void run() {",
+    "   String fields = MissingConfig.fields();",
+    "   String query = 'SELECT ' + fields;",
+    "   query += ' FROM Account';",
+    "   Database.query(query);",
+    " }",
+    "}"
+  ].join("\n");
+  const result=extractDynamicSoqlQueries(code,"RootCause.cls");
+  assert.equal(result.queries.length,0);
+  assert.equal(result.unresolved.length,1);
+  assert.match(result.unresolved[0].reason,/MissingConfig\.fields|unsupported/i);
+});
+
+test("optional FROM built only on one feasible path must not be assumed unconditional",()=>{
+  const code=[
+    "public class OptionalFrom {",
+    " public static void run(String whereClause) {",
+    "   String query = 'SELECT Id';",
+    "   if (String.isNotBlank(whereClause)) { query += ' FROM Account WHERE ' + whereClause; }",
+    "   Database.query(query);",
+    " }",
+    "}"
+  ].join("\n");
+  const result=extractDynamicSoqlQueries(code,"OptionalFrom.cls");
+  assert.equal(result.queries.length,0);
+  assert.equal(result.unresolved.length,1);
 });
