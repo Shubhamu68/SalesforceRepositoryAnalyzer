@@ -23,6 +23,8 @@ export interface ApexCallValue {
 export interface ApexFlowOptions {
   /** Pluggable read-only, preloaded metadata or constant value source. */
   resolveExternal?: (name: string, args: ApexValue[]) => ApexValue | undefined;
+  /** Only completely proven private-method caller contexts can narrow entry inputs. */
+  resolvePrivateContexts?: (method: IndexedApexMethod) => ApexValue[][] | undefined;
   maxPaths?: number;
   maxOperations?: number;
   maxDepth?: number;
@@ -494,7 +496,7 @@ export class ApexDataFlowEngine {
    * seeded as unknown; the repository cannot infer external runtime callers.
    */
   evaluateArgumentsAt(method:IndexedApexMethod,offset:number,
-    expressions:readonly string[]):ApexValue[][] {
+    expressions:readonly string[],callerArgs?:readonly ApexValue[]):ApexValue[][] {
     this.operationCount=0;
     this.exceeded=false;
     this.activeQueryOffset=undefined;
@@ -504,7 +506,9 @@ export class ApexDataFlowEngine {
     this.activeSlice=queryDependencySlice(method.body,offset,expressions.join(" + "));
     this.argumentProbe={offset,expressions:[...expressions],results:[]};
     const env=new Map<string,ApexValue>();
-    method.parameters.forEach(name=>env.set(name,unknown("Runtime caller parameter: "+name)));
+    method.parameters.forEach((name,index)=>env.set(name,
+      callerArgs?.length===method.parameters.length
+        ?callerArgs[index] : unknown("Runtime caller parameter: "+name)));
     this.execute(method.body,[{values:env}],0);
     const result=this.argumentProbe.results;
     this.argumentProbe=undefined;
@@ -563,9 +567,36 @@ export class ApexDataFlowEngine {
         this.failures.set(site.offset,"Execution site is outside a recognized Apex method.");
         continue;
       }
+      const closedContexts=owner.visibility==="private"
+        ?this.options.resolvePrivateContexts?.(owner):undefined;
       const callers=owner.visibility==="private"
         ?this.privateCallers(owner):[];
-      if(callers.length){
+      if(closedContexts?.length){
+        // A private method has only the indexed, completely proven caller
+        // contexts. Evaluate its query directly under each actual argument set.
+        // Public/protected/global methods must never use this optimization.
+        this.activeStopOffset=site.offset;
+        this.activeSlice=queryDependencySlice(owner.body,site.offset,
+          site.argument+" "+(site.accessLevelArgument??""));
+        for(const args of closedContexts){
+          if(args.length!==owner.parameters.length||
+             args.some(value=>value.kind==="unknown")){
+            this.failures.set(site.offset,"Private caller context is incomplete.");
+            break;
+          }
+          const env=new Map<string,ApexValue>();
+          owner.parameters.forEach((name,index)=>env.set(name,args[index]));
+          const before=this.captures.get(site.offset)?.length??0;
+          this.execute(owner.body,[{values:env}],0);
+          if((this.captures.get(site.offset)?.length??0)===before){
+            this.failures.set(site.offset,
+              "Private caller context did not reach the query execution site.");
+            break;
+          }
+          if(this.exceeded)break;
+        }
+        this.activeSlice=undefined;
+      }else if(callers.length){
         // A private method cannot be invoked externally; every visible
         // call-site must supply a proven argument context to claim RESOLVED.
         for(const caller of callers){
@@ -589,6 +620,18 @@ export class ApexDataFlowEngine {
           site.argument+" "+(site.accessLevelArgument??""));
         this.execute(owner.body,[{values:env}],0);
         this.activeSlice=undefined;
+      }
+      if(!this.exceeded && !this.failures.has(site.offset) &&
+          !(this.captures.get(site.offset)?.length)){
+        // A sliced method may omit a side-effecting control-flow dependency.
+        // Retry without slicing rather than misreporting a recognized query
+        // as an invocation outside a method. Unproven values remain unknown.
+        this.operationCount=0;
+        this.activeSlice=undefined;
+        this.activeStopOffset=site.offset;
+        const env=new Map<string,ApexValue>();
+        owner.parameters.forEach(name=>env.set(name,unknown("Runtime method parameter: "+name)));
+        this.execute(owner.body,[{values:env}],0);
       }
       if(this.exceeded){
         this.failures.set(site.offset,
