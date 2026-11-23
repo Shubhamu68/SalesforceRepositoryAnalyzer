@@ -184,6 +184,9 @@ export function evaluateApexExpression(
   }
   // Schema Describe is a metadata dependency, not a method to execute.
   // A caller-supplied read-only snapshot must prove the complete field list.
+  const directDescribe=/^([A-Za-z_]\w*)\.SObjectType\.getDescribe\(\)\.fields\.getMap\(\)$/i.exec(expr);
+  if(directDescribe)return context.resolveCall?.("Schema.describeFields",[textValue(directDescribe[1])]) ??
+    unknown("Schema Describe fields are unavailable for "+directDescribe[1]+".");
   const describe=/^Schema\.getGlobalDescribe\(\)\.get\(([^)]*)\)\.getDescribe\(\)\.fields\.getMap\(\)$/i.exec(expr);
   if(describe){
     const object=evaluateApexExpression(describe[1],context,depth+1);
@@ -194,6 +197,8 @@ export function evaluateApexExpression(
   // a type cast directly attached to a JSON call, never arbitrary expressions.
   const cast=/^\(Map\s*<[\w\s,.<>]+>\)\s*(JSON\.deserialize\([\s\S]*\))$/i.exec(expr);
   if(cast)return evaluateApexExpression(cast[1],context,depth+1);
+  if(/^new\s+Map\s*<[\w\s,.<>]+>\s*\(\s*\)$/i.test(expr))
+    return {kind:"map",entries:[]};
   const mapLiteral=/^new\s+Map\s*<[\w\s,.<>]+>\s*\{([\s\S]*)\}$/i.exec(expr);
   if(mapLiteral){
     const entries:Array<[string,ApexValue]>=[];
@@ -235,6 +240,15 @@ export function evaluateApexExpression(
       return receiver.kind==="map"?listValue(receiver.entries.map(([key])=>key),true):
         receiver.kind==="collection"?listValue(receiver.items,true):
         unknown("Map keySet() depends on unresolved metadata.");
+    }
+    if(lname.endsWith(".containskey")&&args.length===1){
+      const receiver=evaluateApexExpression(name.slice(0,-12),context,depth+1);
+      const key=onlyText(args[0]);
+      if(key===null)return unknown("Map.containsKey depends on runtime key.");
+      if(receiver.kind==="map")return textValue(String(receiver.entries.some(([k])=>k===key)));
+      if(receiver.kind==="collection")return textValue(String(receiver.items.includes(key)));
+      if(receiver.kind==="unknown")return receiver;
+      return unknown("Map.containsKey receiver is not proven as a map.");
     }
     if(lname.endsWith(".get")&&args.length===1){
       const receiver=evaluateApexExpression(name.slice(0,-4),context,depth+1);
