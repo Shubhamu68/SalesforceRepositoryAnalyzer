@@ -216,3 +216,39 @@ test("v0.1.1 marks Describe-driven query unresolved without complete metadata",(
   assert.equal(result.queries.length,0);
   assert.equal(result.unresolved.length,1);
 });
+
+test("Stage 2: same-class List return is tracked into String.join",()=>{
+  const code=[
+    "public class QueryWithFields {",
+    " private static List<String> getFields() {",
+    "   return new List<String>{'Id','Name'};",
+    " }",
+    " public static void run() {",
+    "   List<String> fields=getFields();",
+    "   Database.query('SELECT '+String.join(fields, ', ')+' FROM Account');",
+    " }",
+    "}"
+  ].join("\n");
+  const result=extractDynamicSoqlQueries(code,"QueryWithFields.cls");
+  assert.equal(result.unresolved.length,0);
+  assert.equal(result.queries.length,1);
+  assert.equal(result.queries[0].query,"SELECT Id, Name FROM Account");
+});
+
+test("Stage 2: incompatible List-return paths remain unresolved",()=>{
+  const code=[
+    "public class QueryWithFields {",
+    " private static List<String> getFields(Boolean useName) {",
+    "   if(useName) return new List<String>{'Id','Name'};",
+    "   return new List<String>{'Id','Phone'};",
+    " }",
+    " public static void run(Boolean flag) {",
+    "   Database.query('SELECT '+String.join(getFields(flag), ', ')+' FROM Account');",
+    " }",
+    "}"
+  ].join("\n");
+  const result=extractDynamicSoqlQueries(code,"QueryWithFields.cls");
+  assert.equal(result.queries.length,0);
+  assert.equal(result.unresolved.length,1);
+  assert.match(result.unresolved[0].reason,/collection|unknown|unresolved/i);
+});
