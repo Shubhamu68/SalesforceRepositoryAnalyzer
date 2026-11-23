@@ -314,6 +314,32 @@ export class ApexDataFlowEngine {
         unknown("Collection addAll argument "+expr+" is unknown."));
       return;
     }
+    // Metadata loops construct query-field sets using ordinary Apex Map.put().
+    // Keep only complete scalar key/value pairs and immutable abstract maps.
+    const mapPut=/^([A-Za-z_]\w*)\s*\.\s*put\s*\(([\s\S]*)\)$/i.exec(original);
+    if(mapPut){
+      const receiver=state.values.get(mapPut[1]);
+      const pair=splitApexTopLevel(mapPut[2],",");
+      if(receiver?.kind!=="map"||pair.length!==2){
+        state.values.set(mapPut[1],unknown("Map.put receiver or arguments are unresolved."));
+        return;
+      }
+      const key=this.evaluate(pair[0],state,depth);
+      const value=this.evaluate(pair[1],state,depth);
+      const name=asText(key);
+      if(name===undefined||value.kind==="unknown"){
+        state.values.set(mapPut[1],unknown("Map.put has an unproven key or value."));
+        return;
+      }
+      const entries=receiver.entries.filter(([existing])=>existing!==name);
+      entries.push([name,value]);
+      if(entries.length>200){
+        state.values.set(mapPut[1],unknown("Metadata map entry budget exceeded."));
+        return;
+      }
+      state.values.set(mapPut[1],{kind:"map",entries});
+      return;
+    }
     // Declarations, reassignment and += are independently versioned by state.
     const assignment=/\b([A-Za-z_]\w*)\s*(\+?=)\s*([\s\S]+)$/.exec(original);
     const prefix=assignment?original.slice(0,assignment.index).trim():"";
@@ -392,11 +418,16 @@ export class ApexDataFlowEngine {
       const headEnd=node.body?.[0]?.start??node.end;
       this.captureCalls(node.start,headEnd,state,depth);
       const iterable=node.iterable?this.evaluate(node.iterable,state,depth):unknown("Unsupported for-loop header");
-      if(iterable.kind==="collection"&&node.loopVariable&&iterable.items.length<=MAX_LOOP_ITEMS){
+      if((iterable.kind==="collection"||iterable.kind==="records")&&
+         node.loopVariable&&iterable.items.length<=MAX_LOOP_ITEMS){
         let states=[clone(state)], returns:ApexValue[]=[];
         for(const item of iterable.items){
           states=states.map(s=>{
-            const child=clone(s);child.values.set(node.loopVariable!,textValue(item));return child;
+            const child=clone(s);
+            child.values.set(node.loopVariable!,iterable.kind==="records"
+              ?{kind:"record",entries:item as Array<[string,ApexValue]>}
+              :textValue(item as string));
+            return child;
           });
           const result=this.execute(node.body??[],states,depth);
           states=result.states; returns.push(...result.returns);
