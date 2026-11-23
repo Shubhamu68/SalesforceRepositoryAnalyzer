@@ -584,3 +584,29 @@ test("Stage 2 hardening: guarded fallback dynamic SOQL retains its actual unreso
       /String\\.join|ConfigHelper|columns|escapeSingleQuotes|query dependency/i.test(finding.reason)));
   }finally{await rm(dir,{recursive:true,force:true});}
 });
+
+test("Stage 2 hardening: private wrapper establishes known cross-class caller evidence",async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),"v011-private-wrapper-"));
+  try {
+    await writeFile(path.join(dir,"QueryLibrary.cls"),[
+      "public class QueryLibrary {",
+      " public static void fetch(String field){",
+      "   Database.query('SELECT '+field+' FROM Account');",
+      " }",
+      "}",
+    ].join("\n"));
+    await writeFile(path.join(dir,"CallThrough.cls"),[
+      "public class CallThrough {",
+      " private static void forward(String input){",
+      "   QueryLibrary.fetch(input);",
+      " }",
+      " public static void run(){forward('Name');}",
+      "}",
+    ].join("\n"));
+    const r=await scanApexSoqlWithUnresolved(dir);
+    assert.equal(r.queries.length,0);
+    assert.equal(r.unresolvedDynamic.length,1);
+    assert.match(r.unresolvedDynamic[0].reason,/1 known and 0 unproven/i);
+    assert.match(r.unresolvedDynamic[0].reason,/externally callable/i);
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
