@@ -9,6 +9,7 @@ import { parseNestedSoql, maskSoql } from "../analyzer/nestedSoqlScopes.js";
 import { extractDynamicSoqlQueries, type UnresolvedDynamicSoql } from "./dynamicSoqlScanner.js";
 import { listValue, unknown, type ApexValue } from "../core/apex/ApexValueEvaluator.js";
 import { ApexRepositoryMethodIndex } from "../core/apex/ApexRepositoryMethodIndex.js";
+import { maskApexSource } from "../core/apex/ApexSourceModel.js";
 import type { ApexMetadataProvider } from "../core/metadata/ApexMetadataProvider.js";
 
 import type { SoqlQuery } from "../models/SoqlQuery.js";
@@ -106,44 +107,68 @@ function preserveDynamicFailureDiagnostics(
   })};
 }
 
-/** Only a complete Salesforce Describe snapshot may supply dynamic fields. */
+/** Resolve only org-proven label/Describe and repository-literal constants. */
 async function scanDynamicSource(source:string,filePath:string,
   metadata?:ApexMetadataProvider,repositoryIndex?:ApexRepositoryMethodIndex) {
-  const repositoryResolver=(name:string,args:ApexValue[]) =>
-    repositoryIndex?.evaluateReturn(filePath,name,args);
-  if(!metadata || !source.includes("getGlobalDescribe"))
-    return preserveDynamicFailureDiagnostics(source,filePath,
-      extractDynamicSoqlQueries(source,filePath,repositoryResolver,repositoryIndex));
+  const masked=maskApexSource(source);
+  const labelNames=[...new Set(
+    [...masked.matchAll(/\bSystem\s*\.\s*Label\s*\.\s*([A-Za-z_]\w*)/gi)]
+      .map(hit=>hit[1])
+  )].sort();
+  const labelResults=new Map<string,Awaited<ReturnType<NonNullable<
+    ApexMetadataProvider["getCustomLabelValue"]>>>>();
+  // A missing Tooling API provider or incomplete response never supplies a
+  // guessed value. Bound discovery to avoid org-wide API fan-out.
+  if(metadata?.getCustomLabelValue && labelNames.length<=40) {
+    await Promise.all(labelNames.map(async name=>
+      labelResults.set(name,await metadata.getCustomLabelValue!(name))));
+  }
   const requested=new Set<string>();
-  const gatherBase=(name:string,args:ApexValue[])=>{
-    if(name==="Schema.describeFields"&&args[0]?.kind==="text")
-      for(const object of args[0].values)requested.add(object);
+  const describeSnapshots=new Map<string,Awaited<
+    ReturnType<ApexMetadataProvider["getObjectFieldNames"]>>>();
+  const baseResolver=(name:string,args:ApexValue[]):ApexValue|undefined=>{
+    if(name==="System.Label"){
+      if(args.length!==1||args[0].kind!=="text"||args[0].values.length!==1)
+        return unknown("Custom Label identity is not proven.");
+      const label=args[0].values[0];
+      const result=labelResults.get(label);
+      return result?.complete&&typeof result.value==="string"
+        ?{kind:"text",values:[result.value]}
+        :unknown("Custom Label "+label+" unavailable or incomplete in connected org: "+
+          (result?.reason??"No authoritative Tooling API value."));
+    }
+    if(name==="Apex.constant"){
+      const expr=args[0];
+      return expr?.kind==="text"&&expr.values.length===1
+        ?repositoryIndex?.evaluateConstant(expr.values[0])
+        :undefined;
+    }
+    if(name==="Schema.describeFields"){
+      const object=args[0];
+      if(object?.kind!=="text"||object.values.length!==1)
+        return unknown("Schema Describe object is not proven.");
+      const objectName=object.values[0];
+      requested.add(objectName);
+      const found=describeSnapshots.get(objectName);
+      return found?.complete&&found.value
+        ?listValue(found.value,true)
+        :unknown("Complete Salesforce Describe unavailable for "+objectName+": "+
+          (found?.reason??"Metadata dependency not loaded."));
+    }
     return undefined;
   };
-  const gather=(name:string,args:ApexValue[]) =>
-    gatherBase(name,args) ?? repositoryIndex?.evaluateReturn(filePath,name,args,gatherBase);
-  // First pass only discovers metadata dependencies. It never executes Apex.
-  extractDynamicSoqlQueries(source,filePath,gather,repositoryIndex);
-  if(!requested.size)
-    return preserveDynamicFailureDiagnostics(source,filePath,
-      extractDynamicSoqlQueries(source,filePath,repositoryResolver,repositoryIndex));
-  const snapshots=new Map<string,Awaited<ReturnType<ApexMetadataProvider["getObjectFieldNames"]>>>();
-  await Promise.all([...requested].map(async object=>{
-    snapshots.set(object,await metadata.getObjectFieldNames(object));
-  }));
-  const metadataResolver=(name:string,args:ApexValue[]):ApexValue|undefined=>{
-    if(name!=="Schema.describeFields"||args[0]?.kind!=="text"||args[0].values.length!==1)
-      return undefined;
-    const found=snapshots.get(args[0].values[0]);
-    return found?.complete&&found.value?listValue(found.value,true):
-      unknown("Complete Salesforce Describe metadata unavailable for "+args[0].values[0]+
-        ": "+(found?.reason??"Object identity was not established."));
-  };
+  const resolver=(name:string,args:ApexValue[]):ApexValue|undefined=>
+    baseResolver(name,args) ??
+    repositoryIndex?.evaluateReturn(filePath,name,args,baseResolver);
+  // First pass discovers Describe needs after known labels and constants
+  // have been supplied. No Apex, Tooling writes, or runtime code is executed.
+  if(metadata && source.includes("getGlobalDescribe")){
+    extractDynamicSoqlQueries(source,filePath,resolver,repositoryIndex);
+    await Promise.all([...requested].map(async object=>
+      describeSnapshots.set(object,await metadata.getObjectFieldNames(object))));
+  }
   return preserveDynamicFailureDiagnostics(source,filePath,
-    extractDynamicSoqlQueries(source,filePath,
-      (name,args)=>metadataResolver(name,args) ??
-        repositoryIndex?.evaluateReturn(filePath,name,args,metadataResolver),repositoryIndex),
-      metadataResolver);
+    extractDynamicSoqlQueries(source,filePath,resolver,repositoryIndex),baseResolver);
 }
 
 async function scanRepositoryApex(
@@ -178,7 +203,8 @@ async function scanRepositoryApex(
   const currentEntries=await timeSoqlPhase("scanner.stat_and_parse",()=>parallelMap(sources,
     async (entry:typeof sources[number]):Promise<[string,CachedApexFile]>=>{
       const existing=previous?.get(entry.filePath);
-      if(entry.reused && graphUnchanged && existing)
+      if(entry.reused && graphUnchanged && existing &&
+         !(metadata && /\bSystem\s*\.\s*Label\s*\./.test(maskApexSource(entry.source))))
         return [entry.filePath,existing];
       const staticQueries=entry.reused && existing
         ?existing.queries.filter(query=>!query.dynamicOrigin)
