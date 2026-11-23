@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { parseKnownJsonMap } from "../src/core/apex/ApexValueEvaluator.js";
 import { extractSoqlQueries, scanApexSoqlWithUnresolved } from "../src/scanner/apexSoqlScanner.js";
 import { extractDynamicSoqlQueries } from "../src/scanner/dynamicSoqlScanner.js";
 
@@ -609,4 +610,103 @@ test("Stage 2 hardening: private wrapper establishes known cross-class caller ev
     assert.match(r.unresolvedDynamic[0].reason,/1 known and 0 unproven/i);
     assert.match(r.unresolvedDynamic[0].reason,/externally callable/i);
   }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test("Stage 3: org Custom Label JSON drives Product2 and Authorized Product field selections",async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),"v011-label-product-"));
+  const label=JSON.stringify({
+    Product2:{"1":"Name","4":"ProductCode__c","5":"Description",
+      "6":"Packed_Size__c","7":"Full_UPC__c","8":"Item_UPC__c",
+      "9":"Client_Item_Code__c","10":"From_Date__c","11":"To_Date__c"},
+    Authorized_Product__c:{"2":"Item_Code__c","3":"Store_Code__c"},
+  });
+  try{
+    await writeFile(path.join(dir,"AdvantageConstants.cls"),[
+      "public class AdvantageConstants {",
+      " public static final String PRODUCT_APINAME = 'Product2';",
+      " public static final String AUTHORIZED_PRODUCT_APINAME = 'Authorized_Product__c';",
+      "}",
+    ].join("\n"));
+    await writeFile(path.join(dir,"ProductSelectorProof.cls"),[
+      "public class ProductSelectorProof {",
+      " private static Map<String, List<String>> getFieldConfig() {",
+      "   String labelString = System.Label.Add_Products_Configurable_Columns;",
+      "   Map<String, Map<String, String>> sequencedFields = (Map<String, Map<String, String>>) JSON.deserialize(labelString, Map<String, Map<String, String>>.class);",
+      "   List<String> product2Fields = new List<String>();",
+      "   List<String> authProdFields = new List<String>();",
+      "   for (String objectName : sequencedFields.keySet()) {",
+      "     Map<String, String> fieldsMap = sequencedFields.get(objectName);",
+      "     for (String seqStr : fieldsMap.keySet()) {",
+      "       String fieldName = fieldsMap.get(seqStr);",
+      "       if (objectName == AdvantageConstants.PRODUCT_APINAME) {product2Fields.add(fieldName);}",
+      "       else if (objectName == AdvantageConstants.AUTHORIZED_PRODUCT_APINAME) {authProdFields.add(fieldName);}",
+      "     }",
+      "   }",
+      "   return new Map<String, List<String>>{",
+      "     AdvantageConstants.PRODUCT_APINAME => product2Fields,",
+      "     AdvantageConstants.AUTHORIZED_PRODUCT_APINAME => authProdFields",
+      "   };",
+      " }",
+      " public static void run() {",
+      "   Map<String, List<String>> fieldConfig = getFieldConfig();",
+      "   List<String> product2Fields = fieldConfig.get('Product2');",
+      "   List<String> authProductFields = fieldConfig.get('Authorized_Product__c');",
+      "   String query='SELECT Id, '+String.join(product2Fields, ',')+",
+      "     ', (SELECT '+String.join(authProductFields, ',')+' FROM Authorized_Products__r)' +",
+      "     ' FROM Product2 WITH USER_MODE';",
+      "   Database.query(query);",
+      " }",
+      "}",
+    ].join("\n"));
+    const provider={
+      scopeKey:"org-x/connection-1",
+      getCustomLabelValue:async(name:string)=>name==="Add_Products_Configurable_Columns"
+        ?{complete:true as const,source:"LIVE_ORG" as const,value:label}
+        :{complete:false as const,source:"LIVE_ORG" as const,reason:"Not found"},
+      getObjectFieldNames:async()=>({complete:false as const,source:"LIVE_ORG" as const,
+        reason:"Not loaded"}),
+      getCustomMetadataRecords:async()=>({complete:false as const,source:"LIVE_ORG" as const,
+        reason:"Not loaded"}),
+    };
+    const scanned=await scanApexSoqlWithUnresolved(dir,provider);
+    assert.equal(scanned.unresolvedDynamic.length,0,JSON.stringify(scanned.unresolvedDynamic));
+    assert.equal(scanned.queries.length,1);
+    assert.match(scanned.queries[0].query,/Name,ProductCode__c,Description/);
+    assert.match(scanned.queries[0].query,/Item_Code__c,Store_Code__c FROM Authorized_Products__r/);
+    assert.equal(scanned.queries[0].securityMode,"USER_MODE");
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test("Stage 3: absent Custom Label stays unresolved rather than silently using supplied field fixture",async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),"v011-label-missing-"));
+  try{
+    await writeFile(path.join(dir,"MissingLabel.cls"),[
+      "public class MissingLabel {",
+      " public static void run(){",
+      "   String fields=System.Label.Add_Products_Configurable_Columns;",
+      "   Database.query('SELECT '+fields+' FROM Account');",
+      " }",
+      "}",
+    ].join("\n"));
+    const without=await scanApexSoqlWithUnresolved(dir);
+    assert.equal(without.queries.length,0);
+    assert.equal(without.unresolvedDynamic.length,1);
+    assert.match(without.unresolvedDynamic[0].reason,/Custom Label/i);
+    const provider={
+      scopeKey:"org-y/connection-1",
+      getCustomLabelValue:async()=>({complete:false as const,source:"LIVE_ORG" as const,
+        reason:"Insufficient metadata permissions."}),
+      getObjectFieldNames:async()=>({complete:false as const,source:"LIVE_ORG" as const}),
+      getCustomMetadataRecords:async()=>({complete:false as const,source:"LIVE_ORG" as const}),
+    };
+    const withOrg=await scanApexSoqlWithUnresolved(dir,provider);
+    assert.equal(withOrg.queries.length,0);
+    assert.equal(withOrg.unresolvedDynamic.length,1);
+    assert.match(withOrg.unresolvedDynamic[0].reason,/Insufficient metadata permissions/);
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test("Stage 3: invalid JSON cannot be promoted to a verified SOQL field inventory",()=>{
+  assert.equal(parseKnownJsonMap("{ invalid").kind,"unknown");
+  assert.equal(parseKnownJsonMap('{"Account":["Id"]}').kind,"unknown");
 });
