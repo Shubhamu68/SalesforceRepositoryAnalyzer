@@ -49,3 +49,62 @@ test("Custom Label provider rejects duplicate or missing org label values",async
   assert.equal(unknown.complete,false);
   assert.match(unknown.reason??"",/invalid/i);
 });
+
+test("Stage 3 final: Field Set Tooling metadata produces ordered and validated field paths",async()=>{
+  const calls:string[]=[];
+  const connection={
+    status:{organizationId:"00Dmock",userId:"005mock",instanceUrl:"https://example.my.salesforce.com",
+      connectedAt:"connection-1"},
+    queryAll:async(soql:string,api:string)=>{
+      calls.push(api+"|"+soql);
+      assert.equal(api,"tooling");
+      if(soql.includes("SELECT Id, DeveloperName")){
+        return [{Id:"0IX000000000001AAA",DeveloperName:"Export_Fields",
+          EntityDefinition:{QualifiedApiName:"Account"}}];
+      }
+      return [{Metadata:{displayedFields:[
+        {field:"Name"},{field:"Owner.Name"},{field:"Custom_Code__c"}]}}];
+    },
+  } as unknown as SalesforceOrgConnection;
+  const result=await new SalesforceApexMetadataProvider(connection)
+    .getFieldSetFields("Account","Export_Fields");
+  assert.equal(result.complete,true,JSON.stringify(result));
+  assert.deepEqual(result.value,["Name","Owner.Name","Custom_Code__c"]);
+  assert.equal(calls.length,2);
+  assert.ok(calls.every(c=>c.startsWith("tooling|SELECT")));
+});
+test("Stage 3 final: Field Set metadata missing displayedFields cannot verify fields",async()=>{
+  const connection={
+    status:{organizationId:"00Dmock",userId:"005mock",instanceUrl:"https://example.my.salesforce.com",
+      connectedAt:"connection-1"},
+    queryAll:async(soql:string)=>soql.includes("SELECT Id, DeveloperName")
+      ?[{Id:"0IX000000000001AAA",DeveloperName:"Export_Fields",
+          EntityDefinition:{QualifiedApiName:"Account"}}]
+      :[{Metadata:{availableFields:[{field:"Name"}]}}],
+  } as unknown as SalesforceOrgConnection;
+  const result=await new SalesforceApexMetadataProvider(connection)
+    .getFieldSetFields("Account","Export_Fields");
+  assert.equal(result.complete,false);
+  assert.match(result.reason??"",/displayedFields/i);
+});
+test("Stage 3 final: Custom Metadata snapshots refresh between scans",async()=>{
+  const calls:string[]=[];
+  let sourceField="Status";
+  const connection={
+    status:{organizationId:"00Dmock",userId:"005mock",instanceUrl:"https://example.my.salesforce.com",
+      connectedAt:"connection-1"},
+    queryAll:async(soql:string,api:string)=>{
+      calls.push(api+"|"+soql);
+      return [{DeveloperName:"Only",Source_Field__c:sourceField,Active__c:true}];
+    },
+  } as unknown as SalesforceOrgConnection;
+  const provider=new SalesforceApexMetadataProvider(connection);
+  const before=await provider.getCustomMetadataRecords("Field_Mapping__mdt",
+    ["Source_Field__c","Active__c"]);
+  assert.equal(before.value?.[0].Source_Field__c,"Status");
+  sourceField="OrderNumber";
+  const after=await provider.getCustomMetadataRecords("Field_Mapping__mdt",
+    ["Source_Field__c","Active__c"]);
+  assert.equal(after.value?.[0].Source_Field__c,"OrderNumber");
+  assert.equal(calls.length,2);
+});
