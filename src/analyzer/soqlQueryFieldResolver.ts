@@ -204,7 +204,7 @@ export function collectQueryFields(query: SoqlQuery, relationships: Relationship
     if (isIgnoredField(resolved.field, resolved.object)) return;
     const field: ScopedFieldReference = {
       object: resolved.object, field: resolved.field, source,
-      lineNumber: scopeFieldLine(text, lineNumber, candidate, usageContext, masked(text)),
+      lineNumber: query.dynamicOrigin ? query.lineNumber : scopeFieldLine(text, lineNumber, candidate, usageContext, masked(text)),
       queryLineNumber: query.lineNumber, relationshipPath: path,
       ...(query.queryVariantId ? { queryVariantId: query.queryVariantId } : {}),
       ...(usageContext ? { usageContext } : {}),
