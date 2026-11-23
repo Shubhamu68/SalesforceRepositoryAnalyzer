@@ -176,3 +176,21 @@ Implementation on `feature/v0.1.1-dynamic-soql-resolution`:
 - Synthetic regression fixtures now cover two distinct complete private caller variants, nested private wrappers, one known and one unknown caller, the externally callable public-query boundary, guarded fallback dynamic queries, ambiguous structural inputs and earlier Stage 1 branch-scope behavior.
 - The first real-world validation target remains the Order Management Specialist Core report (519 analyzed, 79 Unable, seven High before this hardening). Confirm previously resolved cross-class helper sites, especially `CloseTransmittedSampleOrdersBatch:47`, and check that `ProductSelectorController:149,267` now expose source-dependency or precise unreachable-path reasons rather than the generic invocation message. Do **not** assume the new fixes eliminate all 26 public `OMSQueryService` reviews; those depend on runtime structural inputs and can legitimately remain Unable.
 - Do not begin Stage 3 Custom Labels / Field Sets / Custom Metadata work until the owner validates stable High findings, no missing previously analyzed sites and no unexpected increase in Unable. PR #55 stays Draft.
+
+## Stage 3 slice 1 — org-backed Custom Labels and JSON field maps
+
+This first Stage 3 slice implements only the metadata-driven field-list path. It **does not** claim complete Custom Metadata or Field Set interpretation.
+
+- Extend the optional read-only Apex metadata provider with `getCustomLabelValue(labelName)`. The live implementation queries `ExternalString` through the existing connected Salesforce Tooling API. Labels are scoped by org connection. Duplicate/missing names, inaccessible metadata, and locale-dependent translations are incomplete and fail closed. Results are fetched afresh when an analysis is rerun, so an edited org label cannot silently retain an obsolete verified query.
+- Discover referenced `System.Label.*` dependencies, prefetch complete values before symbolic analysis, and feed them through the existing `resolveExternal` contract. No mock, supplied sample JSON, Apex execution, or source-code field substitution is used for live results.
+- Parse `JSON.deserialize` into a bounded abstract nested map using native `JSON.parse` and explicit schema guards; support only known Map/collection/value operations, `map.get`, `map.keySet`, bounded `Map` construction and `containsKey`. Unsupported shapes remain unresolved.
+- Index literal static Apex String constants from real source (e.g. object API names used as map keys), rejecting comments, method-local values and runtime expressions.
+- Support direct `ObjectApiName.SObjectType.getDescribe().fields.getMap()` as well as the existing global Describe spelling through an authoritative complete Describe snapshot.
+- Tests include Product2 / Authorized_Product__c fields from the supplied JSON **as a synthetic fixture only**, a resolved USER_MODE child-query variant, invalid/missing JSON and labels, changed label values without repository edits, Tooling API identity/translation safeguards, and field-map validation without org Describe.
+- All normal static queries and existing OLS/FLS evaluation remain unchanged. A dynamic site is RESOLVED only if every feasible full SOQL variant is proven, parseable and within limits.
+
+### Validation in the selected private org
+
+Baseline before this slice: 519 analyzed queries, 79 unresolved, seven High, 237 Low for Order Management Specialist Core. Run with the same repository, connected org and persona. Inspect ProductSelectorController execution lines 129, 149, 224, 267, and 545 specifically. These are candidates, **not guaranteed resolutions**: runtime paths, Custom Metadata limits and unknown control flow may still block them. The five original sites must not disappear silently; either each is fully resolved and contributes its correct object/field findings, or retains a specific Unable-to-verify reason.
+
+`OMSQueryService` public runtime field-list queries remain subject to the open-caller restriction. Four `OTCInvoiceController` Custom Metadata sites and `DynamicReportController` Field Set/report metadata sites are **not implemented by this slice**. Extend those in subsequent Stage 3 slices only after this source-level and real-repository comparison is validated. Keep PR #55 Draft.
