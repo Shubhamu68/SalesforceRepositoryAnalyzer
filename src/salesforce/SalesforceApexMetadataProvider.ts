@@ -75,11 +75,12 @@ export class SalesforceApexMetadataProvider implements ApexMetadataProvider {
     }
   }
 
-  /** Resolve ordered Field Set members from Tooling metadata (never guess). */
+  /** Resolve ordered Field Set members from read-only, org-backed metadata. */
   async getFieldSetFields(objectApiName:string,fieldSetDeveloperName:string):
     Promise<MetadataResult<string[]>> {
     if(!VALID_NAME.test(objectApiName)||!VALID_NAME.test(fieldSetDeveloperName))
       return {complete:false,source:"LIVE_ORG",reason:"Invalid Field Set object/name."};
+    let toolingIssue="Field Set Tooling inventory unavailable.";
     try{
       const q="SELECT Id, DeveloperName, EntityDefinition.QualifiedApiName "+
         "FROM FieldSet WHERE DeveloperName = '"+fieldSetDeveloperName+"' LIMIT 100";
@@ -87,46 +88,50 @@ export class SalesforceApexMetadataProvider implements ApexMetadataProvider {
       const matches=all.filter(row=>row.DeveloperName===fieldSetDeveloperName &&
         row.EntityDefinition!==null && typeof row.EntityDefinition==="object" &&
         (row.EntityDefinition as Record<string,unknown>).QualifiedApiName===objectApiName);
-      if(matches.length!==1)
-        return {complete:false,source:"LIVE_ORG",
-          reason:matches.length===0
-            ?"Field Set not found on the specified object in the connected org."
-            :"Field Set identity is ambiguous in the connected org."};
-      const id=matches[0].Id;
-      if(typeof id!=="string"||!/^[A-Za-z0-9]{15,18}$/.test(id))
-        return {complete:false,source:"LIVE_ORG",reason:"Field Set Tooling identity invalid."};
-      // Tooling metadata retrieval can be restricted in certain orgs. An
-      // unsupported Metadata property or missing permission fails closed.
-      const full=await this.connection.queryAll<Record<string,unknown>>(
-        "SELECT Metadata FROM FieldSet WHERE Id = '"+id+"' LIMIT 1","tooling",1);
-      if(full.length!==1||!full[0].Metadata||
-         typeof full[0].Metadata!=="object")
-        return {complete:false,source:"LIVE_ORG",
-          reason:"Complete Field Set Metadata was not returned by Tooling API."};
-      const meta=full[0].Metadata as Record<string,unknown>;
-      if(!Array.isArray(meta.displayedFields))
-        return {complete:false,source:"LIVE_ORG",
-          reason:"Field Set displayedFields inventory unavailable."};
-      if(meta.displayedFields.length>200)
-        return {complete:false,source:"LIVE_ORG",
-          reason:"Field Set member limit exceeded."};
-      const result:string[]=[];
-      for(const item of meta.displayedFields){
-        if(!item||typeof item!=="object"||
-           typeof (item as Record<string,unknown>).field!=="string")
-          return {complete:false,source:"LIVE_ORG",
-            reason:"Field Set contains an invalid member."};
-        const field=(item as {field:string}).field;
-        if(!/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/.test(field))
-          return {complete:false,source:"LIVE_ORG",
-            reason:"Field Set member has an invalid SOQL field path."};
-        result.push(field);
-      }
-      return {complete:true,source:"LIVE_ORG",value:result};
+      if(matches.length===1 && typeof matches[0].Id==="string" &&
+         /^[A-Za-z0-9]{15,18}$/.test(matches[0].Id)){
+        try{
+          const full=await this.connection.queryAll<Record<string,unknown>>(
+            "SELECT Metadata FROM FieldSet WHERE Id = '"+matches[0].Id+"' LIMIT 1",
+            "tooling",1);
+          const meta=full.length===1&&full[0].Metadata&&
+            typeof full[0].Metadata==="object"
+            ?full[0].Metadata as Record<string,unknown>:null;
+          if(meta && Array.isArray(meta.displayedFields) &&
+             meta.displayedFields.length<=200){
+            const fields:string[]=[];
+            let valid=true;
+            for(const member of meta.displayedFields){
+              const field=member && typeof member==="object"
+                ?(member as Record<string,unknown>).field:undefined;
+              if(typeof field!=="string"||
+                 !/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/.test(field)){
+                valid=false;break;
+              }
+              fields.push(field);
+            }
+            if(valid)return {complete:true,source:"LIVE_ORG",value:fields};
+          }
+          toolingIssue="Field Set displayedFields was incomplete or invalid in Tooling API.";
+        }catch(error){
+          toolingIssue=error instanceof Error?error.message:"Field Set Tooling metadata query unavailable.";
+        }
+      }else toolingIssue="Field Set not found or ambiguous in Tooling API for the specified object.";
+    }catch(error){
+      toolingIssue=error instanceof Error?error.message:"Field Set Tooling API unavailable.";
+    }
+    // Some orgs expose the FieldSet record through Tooling but omit complete
+    // displayedFields. The Metadata API readMetadata SOAP call is read-only;
+    // it requires metadata permissions of the already connected Salesforce user.
+    try{
+      if(typeof this.connection.readFieldSetMetadata!=="function")
+        return {complete:false,source:"LIVE_ORG",reason:toolingIssue};
+      const fields=await this.connection.readFieldSetMetadata(objectApiName,fieldSetDeveloperName);
+      return {complete:true,source:"LIVE_ORG",value:fields};
     }catch(error){
       return {complete:false,source:"LIVE_ORG",
-        reason:error instanceof Error?error.message:
-          "Field Set metadata could not be retrieved from Tooling API."};
+        reason:toolingIssue+" Metadata API fallback: "+
+          (error instanceof Error?error.message:"Field Set metadata read unavailable.")};
     }
   }
 
