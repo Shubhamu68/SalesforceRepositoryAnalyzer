@@ -276,13 +276,26 @@ export class ApexRepositoryMethodIndex {
         candidateCalls:candidates.length,externallyCallable};
     let knownCalls=0,unknownCalls=0;
     for(const call of candidates) {
-      const engine=new ApexDataFlowEngine(call.caller.source,{
-        resolveExternal:(name,args)=>this.evaluateReturn(call.caller.filePath,name,args),
-      });
-      const contexts=engine.evaluateArgumentsAt(call.method,call.offset,call.expressions);
-      const known=contexts.length>0 && contexts.every(args=>
-        args.length===arity&&args.every(value=>value.kind!=="unknown"));
-      if(known)knownCalls++;else unknownCalls++;
+      const privateInputs=call.method.visibility==="private"
+        ?this.resolvePrivateContexts(call.caller.filePath,call.method):undefined;
+      if(call.method.visibility==="private" && !privateInputs?.length){
+        unknownCalls++;
+        continue;
+      }
+      const seeds=privateInputs?.length?privateInputs:[undefined];
+      let allKnown=true;
+      for(const seed of seeds){
+        const engine=new ApexDataFlowEngine(call.caller.source,{
+          resolveExternal:(name,args)=>this.evaluateReturn(call.caller.filePath,name,args),
+        });
+        const contexts=engine.evaluateArgumentsAt(call.method,call.offset,call.expressions,seed);
+        if(!contexts.length||contexts.some(args=>
+          args.length!==arity||args.some(value=>value.kind==="unknown"))){
+          allKnown=false;
+          break;
+        }
+      }
+      if(allKnown)knownCalls++;else unknownCalls++;
     }
     const result={knownCalls,unknownCalls,candidateCalls:candidates.length,
       externallyCallable};
