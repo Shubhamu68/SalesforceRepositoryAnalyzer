@@ -149,7 +149,7 @@ export function evaluateApexExpression(
   }
   // Schema Describe is a metadata dependency, not a method to execute.
   // A caller-supplied read-only snapshot must prove the complete field list.
-  const describe=/^Schema\\.getGlobalDescribe\\(\\)\\.get\\(([^)]*)\\)\\.getDescribe\\(\\)\\.fields\\.getMap\\(\\)$/i.exec(expr);
+  const describe=/^Schema\.getGlobalDescribe\(\)\.get\(([^)]*)\)\.getDescribe\(\)\.fields\.getMap\(\)$/i.exec(expr);
   if(describe){
     const object=evaluateApexExpression(describe[1],context,depth+1);
     return context.resolveCall?.("Schema.describeFields",[object]) ??
