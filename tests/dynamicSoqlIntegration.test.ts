@@ -740,3 +740,30 @@ test("Stage 3: direct SObjectType Describe supplies field whitelist for dynamic 
     assert.equal(noOrg.unresolvedDynamic.length,1);
   }finally{await rm(dir,{recursive:true,force:true});}
 });
+
+test("Stage 3: same-source org label edits invalidate cached dynamic query",async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),"v011-label-refresh-"));
+  try{
+    await writeFile(path.join(dir,"LabelDriven.cls"),[
+      "public class LabelDriven {",
+      " public static void run(){",
+      "   String field=System.Label.Single_Field;",
+      "   Database.query('SELECT '+field+' FROM Account');",
+      " }",
+      "}",
+    ].join("\n"));
+    let label="Id";
+    const provider={
+      scopeKey:"same-org/same-session",
+      getCustomLabelValue:async()=>({complete:true as const,source:"LIVE_ORG" as const,value:label}),
+      getObjectFieldNames:async()=>({complete:false as const,source:"LIVE_ORG" as const}),
+      getCustomMetadataRecords:async()=>({complete:false as const,source:"LIVE_ORG" as const}),
+    };
+    const first=await scanApexSoqlWithUnresolved(dir,provider);
+    assert.equal(first.queries[0].query,"SELECT Id FROM Account");
+    label="Name";
+    const second=await scanApexSoqlWithUnresolved(dir,provider);
+    assert.equal(second.queries[0].query,"SELECT Name FROM Account");
+    assert.equal(second.unresolvedDynamic.length,0);
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
