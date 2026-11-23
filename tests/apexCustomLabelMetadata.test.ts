@@ -108,3 +108,34 @@ test("Stage 3 final: Custom Metadata snapshots refresh between scans",async()=>{
   assert.equal(after.value?.[0].Source_Field__c,"OrderNumber");
   assert.equal(calls.length,2);
 });
+
+test("Stage 3 final: Metadata API Field Set fallback is read-only and scoped to the exact object",async()=>{
+  const calls:Array<{object:string;name:string}>=[];
+  const connection={
+    status:{organizationId:"00Dmock",userId:"005mock",instanceUrl:"https://example.my.salesforce.com",
+      connectedAt:"connection-1"},
+    queryAll:async()=>{throw Error("Tooling FieldSet metadata not available");},
+    readFieldSetMetadata:async(object:string,name:string)=>{
+      calls.push({object,name});
+      return ["Id","Account.Name","CreatedDate"];
+    },
+  } as unknown as SalesforceOrgConnection;
+  const result=await new SalesforceApexMetadataProvider(connection)
+    .getFieldSetFields("Account","Export_Fields");
+  assert.equal(result.complete,true,JSON.stringify(result));
+  assert.deepEqual(result.value,["Id","Account.Name","CreatedDate"]);
+  assert.deepEqual(calls,[{object:"Account",name:"Export_Fields"}]);
+});
+
+test("Stage 3 final: denied Metadata API fallback is not silently accepted",async()=>{
+  const connection={
+    status:{organizationId:"00Dmock",userId:"005mock",instanceUrl:"https://example.my.salesforce.com",
+      connectedAt:"connection-1"},
+    queryAll:async()=>{throw Error("Tooling metadata property unavailable");},
+    readFieldSetMetadata:async()=>{throw Error("INSUFFICIENT_ACCESS_OR_READONLY");},
+  } as unknown as SalesforceOrgConnection;
+  const result=await new SalesforceApexMetadataProvider(connection)
+    .getFieldSetFields("Account","Export_Fields");
+  assert.equal(result.complete,false);
+  assert.match(result.reason??"",/INSUFFICIENT_ACCESS_OR_READONLY/);
+});
