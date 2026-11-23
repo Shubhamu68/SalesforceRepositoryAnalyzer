@@ -121,8 +121,16 @@ export class ApexDataFlowEngine {
     return evaluateApexExpression(expr,context);
   }
   private captureCalls(start:number,end:number,state:State,depth:number):void{
-    for(const site of this.sites){
-      if(site.offset<start||site.offset>=end)continue;
+    // Sites are sorted by source offset. Binary-search instead of walking
+    // every Database call for every parsed Apex statement.
+    let low=0, high=this.sites.length;
+    while(low<high){
+      const mid=(low+high)>>>1;
+      if(this.sites[mid].offset<start)low=mid+1;
+      else high=mid;
+    }
+    for(let i=low;i<this.sites.length&&this.sites[i].offset<end;i++){
+      const site=this.sites[i];
       const value=this.evaluate(site.argument,state,depth);
       const access=site.accessLevelArgument?
         this.evaluate(site.accessLevelArgument,state,depth):textValue("(default)");
