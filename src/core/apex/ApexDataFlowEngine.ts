@@ -166,6 +166,7 @@ export class ApexDataFlowEngine {
   private readonly failures=new Map<number,string>();
   private activeStopOffset:number|undefined;
   private activeQueryOffset:number|undefined;
+  private argumentProbe?: { offset:number; expressions:string[]; results:ApexValue[][] };
   /** Per-site, per-method optimization: never applied to helper summaries. */
   private activeSlice:Set<SourceNode>|undefined;
   private readonly className:string|undefined;
@@ -268,6 +269,13 @@ export class ApexDataFlowEngine {
   }
   private statement(node:SourceNode,state:State,depth:number):ApexValue|undefined{
     const original=(node.text??"").trim().replace(/;\s*$/,"");
+    // Read arguments in the environment immediately before their invocation,
+    // not after the containing assignment or nested helper mutates the state.
+    if(this.argumentProbe && node.start<=this.argumentProbe.offset &&
+        this.argumentProbe.offset<node.end) {
+      this.argumentProbe.results.push(this.argumentProbe.expressions.map(expr=>
+        this.evaluate(expr,state,depth)));
+    }
     this.captureCalls(node.start,node.end,state,depth);
     if(!original)return;
     if(/^return\b/.test(original)){
@@ -437,6 +445,68 @@ export class ApexDataFlowEngine {
     }
     return {states,returns};
   }
+  /**
+   * Evaluate an indexed helper without executing Apex. Return values are symbolic
+   * and only returned when every feasible exit has a proven result.
+   * Collections cannot be merged across incompatible branch variants.
+   */
+  summarizeMethodReturn(method:IndexedApexMethod,args:readonly ApexValue[]):ApexValue {
+    if(method.parameters.length!==args.length)
+      return unknown("Apex helper argument count does not match the declaration.");
+    this.operationCount=0;
+    this.exceeded=false;
+    this.activeSlice=undefined;
+    this.activeQueryOffset=undefined;
+    this.activeStopOffset=undefined;
+    const values=new Map<string,ApexValue>();
+    method.parameters.forEach((name,index)=>values.set(name,args[index]));
+    const result=this.execute(method.body,[{values}],1);
+    if(this.exceeded)return unknown("Apex helper exceeds bounded analysis budget.");
+    if(!result.returns.length || result.states.some(state=>!state.stopped))
+      return unknown("Apex helper has an execution path without a proven return.");
+    if(result.returns.some(value=>value.kind==="unknown"))
+      return result.returns.find(value=>value.kind==="unknown")!;
+    if(result.returns.every(value=>value.kind==="text")) {
+      const alternatives=[...new Set(result.returns.flatMap(value=>
+        value.kind==="text"?value.values:[]))];
+      return alternatives.length<=this.options.maxPaths
+        ?{kind:"text",values:alternatives}
+        :unknown("Apex helper return alternatives exceed the limit.");
+    }
+    const unique=new Map(result.returns.map(value=>[JSON.stringify(value),value]));
+    return unique.size===1
+      ?unique.values().next().value!
+      :unknown("Apex helper returns structurally different collection or numeric alternatives.");
+  }
+
+  /**
+   * Bounded caller-side propagation. Unknown input parameters are deliberately
+   * seeded as unknown; the repository cannot infer external runtime callers.
+   */
+  evaluateArgumentsAt(method:IndexedApexMethod,offset:number,
+    expressions:readonly string[]):ApexValue[][] {
+    this.operationCount=0;
+    this.exceeded=false;
+    this.activeQueryOffset=undefined;
+    this.activeStopOffset=offset;
+    this.activeCalls.clear();
+    this.summaries.clear();
+    this.activeSlice=queryDependencySlice(method.body,offset,expressions.join(" + "));
+    this.argumentProbe={offset,expressions:[...expressions],results:[]};
+    const env=new Map<string,ApexValue>();
+    method.parameters.forEach(name=>env.set(name,unknown("Runtime caller parameter: "+name)));
+    this.execute(method.body,[{values:env}],0);
+    const result=this.argumentProbe.results;
+    this.argumentProbe=undefined;
+    this.activeSlice=undefined;
+    this.activeStopOffset=undefined;
+    if(this.exceeded || !result.length)
+      return [expressions.map(()=>unknown(this.exceeded
+        ?"Caller argument path exceeds bounded analysis budget."
+        :"Caller invocation has no proven execution context."))];
+    return result;
+  }
+
   /** Collect only lexical same-class callers of an explicitly private helper. */
   private privateCallers(owner:IndexedApexMethod):
     Array<{offset:number;method:IndexedApexMethod}>{
