@@ -57,33 +57,33 @@ test("method-returned dynamic SELECT with unknown caller parameter stays unresol
 
 test("report RCA: bracketed SOQL in Database.getQueryLocator is handled only as static SOQL",()=>{
   const code=[
-    "public class BatchMailAndPhoneMaskOnAccount {",
+    "public class AccountMaskingBatch {",
     "  public Database.QueryLocator start(Database.BatchableContext bc){",
-    "    return Database.getQueryLocator([SELECT Id, Phone, MailBox__c, Domain__c, DataMasked__c",
-    "      FROM Account WHERE DataMasked__c = FALSE]);",
+    "    return Database.getQueryLocator([SELECT Id, Phone, BillingCity, BillingPostalCode, Industry",
+    "      FROM Account WHERE Industry = FALSE]);",
     "  }",
     "}",
   ].join("\n");
-  const scanned=extractDynamicSoqlQueries(code,"BatchMailAndPhoneMaskOnAccount.cls");
-  const staticQueries=extractSoqlQueries(code,"BatchMailAndPhoneMaskOnAccount.cls");
+  const scanned=extractDynamicSoqlQueries(code,"AccountMaskingBatch.cls");
+  const staticQueries=extractSoqlQueries(code,"AccountMaskingBatch.cls");
   assert.equal(scanned.unresolved.length,0);
   assert.equal(scanned.queries.length,0);
   assert.equal(staticQueries.length,1);
   assert.equal(staticQueries[0].object,"Account");
 });
-test("report RCA: bracketed ErrorLogRetryBatch locator is not duplicate unresolved SOQL",()=>{
+test("report RCA: bracketed RetryBatch locator is not duplicate unresolved SOQL",()=>{
   const code=[
-    "public class ErrorLogRetryBatch {",
+    "public class RetryBatch {",
     "  public Database.QueryLocator start(Database.BatchableContext bc){",
     "    return Database.getQueryLocator(",
-    "      [SELECT Id, Event_Type__c, OrderSummary__c, Status__c FROM Error_Log__c WHERE Status__c = 'Pending']);",
+    "      [SELECT Id, Priority, Origin, Status FROM Case WHERE Status = 'Pending']);",
     "  }",
     "}",
   ].join("\n");
-  const scanned=extractDynamicSoqlQueries(code,"ErrorLogRetryBatch.cls");
+  const scanned=extractDynamicSoqlQueries(code,"RetryBatch.cls");
   assert.equal(scanned.unresolved.length,0);
   assert.equal(scanned.queries.length,0);
-  assert.equal(extractSoqlQueries(code,"ErrorLogRetryBatch.cls").length,1);
+  assert.equal(extractSoqlQueries(code,"RetryBatch.cls").length,1);
 });
 test("report RCA: a busy unrelated method cannot exhaust another site's budget",()=>{
   const noise=Array.from({length:5200},(_,i)=>"Integer unused"+i+" = "+i+";").join("\n");
@@ -136,7 +136,7 @@ test("supported string-built getQueryLocator remains dynamic rather than being s
 
 test("report RCA: provably private helper receives known List fields from its caller",()=>{
  const code=[
-  "public class OMSQueryService {",
+  "public class OrderFieldQueryHelper {",
   " private static List<SObject> fetch(List<String> orderFields){",
   "   String query='SELECT Id, '+String.join(orderFields, ', ')+' FROM OrderSummary';",
   "   return Database.query(query);",
@@ -146,14 +146,14 @@ test("report RCA: provably private helper receives known List fields from its ca
   " }",
   "}",
  ].join("\n");
- const scanned=extractDynamicSoqlQueries(code,"OMSQueryService.cls");
+ const scanned=extractDynamicSoqlQueries(code,"OrderFieldQueryHelper.cls");
  assert.equal(scanned.unresolved.length,0);
  assert.equal(scanned.queries.length,1);
  assert.equal(scanned.queries[0].query,"SELECT Id, Name, AccountId FROM OrderSummary");
 });
 test("report RCA: private helper accumulates every distinct known caller's query variant",()=>{
  const code=[
-  "public class OMSQueryService {",
+  "public class OrderFieldQueryHelper {",
   " private static void fetch(String field){",
   "   Database.query('SELECT '+field+' FROM Account');",
   " }",
@@ -163,20 +163,20 @@ test("report RCA: private helper accumulates every distinct known caller's query
   " }",
   "}",
  ].join("\n");
- const scanned=extractDynamicSoqlQueries(code,"OMSQueryService.cls");
+ const scanned=extractDynamicSoqlQueries(code,"OrderFieldQueryHelper.cls");
  assert.equal(scanned.unresolved.length,0);
  assert.deepEqual(scanned.queries.map(q=>q.query).sort(),
    ["SELECT Id FROM Account","SELECT Name FROM Account"].sort());
 });
 test("report RCA: unrestricted public field-list input must remain unresolved",()=>{
  const code=[
-  "public class OMSQueryService {",
+  "public class OrderFieldQueryHelper {",
   " public static void fetchOrderSummaries(List<String> fields){",
   "   Database.query('SELECT Id, '+String.join(fields, ', ')+' FROM OrderSummary');",
   " }",
   "}",
  ].join("\n");
- const scanned=extractDynamicSoqlQueries(code,"OMSQueryService.cls");
+ const scanned=extractDynamicSoqlQueries(code,"OrderFieldQueryHelper.cls");
  assert.equal(scanned.queries.length,0);
  assert.equal(scanned.unresolved.length,1);
  assert.match(scanned.unresolved[0].reason,/String\.join/i);
