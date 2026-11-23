@@ -492,3 +492,95 @@ test("Stage 2: repository helper recursion fails closed instead of fabricating c
     assert.equal(inventory.unresolvedDynamic.length,1);
   }finally{await rm(dir,{recursive:true,force:true});}
 });
+
+test("Stage 2 hardening: proven nested private callers resolve distinct query variants",async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),"v011-private-nested-"));
+  try {
+    await writeFile(path.join(dir,"PrivateChain.cls"),[
+      "public class PrivateChain {",
+      " private static void fetch(String field){",
+      "   Database.query('SELECT '+field+' FROM Account');",
+      " }",
+      " private static void middle(String column){fetch(column);}",
+      " public static void run(){",
+      "   middle('Id');",
+      "   middle('Name');",
+      " }",
+      "}",
+    ].join("\n"));
+    const result=await scanApexSoqlWithUnresolved(dir);
+    assert.equal(result.unresolvedDynamic.length,0);
+    assert.deepEqual(result.queries.map(q=>q.query).sort(),
+      ["SELECT Id FROM Account","SELECT Name FROM Account"]);
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test("Stage 2 hardening: unknown public input to private query remains unresolved",async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),"v011-private-unknown-"));
+  try {
+    await writeFile(path.join(dir,"PrivateChain.cls"),[
+      "public class PrivateChain {",
+      " private static void fetch(String field){",
+      "   Database.query('SELECT '+field+' FROM Account');",
+      " }",
+      " public static void known(){fetch('Id');}",
+      " public static void runtimeField(String value){fetch(value);}",
+      "}",
+    ].join("\n"));
+    const result=await scanApexSoqlWithUnresolved(dir);
+    assert.equal(result.queries.length,0);
+    assert.equal(result.unresolvedDynamic.length,1);
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test("Stage 2 hardening: public query stays unresolved even with class-qualified constant callers",async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),"v011-public-query-"));
+  try {
+    await writeFile(path.join(dir,"QueryLibrary.cls"),[
+      "public class QueryLibrary {",
+      " public static void fetch(List<String> fields){",
+      "   Database.query('SELECT '+String.join(fields, ', ')+' FROM Account');",
+      " }",
+      "}",
+    ].join("\n"));
+    await writeFile(path.join(dir,"QueryCaller.cls"),[
+      "public class QueryCaller {",
+      " public static void run(){QueryLibrary.fetch(new List<String>{'Id','Name'});}",
+      "}",
+    ].join("\n"));
+    const result=await scanApexSoqlWithUnresolved(dir);
+    assert.equal(result.queries.length,0);
+    assert.equal(result.unresolvedDynamic.length,1);
+    assert.match(result.unresolvedDynamic[0].reason,/externally callable/i);
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test("Stage 2 hardening: guarded fallback dynamic SOQL retains its actual unresolved dependency",async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),"v011-product-fallback-"));
+  try {
+    await writeFile(path.join(dir,"ProductSelectorPattern.cls"),[
+      "public class ProductSelectorPattern {",
+      " public static void run(String input){",
+      "   String query;",
+      "   List<String> fields = ConfigHelper.getFields(input);",
+      "   String columns = String.join(fields, ',');",
+      "   String soql = 'SELECT Id, '+columns+' FROM Product2';",
+      "   List<Product2> rows = Database.query(soql);",
+      "   if (!rows.isEmpty()) {return;}",
+      "   if (!String.isEmpty(columns)){",
+      "     query = 'SELECT Id, '+columns+' FROM Product2';",
+      "   }",
+      "   query = String.escapeSingleQuotes(query);",
+      "   Database.query(query);",
+      " }",
+      "}",
+    ].join("\n"));
+    const result=await scanApexSoqlWithUnresolved(dir);
+    assert.equal(result.unresolvedDynamic.length,2);
+    assert.equal(result.queries.length,0);
+    assert.ok(result.unresolvedDynamic.every(finding=>
+      !/outside a supported method or execution path/i.test(finding.reason)));
+    assert.ok(result.unresolvedDynamic.some(finding=>
+      /String\\.join|ConfigHelper|columns|escapeSingleQuotes|query dependency/i.test(finding.reason)));
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
