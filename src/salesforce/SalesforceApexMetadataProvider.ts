@@ -55,6 +55,7 @@ export class SalesforceApexMetadataProvider implements ApexMetadataProvider {
             ?"Custom Label was not found in the selected Salesforce org."
             :"Custom Label is ambiguous or has an invalid value."};
       const record=exact[0];
+      const masterValue=record.Value as string; // checked as String above
       if(typeof record.Id!=="string"||!/^[A-Za-z0-9]{15,18}$/.test(record.Id))
         return {complete:false,source:"LIVE_ORG",
           reason:"Custom Label Tooling API identity is missing or invalid."};
@@ -64,10 +65,10 @@ export class SalesforceApexMetadataProvider implements ApexMetadataProvider {
       const translations=await this.connection.queryAll<Record<string,unknown>>(
         "SELECT Value FROM ExternalStringLocalization WHERE ExternalStringId = '"+
         record.Id+"'", "tooling", 2000);
-      if(translations.some(row=>typeof row.Value!=="string"||row.Value!==record.Value))
+      if(translations.some(row=>typeof row.Value!=="string"||row.Value!==masterValue))
         return {complete:false,source:"LIVE_ORG",
           reason:"Custom Label has locale-dependent translations; query structure is not unique."};
-      return {complete:true,source:"LIVE_ORG",value:record.Value};
+      return {complete:true,source:"LIVE_ORG",value:masterValue};
     }catch(error){
       return {complete:false,source:"LIVE_ORG",
         reason:error instanceof Error?error.message:"Tooling API Custom Label lookup failed."};
