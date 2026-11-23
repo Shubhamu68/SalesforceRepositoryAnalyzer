@@ -59,15 +59,16 @@ test("v0.1.1 reports unsupported runtime string construction unresolved", () => 
   assert.match(result.unresolved[0].reason, /unsupported/i);
 });
 
-test("v0.1.1 does not guess field access after a conditional mutation", () => {
+test("v0.1.1 enumerates both feasible conditional assignment variants", () => {
   const text = source([
     "    String q = 'SELECT Id FROM Account';",
     "    if (addName) { q = 'SELECT Id, Name FROM Account'; }",
     "    Database.query(q);",
   ].join("\n"));
   const result = extractDynamicSoqlQueries(text, file);
-  assert.equal(result.queries.length, 0);
-  assert.equal(result.unresolved.length, 1);
+  assert.equal(result.unresolved.length, 0);
+  assert.deepEqual(result.queries.map(q=>q.query).sort(),
+    ["SELECT Id FROM Account","SELECT Id, Name FROM Account"].sort());
 });
 
 test("v0.1.1 ignores commented-out Database calls and strings", () => {
