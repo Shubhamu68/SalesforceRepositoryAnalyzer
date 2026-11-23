@@ -7,7 +7,7 @@ const MAX_RECORDS=20000;
 /** Uses the Analyzer's existing verified CLI-backed Salesforce connection. */
 export class SalesforceApexMetadataProvider implements ApexMetadataProvider {
   private readonly fieldsCache=new Map<string,Promise<MetadataResult<string[]>>>();
-  private readonly recordsCache=new Map<string,Promise<MetadataResult<Array<Record<string,unknown>>>>>();
+  // Metadata row sets are mutable org configuration; refresh on every scan.
   readonly scopeKey:string;
   constructor(private readonly connection:SalesforceOrgConnection){
     const status=connection.status;
@@ -75,6 +75,61 @@ export class SalesforceApexMetadataProvider implements ApexMetadataProvider {
     }
   }
 
+  /** Resolve ordered Field Set members from Tooling metadata (never guess). */
+  async getFieldSetFields(objectApiName:string,fieldSetDeveloperName:string):
+    Promise<MetadataResult<string[]>> {
+    if(!VALID_NAME.test(objectApiName)||!VALID_NAME.test(fieldSetDeveloperName))
+      return {complete:false,source:"LIVE_ORG",reason:"Invalid Field Set object/name."};
+    try{
+      const q="SELECT Id, DeveloperName, EntityDefinition.QualifiedApiName "+
+        "FROM FieldSet WHERE DeveloperName = '"+fieldSetDeveloperName+"' LIMIT 100";
+      const all=await this.connection.queryAll<Record<string,unknown>>(q,"tooling",100);
+      const matches=all.filter(row=>row.DeveloperName===fieldSetDeveloperName &&
+        row.EntityDefinition!==null && typeof row.EntityDefinition==="object" &&
+        (row.EntityDefinition as Record<string,unknown>).QualifiedApiName===objectApiName);
+      if(matches.length!==1)
+        return {complete:false,source:"LIVE_ORG",
+          reason:matches.length===0
+            ?"Field Set not found on the specified object in the connected org."
+            :"Field Set identity is ambiguous in the connected org."};
+      const id=matches[0].Id;
+      if(typeof id!=="string"||!/^[A-Za-z0-9]{15,18}$/.test(id))
+        return {complete:false,source:"LIVE_ORG",reason:"Field Set Tooling identity invalid."};
+      // Tooling metadata retrieval can be restricted in certain orgs. An
+      // unsupported Metadata property or missing permission fails closed.
+      const full=await this.connection.queryAll<Record<string,unknown>>(
+        "SELECT Metadata FROM FieldSet WHERE Id = '"+id+"' LIMIT 1","tooling",1);
+      if(full.length!==1||!full[0].Metadata||
+         typeof full[0].Metadata!=="object")
+        return {complete:false,source:"LIVE_ORG",
+          reason:"Complete Field Set Metadata was not returned by Tooling API."};
+      const meta=full[0].Metadata as Record<string,unknown>;
+      if(!Array.isArray(meta.displayedFields))
+        return {complete:false,source:"LIVE_ORG",
+          reason:"Field Set displayedFields inventory unavailable."};
+      if(meta.displayedFields.length>200)
+        return {complete:false,source:"LIVE_ORG",
+          reason:"Field Set member limit exceeded."};
+      const result:string[]=[];
+      for(const item of meta.displayedFields){
+        if(!item||typeof item!=="object"||
+           typeof (item as Record<string,unknown>).field!=="string")
+          return {complete:false,source:"LIVE_ORG",
+            reason:"Field Set contains an invalid member."};
+        const field=(item as {field:string}).field;
+        if(!/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/.test(field))
+          return {complete:false,source:"LIVE_ORG",
+            reason:"Field Set member has an invalid SOQL field path."};
+        result.push(field);
+      }
+      return {complete:true,source:"LIVE_ORG",value:result};
+    }catch(error){
+      return {complete:false,source:"LIVE_ORG",
+        reason:error instanceof Error?error.message:
+          "Field Set metadata could not be retrieved from Tooling API."};
+    }
+  }
+
   async getCustomMetadataRecords(objectApiName:string,fields:readonly string[]):
     Promise<MetadataResult<Array<Record<string,unknown>>>>{
     if(!VALID_NAME.test(objectApiName)||!objectApiName.endsWith("__mdt") ||
@@ -82,21 +137,18 @@ export class SalesforceApexMetadataProvider implements ApexMetadataProvider {
       complete:false,source:"LIVE_ORG",reason:"Custom Metadata query object or fields invalid.",
     };
     const selected=[...new Set(["DeveloperName",...fields])].sort();
-    const key=objectApiName.toLowerCase()+"|"+selected.join(",").toLowerCase();
-    let cached=this.recordsCache.get(key);
-    if(!cached){
-      cached=(async()=>{
-        try{
-          const query="SELECT "+selected.join(",")+" FROM "+objectApiName;
-          const data=await this.connection.queryAll<Record<string,unknown>>(query,"data",MAX_RECORDS);
-          return {complete:true,source:"LIVE_ORG" as const,value:data};
-        }catch(error){
-          return {complete:false,source:"LIVE_ORG" as const,
-            reason:error instanceof Error?error.message:"Custom Metadata retrieval incomplete."};
-        }
-      })();
-      this.recordsCache.set(key,cached);
+    try{
+      const query="SELECT "+selected.join(",")+" FROM "+objectApiName;
+      const data=await this.connection.queryAll<Record<string,unknown>>(query,"data",MAX_RECORDS);
+      if(data.some(item=>!item||typeof item!=="object"||
+         selected.some(field=>!Object.prototype.hasOwnProperty.call(item,field))))
+        return {complete:false,source:"LIVE_ORG",
+          reason:"Custom Metadata query omitted one or more selected fields."};
+      return {complete:true,source:"LIVE_ORG",value:data};
+    }catch(error){
+      return {complete:false,source:"LIVE_ORG",
+        reason:error instanceof Error?error.message:
+          "Custom Metadata retrieval incomplete."};
     }
-    return cached;
   }
 }
