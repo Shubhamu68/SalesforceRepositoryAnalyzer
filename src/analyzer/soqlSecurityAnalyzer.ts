@@ -283,7 +283,7 @@ export class SoqlSecurityAnalyzer {
           // field references can differ in clause/enforcement at one line.
           const id = deniedParentKeys.has(finding.field.toLowerCase())
             ? [finding.object, finding.field, finding.filePath,
-                finding.lineNumber, finding.relationshipPath ?? ""].join("|").toLowerCase()
+                finding.lineNumber, finding.queryVariantId ?? "", finding.relationshipPath ?? ""].join("|").toLowerCase()
             : `direct|${key}|${index}`;
           if (!groupedFieldFindings.has(id)) groupedFieldFindings.set(id, finding);
         }
@@ -302,7 +302,7 @@ export class SoqlSecurityAnalyzer {
     // Relationship resolution gaps are also inconclusive, not access denials.
     const reported = new Set<string>();
     for (const unresolved of unresolvedFields) {
-      const id = `${unresolved.query.filePath}:${unresolved.lineNumber ?? unresolved.query.lineNumber}:${unresolved.baseObject}:${unresolved.fieldPath}`.toLowerCase();
+      const id = `${unresolved.query.queryVariantId ?? unresolved.query.filePath}:${unresolved.lineNumber ?? unresolved.query.lineNumber}:${unresolved.baseObject}:${unresolved.fieldPath}`.toLowerCase();
       if (reported.has(id)) continue;
       reported.add(id);
       findings.push({
@@ -325,7 +325,7 @@ export class SoqlSecurityAnalyzer {
     // permission. Never allow unsupported SOQL expressions to look clean.
     const parseSeen = new Set<string>();
     for (const { query, message } of parserLimitations) {
-      const key = `${query.filePath}|${query.lineNumber}|${message}`;
+      const key = `${query.queryVariantId ?? (query.filePath+"|"+query.lineNumber)}|${message}`;
       if (parseSeen.has(key)) continue;
       parseSeen.add(key);
       findings.push({
