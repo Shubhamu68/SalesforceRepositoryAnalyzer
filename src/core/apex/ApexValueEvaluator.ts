@@ -217,10 +217,18 @@ export function evaluateApexExpression(
     const pieces=call[2].trim()?splitApexTopLevel(call[2],","):[];
     const args=pieces.map(x=>evaluateApexExpression(x,context,depth+1));
     const lname=name.toLowerCase();
-    if(lname==="json.deserialize"&&args.length===2) {
-      if(args[0].kind!=="text"||args[0].values.length!==1)
+    if(lname==="json.deserialize") {
+      // Apex .class type expressions contain generic commas, which are not
+      // runtime arguments. Reconstitute and validate the type token instead
+      // of relying on the generic comma splitter to parse angle brackets.
+      const typeToken=pieces.slice(1).join(",").trim();
+      if(pieces.length<2||
+         !/^(?:Map|List|Set)<[\w\s,.<>]+>\.class$/i.test(typeToken))
+        return unknown("JSON.deserialize target type is not a supported collection map.");
+      const input=evaluateApexExpression(pieces[0],context,depth+1);
+      if(input.kind!=="text"||input.values.length!==1)
         return unknown("JSON.deserialize input must be a single proven label value.");
-      return parseKnownJsonMap(args[0].values[0]);
+      return parseKnownJsonMap(input.values[0]);
     }
     if(lname.endsWith(".keyset")&&args.length===0){
       const receiver=evaluateApexExpression(name.slice(0,-7),context,depth+1);
