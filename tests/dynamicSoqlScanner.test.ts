@@ -176,3 +176,43 @@ test("v0.1.1 does not fabricate numeric LIMIT values through string addition",()
   assert.equal(result.unresolved.length,0);
   assert.equal(result.queries[0].query,"SELECT Id FROM Account LIMIT 51");
 });
+
+
+test("v0.1.1 reconstructs Schema Describe collection from complete supplied metadata",()=>{
+  const code=[
+    "public class DescribeQ {",
+    " public static void run() {",
+    "  String objectName='Account';",
+    "  Map<String, Schema.SObjectField> fieldsMap = Schema.getGlobalDescribe().get(objectName).getDescribe().fields.getMap();",
+    "  List<String> fieldNames = new List<String>();",
+    "  for(String fieldName : fieldsMap.keySet()) { fieldNames.add(fieldName); }",
+    "  String query = 'SELECT '+String.join(fieldNames, ', ')+' FROM '+objectName;",
+    "  Database.query(query);",
+    " }",
+    "}",
+  ].join("\n");
+  const result=extractDynamicSoqlQueries(code,file,(name,args)=>{
+    if(name!=="Schema.describeFields")return undefined;
+    if(args[0].kind!=="text"||args[0].values[0]!=="Account")return undefined;
+    return {kind:"collection",items:["Id","Name"],unique:true};
+  });
+  assert.equal(result.unresolved.length,0);
+  assert.equal(result.queries[0].query,"SELECT Id, Name FROM Account");
+});
+test("v0.1.1 marks Describe-driven query unresolved without complete metadata",()=>{
+  const code=[
+    "public class DescribeQ {",
+    " public static void run() {",
+    "  String objectName='Account';",
+    "  Map<String, Schema.SObjectField> fieldsMap = Schema.getGlobalDescribe().get(objectName).getDescribe().fields.getMap();",
+    "  List<String> fieldNames = new List<String>();",
+    "  for(String fieldName : fieldsMap.keySet()) {fieldNames.add(fieldName);}",
+    "  String query='SELECT '+String.join(fieldNames, ', ')+' FROM '+objectName;",
+    "  Database.query(query);",
+    " }",
+    "}",
+  ].join("\n");
+  const result=extractDynamicSoqlQueries(code,file);
+  assert.equal(result.queries.length,0);
+  assert.equal(result.unresolved.length,1);
+});
