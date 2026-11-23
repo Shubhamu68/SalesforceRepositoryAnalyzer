@@ -10,6 +10,7 @@ import { extractDynamicSoqlQueries, type UnresolvedDynamicSoql } from "./dynamic
 import { listValue, unknown, type ApexValue } from "../core/apex/ApexValueEvaluator.js";
 import { ApexRepositoryMethodIndex } from "../core/apex/ApexRepositoryMethodIndex.js";
 import { maskApexSource } from "../core/apex/ApexSourceModel.js";
+import { buildCustomMetadataRows } from "../core/apex/ApexCustomMetadataQueries.js";
 import type { ApexMetadataProvider } from "../core/metadata/ApexMetadataProvider.js";
 
 import type { SoqlQuery } from "../models/SoqlQuery.js";
@@ -123,6 +124,30 @@ async function scanDynamicSource(source:string,filePath:string,
     await Promise.all(labelNames.map(async name=>
       labelResults.set(name,await metadata.getCustomLabelValue!(name))));
   }
+  // Discover only literal object/Field Set identifiers from executable Apex.
+  // Dynamic report names remain unproven, not an invitation to enumerate org
+  // metadata and guess which configuration applies.
+  const fieldSetNames=new Map<string,[string,string]>();
+  const addFieldSet=(object:string,name:string)=>{
+    if(/^[A-Za-z_]\w*$/.test(object)&&/^[A-Za-z_]\w*$/.test(name))
+      fieldSetNames.set(object+"|"+name,[object,name]);
+  };
+  const fieldSetRegex=/\b([A-Za-z_]\w*)\.SObjectType\.getDescribe\(\)\.fieldSets\.getMap\(\)\.get\(\s*'([A-Za-z_]\w*)'\s*\)/g;
+  for(const match of source.matchAll(fieldSetRegex))
+    if(/\S/.test(masked.slice(match.index!,match.index!+12)))
+      addFieldSet(match[1],match[2]);
+  const utilsFieldSet=/\bUtils\.getFieldListFromFieldSet\(\s*'([A-Za-z_]\w*)'\s*,\s*'([A-Za-z_]\w*)'\s*\)/g;
+  for(const match of source.matchAll(utilsFieldSet))
+    if(/\S/.test(masked.slice(match.index!,match.index!+8)))
+      addFieldSet(match[1],match[2]);
+  const fieldSetValues=new Map<string,Awaited<ReturnType<NonNullable<
+    ApexMetadataProvider["getFieldSetFields"]>>>>();
+  if(metadata?.getFieldSetFields && fieldSetNames.size<=30)
+    await Promise.all([...fieldSetNames].map(async ([key,[object,name]])=>
+      fieldSetValues.set(key,await metadata.getFieldSetFields!(object,name))));
+
+  const metadataRows=await buildCustomMetadataRows(source,metadata,
+    expression=>repositoryIndex?.evaluateConstant(expression));
   const requested=new Set<string>();
   const describeSnapshots=new Map<string,Awaited<
     ReturnType<ApexMetadataProvider["getObjectFieldNames"]>>>();
@@ -142,6 +167,24 @@ async function scanDynamicSource(source:string,filePath:string,
       return expr?.kind==="text"&&expr.values.length===1
         ?repositoryIndex?.evaluateConstant(expr.values[0])
         :undefined;
+    }
+    if(name==="Schema.fieldSetFields"||name==="Utils.getFieldListFromFieldSet"){
+      if(args.length!==2||args.some(x=>x.kind!=="text"||x.values.length!==1))
+        return unknown("Field Set object and developer name must be proven.");
+      const object=(args[0] as Extract<ApexValue,{kind:"text"}>).values[0];
+      const fieldSet=(args[1] as Extract<ApexValue,{kind:"text"}>).values[0];
+      const selected=fieldSetValues.get(object+"|"+fieldSet);
+      return selected?.complete&&selected.value
+        ?listValue(selected.value)
+        :unknown("Complete Field Set "+object+"."+fieldSet+
+          " unavailable from org metadata: "+
+          (selected?.reason??"Runtime Field Set identity not proven in this scan."));
+    }
+    if(name==="Apex.metadataRows"){
+      if(args.length!==1||args[0].kind!=="text"||args[0].values.length!==1)
+        return unknown("Custom Metadata SOQL iterator identity is unresolved.");
+      return metadataRows.get(args[0].values[0]) ??
+        unknown("Custom Metadata WHERE or SELECT expression is not a supported complete static query.");
     }
     if(name==="Schema.describeFields"){
       const object=args[0];
@@ -205,7 +248,10 @@ async function scanRepositoryApex(
     async (entry:typeof sources[number]):Promise<[string,CachedApexFile]>=>{
       const existing=previous?.get(entry.filePath);
       if(entry.reused && graphUnchanged && existing &&
-         !(metadata && /\bSystem\s*\.\s*Label\s*\./.test(maskApexSource(entry.source))))
+         !(metadata && (
+           /\bSystem\s*\.\s*Label\s*\./.test(maskApexSource(entry.source)) ||
+           /\bFieldSet\b|\.fieldSets\.getMap\(\)|getFieldListFromFieldSet|\bFROM\s+\w+__mdt\b/i.test(entry.source)
+         )))
         return [entry.filePath,existing];
       const staticQueries=entry.reused && existing
         ?existing.queries.filter(query=>!query.dynamicOrigin)
