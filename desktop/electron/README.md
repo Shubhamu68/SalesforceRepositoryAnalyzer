@@ -1,8 +1,10 @@
 # Salesforce Repository Analyzer — Windows Desktop Folder
 
-This Electron desktop edition runs the existing React UI and Express API. The team distribution is **one ZIP containing the complete `win-unpacked` folder**, not a separate portable, self-extracting EXE.
+This Electron desktop edition runs the existing React UI and Express API. The team distribution is **one ZIP containing the complete `win-unpacked` folder**, not an installer or separate self-extracting EXE.
 
-## Build locally on Windows
+**For recipients:** Start with the [Windows desktop installation guide](../../docs/setup/windows-desktop.md). Extract the complete ZIP and open `win-unpacked/Salesforce Repository Analyzer.exe`. Keep the EXE, DLLs, `resources` directory and bundled Node runtime together. The EXE inside the folder launches the application; no additional standalone EXE is provided.
+
+## Build locally on Windows (maintainers)
 
 ```powershell
 npm ci
@@ -17,18 +19,23 @@ npm install --no-audit --no-fund
 npm run build:folder
 ```
 
-The **Build Windows Desktop Folder ZIP** GitHub Actions workflow compiles and smoke-tests the backend and frontend, then runs `electron-builder --dir`. It publishes only:
+[Build Windows Desktop Folder ZIP](https://github.com/Shubhamu68/SalesforceRepositoryAnalyzer/actions/workflows/windows-desktop.yml) builds the application, runs regression checks, smoke-tests the staged and packaged backend, and publishes **only** the temporary `SalesforceRepositoryAnalyzer-Desktop-Folder-ZIP` Actions artifact containing `SalesforceRepositoryAnalyzer-Desktop-Unpacked.zip`.
 
-- **SalesforceRepositoryAnalyzer-Desktop-Folder-ZIP:** Download, extract completely, and open `win-unpacked/Salesforce Repository Analyzer.exe`. Keep the EXE, DLLs, `resources` directory and bundled Node runtime together. The EXE inside the folder is still required to launch the application; there is no longer an additional standalone EXE artifact.
+**This Electron ZIP is not currently published through the automatic version-tagged GitHub Release workflow**; that workflow handles the distinct browser-based `Start Analyzer.cmd` package. See [Builds and releases](../../docs/releases.md).
 
-The blue hexagon used in the existing Analyzer header is now also the desktop executable/window icon. Windows may cache the prior Electron icon on a pinned shortcut; unpin and pin the new executable again if needed.
+## Requirements and authentication
 
-**User requirements:** Windows 10/11 and Salesforce CLI 2.136+ on PATH for optional org login. No separate Node.js, npm, Git or VS Code required.
+- **Recipients:** Windows 10/11. No separate Node.js, npm, Git or VS Code required to run the packaged app.
+- **Optional connected-org features:** Salesforce CLI **v2.136.0+** must be installed and available on PATH. Choose a saved authorized CLI org or log in via Salesforce's official browser page.
+- **Repository-only analysis:** does not require Salesforce CLI login, subject to the relevant feature's limitations.
+- No Analyzer-specific OAuth client ID or client secret is required. The app never asks for a Salesforce password.
 
-**Security:** The executable is unsigned; ZIP packaging does not bypass SmartScreen, WDAC or corporate endpoint protection. Contact IT for approval/signing instead of disabling protection. The renderer is sandboxed and the API listens only on localhost; Salesforce browser login is delegated to the CLI.
+## Security and diagnostics
 
-**Settings and diagnostics:** Per-user settings stay in Electron's userData folder, never in the shared ZIP. `startup-timing.log` records fixed phases and safe error categories only. No developer `.env`, Salesforce tokens or CLI auth files are packaged.
+The executable is **unsigned**. ZIP packaging does not bypass SmartScreen, WDAC or corporate endpoint protection. Seek IT approval/signing instead of disabling security policies.
 
-The browser-based Windows portable ZIP (`Start Analyzer.cmd`) remains a separate fallback.
+The renderer is sandboxed and the API listens only on localhost; Salesforce login is delegated to Salesforce CLI. Per-user settings are stored in Electron's user-data folder, not inside the distributed ZIP. `startup-timing.log` records safe phase/error categories; it does not store raw backend stderr, credentials or full local paths.
 
-**Startup troubleshooting:** The packaged backend is smoke-tested from inside the final `win-unpacked/resources/analyzer` folder. If it stops on a particular PC, `startup-timing.log` records a safe `backend-exit` entry with a numeric exit code, signal and allowlisted category. It never stores raw stderr, local paths or credentials. Share those lines to distinguish incomplete extraction, missing modules, Windows runtime failures, and local security restrictions.
+The blue hexagon from the Analyzer header is also the executable/window icon. If Windows caches an older icon for a shortcut, unpin and re-pin the executable.
+
+The browser-based `Start Analyzer.cmd` package remains a [separate fallback](../../docs/setup/windows-portable.md).
