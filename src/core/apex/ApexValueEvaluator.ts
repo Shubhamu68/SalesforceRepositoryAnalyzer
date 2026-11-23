@@ -5,6 +5,8 @@ export type ApexValue =
   | { kind: "text"; values: string[] }
   | { kind: "collection"; items: string[]; unique: boolean }
   | { kind: "map"; entries: Array<[string,ApexValue]> }
+  | { kind: "record"; entries: Array<[string,ApexValue]> }
+  | { kind: "records"; items: Array<Array<[string,ApexValue]>> }
   | { kind: "number"; value: number }
   | { kind: "unknown"; reason: string };
 
@@ -66,7 +68,9 @@ function combinations(left: ApexValue,right: ApexValue): ApexValue {
   if(left.kind==="number"&&right.kind==="number")
     return {kind:"number",value:left.value+right.value};
   if(left.kind==="collection"||right.kind==="collection"||
-     left.kind==="map"||right.kind==="map")
+     left.kind==="map"||right.kind==="map"||
+     left.kind==="record"||right.kind==="record"||
+     left.kind==="records"||right.kind==="records")
     return unknown("Cannot concatenate an Apex collection as text.");
   const from=(x:ApexValue):string[]=>
     x.kind==="text"?x.values:x.kind==="number"?[String(x.value)]:[];
@@ -113,6 +117,13 @@ export function evaluateApexExpression(
   const label=/^System\.Label\.([A-Za-z_]\w*)$/i.exec(expr);
   if(label)return context.resolveCall?.("System.Label",[textValue(label[1])]) ??
     unknown("Custom Label "+label[1]+" is not available from complete org metadata.");
+  const instanceMember=/^([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/.exec(expr);
+  if(instanceMember && context.values.get(instanceMember[1])?.kind==="record"){
+    const record=context.values.get(instanceMember[1])!;
+    if(record.kind==="record")
+      return record.entries.find(([key])=>key.toLowerCase()===instanceMember[2].toLowerCase())?.[1] ??
+        unknown("Metadata row field "+instanceMember[2]+" was not completely retrieved.");
+  }
   const constant=/^([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/.exec(expr);
   if(constant)return context.resolveCall?.("Apex.constant",[textValue(expr)]) ??
     unknown(/^[a-z]/.test(constant[1])
@@ -184,6 +195,11 @@ export function evaluateApexExpression(
     return argument.kind==="collection"?listValue(argument.items,unique)
       :unknown("Collection constructor input is not resolved.");
   }
+  // Only custom-metadata SOQL used in a for-each iterable can be supplied as
+  // a complete row set; ordinary bracketed SOQL is not a scalar expression.
+  if(/^\[\s*SELECT\b[\s\S]*\]$/i.test(expr))
+    return context.resolveCall?.("Apex.metadataRows",[textValue(expr)]) ??
+      unknown("Static metadata query rows have not been completely established.");
   // Schema Describe is a metadata dependency, not a method to execute.
   // A caller-supplied read-only snapshot must prove the complete field list.
   const directDescribe=/^([A-Za-z_]\w*)\.SObjectType\.getDescribe\(\)\.fields\.getMap\(\)$/i.exec(expr);
@@ -291,6 +307,8 @@ export function evaluateApexExpression(
     if(dot>=0&&methods.includes(operation)){
       const receiver=evaluateApexExpression(name.slice(0,dot),context,depth+1);
       if(operation==="isempty"&&receiver.kind==="collection")return textValue(String(receiver.items.length===0));
+      if(operation==="isempty"&&receiver.kind==="map")return textValue(String(receiver.entries.length===0));
+      if(operation==="isempty"&&receiver.kind==="records")return textValue(String(receiver.items.length===0));
       if(receiver.kind!=="text")return unknown("Receiver for "+operation+" not resolved: "+
         (receiver.kind==="unknown"?receiver.reason:"receiver is not text."));
       const argument=args.length?onlyText(args[0]):null;
