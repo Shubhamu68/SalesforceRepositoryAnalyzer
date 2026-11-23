@@ -6,6 +6,7 @@ import {
 import path from "node:path";
 import { classifySoqlMode } from "../analyzer/soqlExecutionMode.js";
 import { parseNestedSoql, maskSoql } from "../analyzer/nestedSoqlScopes.js";
+import { extractDynamicSoqlQueries, type UnresolvedDynamicSoql } from "./dynamicSoqlScanner.js";
 
 import type { SoqlQuery } from "../models/SoqlQuery.js";
 import { recordSoqlCount, timeSoqlPhase } from "../services/SoqlPerformanceMetrics.js";
@@ -26,9 +27,13 @@ const MAX_REPOSITORIES = 2;
 // ctime within the filesystem's timestamp-resolution window. Treat very
 // recently modified files as unstable and parse them again until aged out.
 const FILE_TIMESTAMP_SAFETY_NS = 2_000_000_000n;
-type CachedApexFile = { fingerprint: string; queries: SoqlQuery[] };
+export interface SoqlScanInventory {
+  queries: SoqlQuery[];
+  unresolvedDynamic: UnresolvedDynamicSoql[];
+}
+type CachedApexFile = { fingerprint: string; queries: SoqlQuery[]; unresolvedDynamic: UnresolvedDynamicSoql[] };
 const indexedRepositories = new Map<string, Map<string, CachedApexFile>>();
-const inFlightScans = new Map<string, Promise<SoqlQuery[]>>();
+const inFlightScans = new Map<string, Promise<SoqlScanInventory>>();
 
 async function parallelMap<T, R>(
   input: readonly T[], task: (value: T) => Promise<R>,
@@ -45,6 +50,11 @@ async function parallelMap<T, R>(
 }
 
 export async function scanApexSoql(repositoryPath: string): Promise<SoqlQuery[]> {
+  return (await scanApexSoqlWithUnresolved(repositoryPath)).queries;
+}
+
+/** One shared repository scan supplies normal queries plus review-only dynamic sites. */
+export async function scanApexSoqlWithUnresolved(repositoryPath: string): Promise<SoqlScanInventory> {
   const root = path.resolve(repositoryPath);
   const pending = inFlightScans.get(root);
   if (pending) {
@@ -60,7 +70,7 @@ export async function scanApexSoql(repositoryPath: string): Promise<SoqlQuery[]>
   }
 }
 
-async function scanRepositoryApex(repositoryPath: string): Promise<SoqlQuery[]> {
+async function scanRepositoryApex(repositoryPath: string): Promise<SoqlScanInventory> {
   const apexFiles = await timeSoqlPhase("scanner.discovery", () => findApexClasses(repositoryPath));
   apexFiles.sort((a, b) => a.localeCompare(b));
   recordSoqlCount("scanner.apex_files", apexFiles.length);
@@ -88,7 +98,20 @@ async function scanRepositoryApex(repositoryPath: string): Promise<SoqlQuery[]> 
         return [filePath, cached];
       }
       const source = cold ? cold[1] : await readFile(filePath, "utf8");
-      return [filePath, { fingerprint, queries: extractSoqlQueries(source, filePath) }];
+      const staticQueries = extractSoqlQueries(source, filePath);
+      const dynamic = extractDynamicSoqlQueries(source, filePath);
+      const staticLines = new Set(staticQueries.map(query => query.lineNumber));
+      // The existing v0.1.0 inventory uses file+line attribution. Avoid
+      // accepting a dynamic query that collides with a static query on one line.
+      const dynamicQueries = dynamic.queries.filter(query => !staticLines.has(query.lineNumber));
+      const collisions = dynamic.queries.filter(query => staticLines.has(query.lineNumber)).map(query => ({
+        filePath, lineNumber: query.lineNumber,
+        reason: "Static and dynamic SOQL share the same line; query attribution is ambiguous."
+      }));
+      return [filePath, {
+        fingerprint, queries: [...staticQueries, ...dynamicQueries],
+        unresolvedDynamic: [...dynamic.unresolved, ...collisions],
+      }];
     }));
   recordSoqlCount("scanner.reused_files", reused);
   recordSoqlCount("scanner.parsed_files", apexFiles.length - reused);
@@ -100,9 +123,17 @@ async function scanRepositoryApex(repositoryPath: string): Promise<SoqlQuery[]> 
   }
   indexedRepositories.set(repositoryPath, nextIndex);
   const queries: SoqlQuery[] = [];
-  for (const [, entry] of currentEntries) queries.push(...entry.queries);
-  return queries.sort((a, b) =>
-    a.filePath.localeCompare(b.filePath) || a.lineNumber - b.lineNumber);
+  const unresolvedDynamic: UnresolvedDynamicSoql[] = [];
+  for (const [, entry] of currentEntries) {
+    queries.push(...entry.queries);
+    unresolvedDynamic.push(...entry.unresolvedDynamic);
+  }
+  return {
+    queries: queries.sort((a, b) =>
+      a.filePath.localeCompare(b.filePath) || a.lineNumber - b.lineNumber),
+    unresolvedDynamic: unresolvedDynamic.sort((a, b) =>
+      a.filePath.localeCompare(b.filePath) || a.lineNumber - b.lineNumber),
+  };
 }
 
 /**
