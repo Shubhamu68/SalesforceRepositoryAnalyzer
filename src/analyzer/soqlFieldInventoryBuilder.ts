@@ -31,6 +31,7 @@ export function buildSoqlFieldInventory(
         object: field.object, field: field.field, queryFieldPath: field.source,
         filePath: query.filePath, lineNumber: field.lineNumber,
         queryLineNumber: field.queryLineNumber, relationshipPath: field.relationshipPath,
+        ...(field.queryVariantId ? { queryVariantId: field.queryVariantId } : {}),
         ...(field.usageContext ? { usageContext: field.usageContext } : {}),
         ...(field.functionName ? { functionName: field.functionName } : {}),
       });
@@ -41,12 +42,13 @@ export function buildSoqlFieldInventory(
       // Preserve SELECT COUNT() or a nested object with no permissionable fields.
       if (!inventory.has(scoped.object)) inventory.set(scoped.object, new Map());
       const list = inventory.objectReferences.get(scoped.object) ?? [];
-      const key = [query.filePath, query.lineNumber, scoped.relationshipPath].join("|");
-      if (!list.some(ref => [ref.filePath, ref.queryLineNumber, ref.relationshipPath].join("|") === key)) {
+      const key = [query.queryVariantId ?? (query.filePath+"|"+query.lineNumber), scoped.relationshipPath].join("|");
+      if (!list.some(ref => [ref.queryVariantId ?? (ref.filePath+"|"+ref.queryLineNumber), ref.relationshipPath].join("|") === key)) {
         list.push({
           object: scoped.object, field: "", queryFieldPath: "",
           filePath: query.filePath, lineNumber: scoped.lineNumber,
           queryLineNumber: query.lineNumber, relationshipPath: scoped.relationshipPath,
+          ...(query.queryVariantId ? { queryVariantId: query.queryVariantId } : {}),
         });
       }
       inventory.objectReferences.set(scoped.object, list);
