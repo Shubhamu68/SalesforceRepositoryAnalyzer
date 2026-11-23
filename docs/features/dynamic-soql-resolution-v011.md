@@ -111,3 +111,25 @@ Each fixture needs tests for exact known variants and unknown dependency outcome
 - Make strict persona matching changes #51 / #52.
 - Execute production business queries to determine runtime values.
 - Add a dynamic query summary tab or change user-visible Excel statuses.
+
+## Implementation checkpoint — initial reusable engine (not release-ready)
+
+The feature branch now includes:
+
+- `src/core/apex/ApexSourceModel.ts`: shared source masking, source offsets, method index and structured block boundaries.
+- `src/core/apex/ApexValueEvaluator.ts`: conservative symbolic text/numeric/List/Set values and supported string operations.
+- `src/core/apex/ApexDataFlowEngine.ts`: bounded branch enumeration, ordered assignments, collection mutation, local helper-call summaries and source-offset execution-site capture.
+- `src/scanner/dynamicSoqlScanner.ts`: translates **only exhaustively reconstructed** query variants to the existing `SoqlQuery` inventory; incomplete/unsupported sites become one review decision.
+- Internal `queryVariantId` propagation through inventory, security analysis and deduplication to avoid same-line variant misattribution, with no Excel format changes.
+- New regression suites for dynamic discovery and single/multi-variant construction.
+
+**Do not interpret a successful code push as proof that this implementation handles all 13 supplied examples.** The live-org metadata adapters and full cross-class/caller-context tracing are **not yet wired**. Metadata-driven or runtime-parameter-dependent queries must remain UNRESOLVED instead of being guessed. An arbitrary `for` loop, complex `try/finally`, runtime `String.format` or unknown utility method is not a proven resolved query.
+
+### Validation gate before merging
+
+1. On a machine with the repository and dependencies installed: `npm run build` then `npm run test:all`.
+2. Confirm static-only baseline is unchanged. Any additional dynamic findings belong to the new feature, not to static scanner regressions.
+3. Confirm both single-persona and all-personas pipelines handle resolved variants; the latter intentionally only exports High rows, per its existing contract.
+4. Add explicit unit/integration fixtures as metadata adapters and advanced call tracing become supported. Never mark the feature complete based solely on the simple literal/concat tests.
+5. GitHub Actions on this repository have also failed on `main` in prior runs; do not assume a new workflow failure proves or disproves this code. Investigate build/test evidence separately.
+
