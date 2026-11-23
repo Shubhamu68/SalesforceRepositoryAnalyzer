@@ -232,7 +232,8 @@ export class ApexDataFlowEngine {
    * longer a safe complete field inventory. Scalars remain immutable.
    */
   private taintCollectionsPassedToUnknownCalls(source:string,state:State):void{
-    if(!source.includes("(") || ![...state.values.values()].some(v=>v.kind==="collection"))return;
+    if(!source.includes("(") || ![...state.values.values()].some(v=>
+      v.kind==="collection"||v.kind==="map"))return;
     const masked=maskApexSource(source);
     const call=/\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(/g;
     const pure=/^(?:String\.(?:join|isBlank|isNotBlank|escapeSingleQuotes)|System\.debug|Math\.\w+|Database\.(?:query|queryWithBinds|countQuery|countQueryWithBinds|getQueryLocator|getQueryLocatorWithBinds))$/i;
@@ -250,7 +251,7 @@ export class ApexDataFlowEngine {
       }
       const argumentText=source.slice(open+1,close);
       for(const [identifier,value] of state.values){
-        if(value.kind!=="collection")continue;
+        if(value.kind!=="collection"&&value.kind!=="map")continue;
         if(new RegExp("\\b"+identifier+"\\b").test(argumentText)){
           state.values.set(identifier,unknown(
             "Mutable collection "+identifier+" may be changed by unsupported method "+name+"."));
@@ -339,6 +340,17 @@ export class ApexDataFlowEngine {
       }
       state.values.set(mapPut[1],{kind:"map",entries});
       return;
+    }
+    // Unsupported mutators cannot leave an earlier field inventory "known".
+    // Map.put and collection add/addAll/clear are modeled above.
+    const opaqueMutation=/^([A-Za-z_]\w*)\s*\.\s*(remove|removeAll|retainAll|putAll|set|sort|reverse)\s*\(/i.exec(original);
+    if(opaqueMutation){
+      const existing=state.values.get(opaqueMutation[1]);
+      if(existing?.kind==="collection"||existing?.kind==="map"){
+        state.values.set(opaqueMutation[1],unknown(
+          "Unsupported mutation "+opaqueMutation[2]+" may change the complete query field inventory."));
+        return;
+      }
     }
     // Declarations, reassignment and += are independently versioned by state.
     const assignment=/\b([A-Za-z_]\w*)\s*(\+?=)\s*([\s\S]+)$/.exec(original);
