@@ -162,7 +162,8 @@ async function scanDynamicSource(source:string,filePath:string,
     repositoryIndex?.evaluateReturn(filePath,name,args,baseResolver);
   // First pass discovers Describe needs after known labels and constants
   // have been supplied. No Apex, Tooling writes, or runtime code is executed.
-  if(metadata && source.includes("getGlobalDescribe")){
+  if(metadata && (source.includes("getGlobalDescribe") ||
+      source.includes(".SObjectType.getDescribe()"))){
     extractDynamicSoqlQueries(source,filePath,resolver,repositoryIndex);
     await Promise.all([...requested].map(async object=>
       describeSnapshots.set(object,await metadata.getObjectFieldNames(object))));
