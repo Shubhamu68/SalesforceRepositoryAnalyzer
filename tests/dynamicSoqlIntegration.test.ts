@@ -343,3 +343,152 @@ test("Stage 1 scope: branch-only variable cannot escape without outer declaratio
   assert.equal(result.queries.length,0);
   assert.equal(result.unresolved.length,1);
 });
+
+test("Stage 2: repository-wide cross-class field-list helper resolves complete SELECT",async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),"v011-cross-helper-"));
+  try {
+    await writeFile(path.join(dir,"FieldLibrary.cls"),[
+      "public class FieldLibrary {",
+      " public static List<String> fields() {return new List<String>{'Id','Name'};}",
+      "}",
+    ].join("\n"));
+    await writeFile(path.join(dir,"AccountReader.cls"),[
+      "public class AccountReader {",
+      " public static void run() {",
+      "   List<String> fields=FieldLibrary.fields();",
+      "   String query='SELECT '+String.join(fields, ', ')+' FROM Account';",
+      "   Database.query(query);",
+      " }",
+      "}",
+    ].join("\n"));
+    const inventory=await scanApexSoqlWithUnresolved(dir);
+    assert.equal(inventory.unresolvedDynamic.length,0);
+    assert.deepEqual(inventory.queries.map(q=>q.query),
+      ["SELECT Id, Name FROM Account"]);
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test("Stage 2: caller argument is propagated into a cross-class string return",async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),"v011-cross-args-"));
+  try {
+    await writeFile(path.join(dir,"FieldLibrary.cls"),[
+      "public class FieldLibrary {",
+      " public static String selectFields(String input) {",
+      "   return 'Id, '+input;",
+      " }",
+      "}",
+    ].join("\n"));
+    await writeFile(path.join(dir,"AccountReader.cls"),[
+      "public class AccountReader {",
+      " public static void run() {",
+      "   String fields=FieldLibrary.selectFields('Name');",
+      "   Database.query('SELECT '+fields+' FROM Account WITH USER_MODE');",
+      " }",
+      "}",
+    ].join("\n"));
+    const inventory=await scanApexSoqlWithUnresolved(dir);
+    assert.equal(inventory.unresolvedDynamic.length,0);
+    assert.equal(inventory.queries[0].query,
+      "SELECT Id, Name FROM Account WITH USER_MODE");
+    assert.equal(inventory.queries[0].securityMode,"USER_MODE");
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test("Stage 2: changing cross-class helper invalidates unchanged caller scan cache",async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),"v011-cross-refresh-"));
+  try {
+    const helper=path.join(dir,"FieldLibrary.cls");
+    const reader=path.join(dir,"AccountReader.cls");
+    const body=(field:string)=>[
+      "public class FieldLibrary {",
+      " public static String field(){return '"+field+"';}",
+      "}",
+    ].join("\n");
+    await writeFile(helper,body("Name"));
+    await writeFile(reader,[
+      "public class AccountReader {",
+      " public static void run(){",
+      "   Database.query('SELECT Id, '+FieldLibrary.field()+' FROM Account');",
+      " }",
+      "}",
+    ].join("\n"));
+    const before=await scanApexSoqlWithUnresolved(dir);
+    assert.equal(before.unresolvedDynamic.length,0);
+    assert.equal(before.queries[0].query,"SELECT Id, Name FROM Account");
+    await writeFile(helper,body("Phone"));
+    const after=await scanApexSoqlWithUnresolved(dir);
+    assert.equal(after.unresolvedDynamic.length,0);
+    assert.equal(after.queries[0].query,"SELECT Id, Phone FROM Account");
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test("Stage 2: known repository caller does not prove exhaustive public field-list inputs",async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),"v011-public-callers-"));
+  try {
+    await writeFile(path.join(dir,"FieldQuery.cls"),[
+      "public class FieldQuery {",
+      " public static void fetch(List<String> fields){",
+      "   Database.query('SELECT '+String.join(fields, ', ')+' FROM Account');",
+      " }",
+      "}",
+    ].join("\n"));
+    await writeFile(path.join(dir,"AccountCaller.cls"),[
+      "public class AccountCaller {",
+      " public static void run(){",
+      "   FieldQuery.fetch(new List<String>{'Id','Name'});",
+      " }",
+      "}",
+    ].join("\n"));
+    const inventory=await scanApexSoqlWithUnresolved(dir);
+    assert.equal(inventory.queries.length,0);
+    assert.equal(inventory.unresolvedDynamic.length,1);
+    assert.match(inventory.unresolvedDynamic[0].reason,/String\.join/i);
+    assert.match(inventory.unresolvedDynamic[0].reason,/externally callable/i);
+    assert.match(inventory.unresolvedDynamic[0].reason,/1 known/i);
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test("Stage 2: unknown cross-class field helper remains unresolved",async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),"v011-cross-unknown-"));
+  try {
+    await writeFile(path.join(dir,"FieldLibrary.cls"),[
+      "public class FieldLibrary {",
+      " public static List<String> fields(String runtimeField){",
+      "   return new List<String>{runtimeField};",
+      " }",
+      "}",
+    ].join("\n"));
+    await writeFile(path.join(dir,"AccountReader.cls"),[
+      "public class AccountReader {",
+      " public static void run(String userField){",
+      "   List<String> fields=FieldLibrary.fields(userField);",
+      "   Database.query('SELECT '+String.join(fields, ', ')+' FROM Account');",
+      " }",
+      "}",
+    ].join("\n"));
+    const inventory=await scanApexSoqlWithUnresolved(dir);
+    assert.equal(inventory.queries.length,0);
+    assert.equal(inventory.unresolvedDynamic.length,1);
+    assert.match(inventory.unresolvedDynamic[0].reason,/runtime|unknown|unresolved/i);
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test("Stage 2: repository helper recursion fails closed instead of fabricating columns",async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),"v011-cross-cycle-"));
+  try {
+    await writeFile(path.join(dir,"FieldA.cls"),[
+      "public class FieldA {public static String fields(){return FieldB.fields();}}",
+    ].join("\n"));
+    await writeFile(path.join(dir,"FieldB.cls"),[
+      "public class FieldB {public static String fields(){return FieldA.fields();}}",
+    ].join("\n"));
+    await writeFile(path.join(dir,"AccountReader.cls"),[
+      "public class AccountReader {",
+      " public static void run(){Database.query('SELECT '+FieldA.fields()+' FROM Account');}",
+      "}",
+    ].join("\n"));
+    const inventory=await scanApexSoqlWithUnresolved(dir);
+    assert.equal(inventory.queries.length,0);
+    assert.equal(inventory.unresolvedDynamic.length,1);
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
