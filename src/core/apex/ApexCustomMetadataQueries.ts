@@ -111,7 +111,9 @@ export async function buildCustomMetadataRows(
     const matching:Array<Array<[string,ApexValue]>>=[];
     let invalid=false;
     for(const raw of found.value){
-      if(!raw||typeof raw!=="object"){invalid=true;break;}
+      if(!raw||typeof raw!=="object"||
+         selected.some(field=>!Object.prototype.hasOwnProperty.call(raw,field)||
+           scalar(raw[field]).kind==="unknown")){invalid=true;break;}
       const included=filters.every(({field,value})=>{
         const actual=scalar(raw[field]);
         const converted=single(actual);
