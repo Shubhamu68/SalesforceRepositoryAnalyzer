@@ -71,7 +71,9 @@ export class ApexRepositoryMethodIndex {
       const constant=/\b(?:public|private|protected|global)?\s*(?:static\s+final|final\s+static)\s+String\s+([A-Za-z_]\w*)\s*=\s*('(?:\\.|[^'\\])*')\s*;/g;
       let found:RegExpExecArray|null;
       while((found=constant.exec(file.source))!==null){
-        if(owner.methods.some(method=>method.start<=found!.index&&found!.index<method.end))
+        // A comment or quoted example is not a repository constant.
+        if(/\s/.test(masked[found.index]??" ") ||
+           owner.methods.some(method=>method.start<=found!.index&&found!.index<method.end))
           continue;
         const evaluated=evaluateApexExpression(found[2],{values:new Map()});
         if(evaluated.kind==="text"&&evaluated.values.length===1)
