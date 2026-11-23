@@ -1,5 +1,6 @@
 import { SalesforceCliAuthProvider, SalesforceCliLoginCancelledError, type CliOrg, type CliWebLogin } from "./SalesforceCliAuthProvider.js";
 import { timedAuthStep } from "./SalesforceAuthTiming.js";
+import { XMLParser } from "fast-xml-parser";
 import { recordSoqlCount, timeSoqlOrgQuery, timeSoqlPhase } from "../services/SoqlPerformanceMetrics.js";
 /**
  * Local Salesforce CLI browser authorization: no Analyzer-owned client secret
@@ -368,6 +369,82 @@ export class SalesforceOrgConnection {
     this.connecting = work;
     try { await work; }
     finally { if (this.connecting === work) this.connecting = null; }
+  }
+
+  /**
+   * Read-only Metadata SOAP FieldSet retrieval. Tooling API exposes the
+   * FieldSet record but does not reliably expose its displayedFields content.
+   * This fallback uses the already authenticated Salesforce CLI session.
+   * The Metadata API requires the org user's own metadata-read permission;
+   * no privilege escalation or permission writes are attempted.
+   */
+  async readFieldSetMetadata(objectApiName:string,fieldSetName:string):Promise<string[]> {
+    if(!/^[A-Za-z_]\w*$/.test(objectApiName)||
+       !/^[A-Za-z_]\w*$/.test(fieldSetName))
+      throw new SalesforceConnectionError("Invalid Field Set identity.",400);
+    await this.connect();
+    const originEpoch=this.epoch;
+    const session=this.connection;
+    if(!session)throw new SalesforceConnectionError("Salesforce connection unavailable.",503);
+    const requested=objectApiName+"."+fieldSetName;
+    const escape=(s:string)=>s.replace(/&/g,"&amp;").replace(/</g,"&lt;")
+      .replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&apos;");
+    const body='<?xml version="1.0" encoding="UTF-8"?>'+
+      '<env:Envelope xmlns:env="http://schemas.xmlsoap.org/soap/envelope/" '+
+      'xmlns:met="http://soap.sforce.com/2006/04/metadata">'+
+      '<env:Header><met:SessionHeader><met:sessionId>'+
+      escape(session.accessToken)+'</met:sessionId></met:SessionHeader></env:Header>'+
+      '<env:Body><met:readMetadata><met:type>FieldSet</met:type>'+
+      '<met:fullNames>'+escape(requested)+'</met:fullNames>'+
+      '</met:readMetadata></env:Body></env:Envelope>';
+    const endpoint=new URL("/services/Soap/m/"+getApiVersion().slice(1),session.instanceUrl);
+    let response:Response;
+    try{
+      response=await fetch(endpoint,{
+        method:"POST",
+        headers:{"Content-Type":"text/xml; charset=utf-8",
+          SOAPAction:"readMetadata",Accept:"text/xml"},
+        body,
+        signal:AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+    }catch{
+      throw new SalesforceConnectionError("Salesforce Metadata API read timed out or was unavailable.",502);
+    }
+    const xml=await response.text();
+    if(this.epoch!==originEpoch)
+      throw new SalesforceConnectionError("Salesforce org switched during metadata retrieval.",409);
+    if(xml.length>2_000_000||!response.ok)
+      throw new SalesforceConnectionError("Salesforce Metadata API Field Set read failed or returned an oversized result.",502);
+    let payload:unknown;
+    try{
+      payload=new XMLParser({ignoreAttributes:false,removeNSPrefix:true,
+        parseTagValue:false,parseAttributeValue:false}).parse(xml);
+    }catch{
+      throw new SalesforceConnectionError("Salesforce Metadata API returned invalid XML.",502);
+    }
+    const envelope=payload as {Envelope?:{Body?:Record<string,unknown>}};
+    const bodyNode=envelope?.Envelope?.Body;
+    const result=(bodyNode?.readMetadataResponse as {result?:{records?:unknown}}|undefined)?.result;
+    if(!result||!result.records||Array.isArray(result.records))
+      throw new SalesforceConnectionError("Field Set metadata record missing or ambiguous.",502);
+    const record=result.records as Record<string,unknown>;
+    if(record.fullName!==requested)
+      throw new SalesforceConnectionError("Field Set metadata identity did not match the request.",502);
+    const raw=record.displayedFields;
+    if(raw===undefined)
+      throw new SalesforceConnectionError("Field Set displayedFields inventory is unavailable.",502);
+    const members=Array.isArray(raw)?raw:[raw];
+    if(members.length>200)
+      throw new SalesforceConnectionError("Field Set member limit exceeded.",502);
+    const fields:string[]=[];
+    for(const item of members){
+      const field=(item as {field?:unknown}|null)?.field;
+      if(typeof field!=="string"||
+         !/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/.test(field))
+        throw new SalesforceConnectionError("Field Set metadata contains an invalid field path.",502);
+      fields.push(field);
+    }
+    return fields;
   }
 
   async query(soql: string, api: SalesforceQueryApi): Promise<{
