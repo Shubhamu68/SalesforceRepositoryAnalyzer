@@ -147,3 +147,23 @@ The first real-world analyzer report exposed two systematic scanner defects and 
 ### Known limits
 
 The real-world report was generated using an earlier feature commit; it has **not** been regenerated here against the user's private Apex repository. Therefore, improved unresolved counts are not claimed. Field Sets, arbitrary Custom Metadata utility methods, cross-class public caller chains, mutable instance fields and unrestricted UI inputs can remain Unresolved until their complete inputs are proven. A passing synthetic regression suite is not proof that every one of the 13 example patterns is resolved. Re-run the same repo/persona/org analysis and compare source locations, no duplicate static-query reviews, and unchanged confirmed permission findings before promotion.
+
+## Stage 2 — repository-wide caller and helper evaluation (2026-11-23)
+
+Implementation on `feature/v0.1.1-dynamic-soql-resolution`:
+
+- `ApexRepositoryMethodIndex` indexes Apex declarations and **explicit class-qualified calls** across all non-test classes in the selected repository. It does not execute Apex, infer virtual dispatch, or treat names inside comments/strings as calls.
+- Bounded cross-class helper-return evaluation propagates proven String, numeric, and identical complete List/Set values into the existing symbolic SOQL data-flow engine. Multiple proven text alternatives remain distinct variants; incompatible collection alternatives remain UNKNOWN.
+- A separate bounded caller-probe evaluates literal/known arguments **at the lexical call site**, with source-order state and branch guards. Public/protected/global methods always remain potentially callable from outside the repository, so indexed callers are **evidence, not exhaustive coverage**. Unknown methods, unknown runtime arguments, ambiguous overloads, recursion or unsafe depth fail closed.
+- The repository scan retains source buffers in the existing bounded cache and refreshes the shared caller graph when any indexed file is changed, added or deleted. Changed callers invalidate dependent callee query analyses even when the callee source is unchanged.
+- Same-class List/Set-returning helpers now preserve identical complete values on every return path. Incompatible collection values are not incorrectly unioned. Dynamic queries continue through the same shared parser, permission engine, and existing Excel layout.
+- Unresolved dynamic findings can include caller-provenance counts when a method has explicit indexed callers. **A successful caller probe does not mark a public query site RESOLVED.**
+
+### Limitations and validation
+
+1. `OMSQueryService.fetchOrderItemSummaries` and generic `queryRecords` accept structural inputs through public methods. Known repository callers can be identified, but without complete proof of all live/external entry paths these sites must remain UNRESOLVED when their query structure depends on these parameters. Never substitute an arbitrary default SELECT list or assume the repository contains every possible caller.
+2. Member/instance dispatch, triggers/Flows/anonymous Apex as caller sources, arbitrary mutable class state, and unbounded method mutation are not fully modeled.
+3. Custom Labels, Field Sets and Custom Metadata record-driven query construction remain Stage 3. A user-provided label JSON example is a test fixture, not authoritative live metadata; do not assume its values are current for another org.
+4. The real repository and original 80-review Excel baseline must be rerun before claiming any change in the unresolved count. Check stable v0.1.0 static findings, the seven confirmed High cases and preserved USER_MODE/SYSTEM_MODE semantics.
+5. CI covers cross-class constant/collection return propagation, known caller evidence, external-entry fail-closed behavior, recursive utilities, source cache invalidation, incompatible collection branches and previous Stage 1 regressions.
+
