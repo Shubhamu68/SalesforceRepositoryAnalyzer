@@ -45,6 +45,8 @@ const MAX_CACHED_SUMMARIES = 1024;
 export class ApexRepositoryMethodIndex {
   private readonly classes=new Map<string,IndexedSource[]>();
   private readonly callers=new Map<string,Caller[]>();
+  private readonly paths=new Map<string,IndexedSource>();
+  private readonly callerEvidence=new Map<string,ApexCallerEvidence>();
   private readonly active=new Set<string>();
   private readonly summaries=new Map<string,ApexValue>();
   private readonly scopes=new WeakMap<Function,number>();
@@ -60,6 +62,7 @@ export class ApexRepositoryMethodIndex {
       const key=className.toLowerCase();
       this.classes.set(key,[...(this.classes.get(key)??[]),owner]);
       indexed.push(owner);
+      this.paths.set(path.resolve(file.filePath),owner);
     }
     for(const owner of indexed) {
       const masked=maskApexSource(owner.source);
@@ -142,12 +145,28 @@ export class ApexRepositoryMethodIndex {
     return result;
   }
 
+  /** Identify the declaring method of an execution site, without guessing dispatch. */
+  methodAt(filePath:string,offset:number):{
+    className:string; methodName:string; arity:number;
+    visibility:IndexedApexMethod["visibility"];
+  }|undefined {
+    const source=this.paths.get(path.resolve(filePath));
+    if(!source)return undefined;
+    const owner=source.methods.filter(method=>method.start<=offset&&offset<method.end)
+      .sort((a,b)=>(a.end-a.start)-(b.end-b.start))[0];
+    return owner?{className:source.className,methodName:owner.name,
+      arity:owner.parameters.length,visibility:owner.visibility}:undefined;
+  }
+
   /**
    * Probe actual repository callers in their lexical method context.
    * This is evidence for diagnostics, NOT proof that public methods have no
    * additional callers in the org, in dynamic dispatch or outside the repo.
    */
   inspectCallers(cls:string,methodName:string,arity:number):ApexCallerEvidence {
+    const key=this.methodKey(cls,methodName,arity);
+    const cached=this.callerEvidence.get(key);
+    if(cached)return cached;
     const methods=this.findMethods(cls,methodName,arity);
     const externallyCallable=methods.length!==1 ||
       methods[0].method.visibility!=="private";
@@ -165,7 +184,9 @@ export class ApexRepositoryMethodIndex {
         args.length===arity&&args.every(value=>value.kind!=="unknown"));
       if(known)knownCalls++;else unknownCalls++;
     }
-    return {knownCalls,unknownCalls,candidateCalls:candidates.length,
+    const result={knownCalls,unknownCalls,candidateCalls:candidates.length,
       externallyCallable};
+    this.callerEvidence.set(key,result);
+    return result;
   }
 }
