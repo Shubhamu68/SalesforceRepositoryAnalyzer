@@ -81,6 +81,23 @@ export function evaluateApexExpression(
   if(/^(true|false)$/i.test(expr))return textValue(expr.toLowerCase());
   if(expr==="null")return textValue("null");
   if(/^[A-Za-z_]\w*$/.test(expr))return context.values.get(expr)??unknown("Apex symbol "+expr+" has no proven value.");
+  if(expr.startsWith("!") && !expr.startsWith("!=")){
+    const result=evaluateApexExpression(expr.slice(1),context,depth+1);
+    const simple=onlyText(result);
+    return simple==="true"?textValue("false"):simple==="false"?textValue("true"):
+      unknown("Negated conditional depends on runtime input.");
+  }
+  for(const operator of ["||","&&"]){
+    const terms=splitApexTopLevel(expr,operator);
+    if(terms.length>1){
+      const checks=terms.map(term=>onlyText(evaluateApexExpression(term,context,depth+1)));
+      if(operator==="&&"&&checks.includes("false"))return textValue("false");
+      if(operator==="||"&&checks.includes("true"))return textValue("true");
+      if(checks.every(c=>c==="true"||c==="false"))
+        return textValue(String(operator==="&&"?checks.every(c=>c==="true"):checks.some(c=>c==="true")));
+      return unknown("Boolean condition depends on runtime inputs.");
+    }
+  }
   const alternatives=splitApexTopLevel(expr,"?");
   if(alternatives.length===2){
     const branch=splitApexTopLevel(alternatives[1],":");
