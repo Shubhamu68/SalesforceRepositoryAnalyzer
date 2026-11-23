@@ -7,6 +7,8 @@ import path from "node:path";
 import { classifySoqlMode } from "../analyzer/soqlExecutionMode.js";
 import { parseNestedSoql, maskSoql } from "../analyzer/nestedSoqlScopes.js";
 import { extractDynamicSoqlQueries, type UnresolvedDynamicSoql } from "./dynamicSoqlScanner.js";
+import { listValue, unknown, type ApexValue } from "../core/apex/ApexValueEvaluator.js";
+import type { ApexMetadataProvider } from "../core/metadata/ApexMetadataProvider.js";
 
 import type { SoqlQuery } from "../models/SoqlQuery.js";
 import { recordSoqlCount, timeSoqlPhase } from "../services/SoqlPerformanceMetrics.js";
@@ -54,28 +56,60 @@ export async function scanApexSoql(repositoryPath: string): Promise<SoqlQuery[]>
 }
 
 /** One shared repository scan supplies normal queries plus review-only dynamic sites. */
-export async function scanApexSoqlWithUnresolved(repositoryPath: string): Promise<SoqlScanInventory> {
+export async function scanApexSoqlWithUnresolved(
+  repositoryPath: string, metadata?: ApexMetadataProvider,
+): Promise<SoqlScanInventory> {
   const root = path.resolve(repositoryPath);
-  const pending = inFlightScans.get(root);
+  const cacheKey = root + "|" + (metadata?.scopeKey ?? "REPOSITORY_ONLY");
+  const pending = inFlightScans.get(cacheKey);
   if (pending) {
     recordSoqlCount("scanner.inflight_reuse");
     return pending;
   }
-  const work = scanRepositoryApex(root);
-  inFlightScans.set(root, work);
+  const work = scanRepositoryApex(root, cacheKey, metadata);
+  inFlightScans.set(cacheKey, work);
   try {
     return await work;
   } finally {
-    if (inFlightScans.get(root) === work) inFlightScans.delete(root);
+    if (inFlightScans.get(cacheKey) === work) inFlightScans.delete(cacheKey);
   }
 }
 
-async function scanRepositoryApex(repositoryPath: string): Promise<SoqlScanInventory> {
+/** Only a complete Salesforce Describe snapshot may supply dynamic fields. */
+async function scanDynamicSource(source:string,filePath:string,metadata?:ApexMetadataProvider) {
+  if (!metadata || !source.includes("getGlobalDescribe"))
+    return extractDynamicSoqlQueries(source,filePath);
+  const requested=new Set<string>();
+  const gather=(name:string,args:ApexValue[])=>{
+    if(name==="Schema.describeFields"&&args[0]?.kind==="text")
+      for(const object of args[0].values)requested.add(object);
+    return undefined;
+  };
+  // First pass asks for dependencies without making REST calls in the Apex engine.
+  extractDynamicSoqlQueries(source,filePath,gather);
+  if(!requested.size)return extractDynamicSoqlQueries(source,filePath);
+  const snapshots=new Map<string,Awaited<ReturnType<ApexMetadataProvider["getObjectFieldNames"]>>>();
+  await Promise.all([...requested].map(async object=>{
+    snapshots.set(object,await metadata.getObjectFieldNames(object));
+  }));
+  return extractDynamicSoqlQueries(source,filePath,(name,args)=>{
+    if(name!=="Schema.describeFields"||args[0]?.kind!=="text"||args[0].values.length!==1)
+      return undefined;
+    const found=snapshots.get(args[0].values[0]);
+    return found?.complete&&found.value?listValue(found.value,true):
+      unknown("Complete Salesforce Describe metadata unavailable for "+args[0].values[0]+
+        ": "+(found?.reason??"Object identity was not established."));
+  });
+}
+
+async function scanRepositoryApex(
+  repositoryPath: string, cacheKey: string, metadata?: ApexMetadataProvider,
+): Promise<SoqlScanInventory> {
   const apexFiles = await timeSoqlPhase("scanner.discovery", () => findApexClasses(repositoryPath));
   apexFiles.sort((a, b) => a.localeCompare(b));
   recordSoqlCount("scanner.apex_files", apexFiles.length);
 
-  const previous = indexedRepositories.get(repositoryPath);
+  const previous = indexedRepositories.get(cacheKey);
   let reused = 0;
   const currentEntries = await timeSoqlPhase("scanner.stat_and_parse", () =>
     parallelMap(apexFiles, async (filePath): Promise<[string, CachedApexFile]> => {
@@ -99,7 +133,7 @@ async function scanRepositoryApex(repositoryPath: string): Promise<SoqlScanInven
       }
       const source = cold ? cold[1] : await readFile(filePath, "utf8");
       const staticQueries = extractSoqlQueries(source, filePath);
-      const dynamic = extractDynamicSoqlQueries(source, filePath);
+      const dynamic = await scanDynamicSource(source, filePath, metadata);
       // Every dynamic execution site and branch variant has its own identity,
       // so multiple queries can correctly share the same physical Apex line.
       return [filePath, {
@@ -112,10 +146,10 @@ async function scanRepositoryApex(repositoryPath: string): Promise<SoqlScanInven
   const nextIndex = new Map(currentEntries);
   // Only publish a complete successful snapshot. Failed reads do not poison
   // the previous cache, and deleted files are removed from the new index.
-  if (indexedRepositories.size >= MAX_REPOSITORIES && !indexedRepositories.has(repositoryPath)) {
+  if (indexedRepositories.size >= MAX_REPOSITORIES && !indexedRepositories.has(cacheKey)) {
     indexedRepositories.delete(indexedRepositories.keys().next().value!);
   }
-  indexedRepositories.set(repositoryPath, nextIndex);
+  indexedRepositories.set(cacheKey, nextIndex);
   const queries: SoqlQuery[] = [];
   const unresolvedDynamic: UnresolvedDynamicSoql[] = [];
   for (const [, entry] of currentEntries) {
