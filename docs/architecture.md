@@ -4,7 +4,7 @@ Salesforce Repository Analyzer is a **local application** with a React frontend,
 
 ```mermaid
 flowchart TD
-  UI["React/Vite UI (web/)"] --> API["Express API (src/api/server.ts)"]
+  UI["Electron desktop / React UI (web/)"] --> API["Express API (src/api/server.ts)"]
   CLI["CLI (src/index.ts)"] --> Services["Analysis services"]
   API --> Setup["Local repository + report-folder configuration"]
   API --> Runtime["AnalyzerRuntimeService"]
@@ -31,7 +31,8 @@ flowchart TD
 | `src/reporter/` | Excel Summary report generation |
 | `config/` | Persona and supporting metadata/policy configuration |
 | `web/` | React/Vite user interface |
-| `desktop/windows/` | Portable double-click launcher and smoke test |
+| `desktop/electron/` | Electron desktop folder ZIP, packaged launcher and smoke tests |
+| `desktop/windows/` | Separate browser-portable launcher and smoke test |
 | `tests/` | Regression tests discovered automatically by `npm run test:all` |
 
 ## How a SOQL analysis runs
@@ -47,7 +48,9 @@ Source metadata and live-org evidence are distinct. A missing permission entry i
 
 ## Local and packaged execution
 
-Development runs Vite and Express separately. The Windows portable build uses the same compiled Express API to serve the Vite production UI, via a bundled `node.exe` and local loopback URL. The packaged ZIP does not include the source Salesforce repository or secret-filled `.env` files.
+Development runs Vite and Express separately. The **Electron desktop-folder ZIP** wraps the compiled Express API and React UI in a native desktop window and bundles a Node runtime; users must extract and retain the complete `win-unpacked` folder, including the EXE, DLLs and `resources`. The separate **browser-portable** build uses `Start Analyzer.cmd` and a browser with the same local API and bundled runtime. Neither ZIP should include the source Salesforce repository, individual CLI auth files or a real `.env`.
+
+Optional Salesforce verification is authenticated through **Salesforce CLI-managed browser OAuth** (`sf` v2.136.0+ on the user machine). A separate client ID/client secret is not required by the Analyzer. See [Windows desktop setup](setup/windows-desktop.md), [Development setup](setup/development.md) and [Security](security.md).
 
 ## Scope and caveats
 
@@ -55,3 +58,7 @@ Development runs Vite and Express separately. The Windows portable build uses th
 - Access decisions use a centralized evaluator to reduce inconsistent rules across features.
 - A verified org permission does not replace object-level authorization checks; `Review` means incomplete evidence, not a denied grant.
 - Unsupported Apex patterns, dynamic SOQL, and complex call flows can limit certainty. Regression tests help prevent known false positives; they do not guarantee complete Apex language coverage.
+
+## Dynamic SOQL v0.1.1 (feature branch)
+
+The [dynamic SOQL architecture](features/dynamic-soql-resolution-v011.md) isolates Apex source parsing, bounded field-list/value tracing and read-only metadata adapters from the persona permission engine. Only fully reconstructed query variants enter the existing OLS/FLS evaluator; incomplete values remain a single Unable to verify finding per execution site. This feature remains under review.

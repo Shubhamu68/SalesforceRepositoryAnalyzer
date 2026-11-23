@@ -4,6 +4,7 @@ Notable changes to Salesforce Repository Analyzer are summarized here. Versions 
 
 ## Unreleased
 
+- Clarified public repository visibility, v0.1.0 Electron desktop-folder ZIP distribution, and Salesforce CLI login across README and setup/security/release guides (documentation only; application behavior unchanged).
 - Professionalized repository README, documentation navigation, contribution templates and the versioned Windows Release workflow (documentation/distribution only; analyzer behavior unchanged).
 
 ## 0.1.0 — development baseline

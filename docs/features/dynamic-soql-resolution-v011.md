@@ -133,3 +133,17 @@ The feature branch now includes:
 4. Add explicit unit/integration fixtures as metadata adapters and advanced call tracing become supported. Never mark the feature complete based solely on the simple literal/concat tests.
 5. GitHub Actions on this repository have also failed on `main` in prior runs; do not assume a new workflow failure proves or disproves this code. Investigate build/test evidence separately.
 
+
+## Report-driven follow-up corrections (2026-11-23)
+
+The first real-world analyzer report exposed two systematic scanner defects and additional implementation limitations. Fixes and regression fixtures were added to the **same** feature branch:
+
+- **Independent execution-site budgets:** source and method indexes are built once, but query evaluation now restricts work to each site's enclosing method and the prefix leading to that call. Exhaustion of one method/site cannot invalidate unrelated sites in the class. A query that itself exceeds the cap still reports one Unresolved finding.
+- **Static locator exclusion:** bracketed SOQL supplied to `Database.getQueryLocator([SELECT ...])` remains exclusively in the existing static scanner; the dynamic scanner no longer emits a duplicate review.
+- **Private helper caller context:** proven local field-list and scalar arguments are propagated through visible callers of explicitly private same-class helpers, enumerating all known complete variants. Public and external inputs without proven values are deliberately Unresolved.
+- **Mutable collection guard:** passing a selected-field List/Set into an unsupported helper can mutate it. The engine now taints such collections rather than treating stale values as a complete SELECT field list.
+- **Regression coverage:** synthetic tests exercise heavy unrelated methods, a genuinely over-budget query next to a valid one, bracketed static locators, multiple known private callers, a mixed known/unknown caller, collection joins, and unknown collection mutation. Fixtures intentionally avoid production data, IDs and customer-specific class names.
+
+### Known limits
+
+The real-world report was generated using an earlier feature commit; it has **not** been regenerated here against the user's private Apex repository. Therefore, improved unresolved counts are not claimed. Field Sets, arbitrary Custom Metadata utility methods, cross-class public caller chains, mutable instance fields and unrestricted UI inputs can remain Unresolved until their complete inputs are proven. A passing synthetic regression suite is not proof that every one of the 13 example patterns is resolved. Re-run the same repo/persona/org analysis and compare source locations, no duplicate static-query reviews, and unchanged confirmed permission findings before promotion.

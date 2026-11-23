@@ -1,47 +1,73 @@
 # Salesforce Repository Analyzer
 
-**Local-first Salesforce security analysis, with optional live-org permission verification.**
+**Local-first Salesforce repository security analysis, with optional live-org permission verification.**
 
 [![Analyzer Regression](https://github.com/Shubhamu68/SalesforceRepositoryAnalyzer/actions/workflows/analyzer-regression.yml/badge.svg?branch=main)](https://github.com/Shubhamu68/SalesforceRepositoryAnalyzer/actions/workflows/analyzer-regression.yml)
-[![Windows Portable Build](https://github.com/Shubhamu68/SalesforceRepositoryAnalyzer/actions/workflows/windows-portable.yml/badge.svg)](https://github.com/Shubhamu68/SalesforceRepositoryAnalyzer/actions/workflows/windows-portable.yml)
+[![Windows Desktop Folder Build](https://github.com/Shubhamu68/SalesforceRepositoryAnalyzer/actions/workflows/windows-desktop.yml/badge.svg)](https://github.com/Shubhamu68/SalesforceRepositoryAnalyzer/actions/workflows/windows-desktop.yml)
 
-Analyze Salesforce metadata and Apex queries by business persona, understand object/field access, investigate stack traces, and export concise Excel findings. The React UI is served locally by a Node/Express API; connected-org checks are optional where supported.
+Analyze Salesforce Apex SOQL and metadata by business persona, understand object and field access, investigate stack traces, and export Excel findings. The application runs locally; Salesforce org verification is optional.
 
-> **Project status:** Active development (`v0.1.0` in `package.json`). This repository is private. Releases are published separately after testing and approval; the latest source is not automatically the latest portable release.
+> **Project status:** Public source repository; active development. The source package version is **0.1.0**. No official `v0.1.0` GitHub Release has been published yet. The Electron desktop-folder ZIP shared with initial recipients is a **separately distributed build**, not an official GitHub Release. Changes to `main` do not update previously shared ZIPs.
+
+## Getting started — Windows desktop (Electron)
+
+**For recipients of the desktop-folder ZIP:** use these instructions, not the browser-based portable launcher.
+
+1. Obtain the approved **`SalesforceRepositoryAnalyzer-Desktop-Unpacked.zip`** shared with your team. Maintainers can also build a test artifact using [Build Windows Desktop Folder ZIP](https://github.com/Shubhamu68/SalesforceRepositoryAnalyzer/actions/workflows/windows-desktop.yml).
+2. **Extract the entire ZIP.** Open the extracted `win-unpacked` folder.
+3. Double-click **`Salesforce Repository Analyzer.exe`**. Keep the EXE, DLLs, `resources` folder and other extracted files together; this is a folder-based app, **not an installer or a standalone EXE**.
+4. Select the root of the Salesforce metadata repository you want to analyze (containing `force-app/main/default`). Choose a writable Excel output folder when prompted.
+5. To verify access against a Salesforce org, install **Salesforce CLI v2.136.0+** and select an authorized CLI org or sign in through the app's Salesforce browser-login option. Alternatively, continue with repository-only analysis where supported.
+
+**Requirements:** Windows 10/11. No separate Node.js, npm, Git, or VS Code installation is needed to **run** the desktop application. You will need local Salesforce metadata to analyze. Salesforce CLI is required **only** for optional connected-org features.
+
+**Security notice:** The desktop executable is currently **unsigned**. Follow your organization's software approval process if Windows SmartScreen or endpoint protection blocks it; do not bypass company controls.
+
+See the [Windows desktop setup and troubleshooting guide](docs/setup/windows-desktop.md) for the full instructions. For the separate `Start Analyzer.cmd` browser-based distribution, see [Windows portable setup](docs/setup/windows-portable.md).
 
 ## Features
 
 | Capability | What it does |
 | --- | --- |
-| **SOQL Security Analysis** | Scans Apex SOQL, resolves parent/child fields and aggregates, checks object/field Read access by persona and query mode, and creates one Excel Summary workbook. |
-| **Access Checker** | Explains effective object or field access, including Profile, Permission Set, PSG, and optional org-verification evidence. |
+| **SOQL Security Analysis** | Scans Apex SOQL, handles supported relationship and aggregate queries, evaluates object/field Read access by persona and query mode, and exports an Excel Summary workbook. |
+| **Access Checker** | Shows effective object and field permissions with supporting Profile, Permission Set, Permission Set Group, and optional org-verification evidence. |
 | **Object Access Matrix** | Compares object Read/Create/Edit/Delete and elevated privileges across configured personas. |
-| **Stack Trace Impact Analyzer** | Follows Apex stack-trace call paths to identify relevant queries and permission risks. |
-| **Salesforce Org Verification** | Uses configured credentials to supplement repository permissions and investigate uncertain access; distinguishes grants, denials, and Review. |
-| **Windows Portable Edition** | Bundles its own Node runtime; extract, double-click the launcher, and use the app in a local browser. |
+| **Stack Trace Impact Analyzer** | Investigates Apex stack-trace call paths, relevant queries, and potential permission issues. |
+| **Optional Salesforce Org Verification** | Supplements repository-based conclusions with authorized Salesforce org evidence, distinguishing granted, denied, and inconclusive results. |
+| **Excel Reporting** | Produces local workbooks for review without changing Salesforce permissions or data. |
 
-This is a **static repository analyzer**, not a replacement for Salesforce's runtime authorization engine. Unsupported query constructs and incomplete org evidence should remain Review, not automatic permission grants.
+### How permissions and org authentication work
 
-## Quick start
+- Repository metadata (Profiles, Permission Sets, Permission Set Groups, schema and Apex) is the baseline for analysis.
+- **Salesforce CLI owns optional OAuth authorization.** Use a saved CLI org or the official Salesforce browser sign-in. The Analyzer does **not** ask for your Salesforce password or require an Analyzer-specific client ID/client secret.
+- The connected session is scoped to the selected org/user; use an appropriately authorized account.
+- The results are *analysis evidence*, not a substitute for Salesforce's runtime authorization checks. Unsupported dynamic SOQL, incomplete metadata and uncertain effective permissions may be reported as **Review** rather than treated as definite grants or denials.
 
-### Windows portable — no Node.js installation required
+## Architecture
 
-1. Open [Releases](https://github.com/Shubhamu68/SalesforceRepositoryAnalyzer/releases) and select an **approved** version containing `SalesforceRepositoryAnalyzer-Windows-Portable.zip`. Until the first release exists, an authorized developer can generate a build from [Build Windows Portable Analyzer](https://github.com/Shubhamu68/SalesforceRepositoryAnalyzer/actions/workflows/windows-portable.yml).
-2. Extract the **complete** ZIP to a writable directory on Windows 10/11.
-3. Double-click **`Start Analyzer.cmd`**; the local UI opens in your default browser.
-4. When prompted, choose the root of a Salesforce metadata repository containing `force-app/main/default`. Choose a writable Excel output folder when first analyzing SOQL.
-5. Optionally configure approved Salesforce credentials in your **local**, untracked `.env` file.
+```mermaid
+flowchart LR
+    SF["Salesforce metadata repository"] --> API["Node / Express API"]
+    ORG["Salesforce org (optional, CLI login)"] -. "Permission verification" .-> API
+    UI["Electron desktop / React UI"] <--> API
+    API --> ENGINE["SOQL / Access / Stack analyzers"]
+    ENGINE --> XLSX["ExcelJS reports"]
+```
 
-Keep the launcher console open while using the tool. For troubleshooting and safe credential handling, see [Windows Portable Setup](docs/setup/windows-portable.md).
+- **Analysis backend:** TypeScript, Node.js, Express, SOQL parser, XML metadata parsing, and ExcelJS.
+- **UI:** React, TypeScript, Vite; hosted locally by the bundled API in the Electron desktop app.
+- **Distribution:** Electron folder ZIP bundles application dependencies and Node runtime; no project Salesforce metadata or user credentials are packaged.
+- **Output:** Local Excel workbooks. See [Architecture](docs/architecture.md) for module-level details.
 
-### Developer setup
+## Developer setup
 
-Prerequisites: Node.js **24**, npm, a Salesforce metadata checkout, and PowerShell for the Windows folder dialogs.
+Developers (unlike desktop recipients) need Node.js **24**, npm and Git. From a terminal:
 
 ```powershell
 git clone https://github.com/Shubhamu68/SalesforceRepositoryAnalyzer.git
 cd SalesforceRepositoryAnalyzer
 npm ci
+Copy-Item .env.example .env
 npm run api
 ```
 
@@ -53,58 +79,36 @@ npm ci
 npm run dev
 ```
 
-Open the Vite local URL printed in the terminal. The frontend proxies `/api` requests to the local Express server (default `localhost:3000`). The UI can prompt for a repository path and output folder; see [Development Setup](docs/setup/development.md).
-
-## How the pieces fit
-
-```mermaid
-flowchart LR
-    R["Local Salesforce metadata"] --> API["Node / Express API"]
-    O["Salesforce org (optional)"] -. "read-only verification" .-> API
-    UI["React / Vite UI"] <--> API
-    API --> A["SOQL / Access / Stack analyzers"]
-    A --> E["ExcelJS report output"]
-```
-
-- **Backend:** TypeScript, Node.js, Express, SOQL parser, XML metadata parsing and ExcelJS.
-- **Frontend:** React, TypeScript and Vite.
-- **Input:** Repository metadata for Apex, Profiles, Permission Sets, PSGs and schema; optional live Salesforce effective-access evidence.
-- **Output:** Local analysis results and Excel workbooks. The tool does not deploy permission changes to Salesforce.
-- **Portability:** No project-specific field-permissionability export is bundled. Current-org metadata is resolved live when available; repository-only unknown fields remain Review unless explicitly configured with a matching-org local cache.
-
-Read [Architecture](docs/architecture.md) for the module-level flow.
-
-## Common commands
+Open the Vite URL displayed by the frontend. For desktop packaging, tests, or optional Salesforce CLI setup, see [Development setup](docs/setup/development.md) and [Electron desktop build notes](desktop/electron/README.md).
 
 | Command | Purpose |
 | --- | --- |
-| `npm run api` | Start the development API |
-| `cd web && npm run dev` | Start the React development UI |
-| `npm run analyze` | Run the existing CLI analysis |
-| `npm run build` | Compile the backend TypeScript |
-| `npm run test:all` | Run all backend regression tests |
-| `cd web && npm run build` | Build the frontend |
-| `cd web && npm run lint` | Lint the frontend |
+| `npm run api` | Development API |
+| `cd web && npm run dev` | Development React UI |
+| `npm run analyze` | CLI analyzer |
+| `npm run build` | Backend TypeScript compilation |
+| `npm run test:all` | Backend regression tests |
+| `cd web && npm run build` | Frontend production build |
+| `cd web && npm run lint` | Frontend linting |
 
 ## Documentation
 
-- [Documentation index](docs/README.md) — feature notes, setup and historical implementation material
-- [Development setup](docs/setup/development.md) · [Windows portable](docs/setup/windows-portable.md)
+- [Documentation index](docs/README.md)
+- [Windows desktop setup](docs/setup/windows-desktop.md) · [Windows portable/browser setup](docs/setup/windows-portable.md) · [Development setup](docs/setup/development.md)
 - [Architecture](docs/architecture.md) · [SOQL aggregate analysis](docs/features/soql-aggregates.md)
-- [Release process](docs/releases.md) · [Changelog](CHANGELOG.md)
-- [Contributing and PR checks](CONTRIBUTING.md) · [Security practices](docs/security.md)
+- [Release and build distribution](docs/releases.md) · [Changelog](CHANGELOG.md)
+- [Contributing](CONTRIBUTING.md) · [Security practices](docs/security.md)
 
-## Security and limitations
+## Security, scope and licensing
 
-- Never commit `.env`, credentials, org access tokens or proprietary Salesforce records. The Windows ZIP intentionally packages only `.env.example`.
-- The portable launcher runs **locally in your browser**; it is not an Electron app and does not require recipients to install Node/npm.
-- Salesforce org verification requires an approved client-credentials integration and authorized permissions. Repository-only mode can still be used where supported.
-- All changes to analyzed repositories or org permissions must be reviewed separately; this tool is principally **read-only**.
-- The repository is private; Releases and source access remain subject to GitHub repository permissions.
+- Never commit `.env`, Salesforce tokens, CLI authorization files, proprietary customer metadata or real customer records. Public issues and screenshots must be sanitized.
+- Desktop settings are created **per user** outside the shared ZIP; the distribution includes `.env.example`, not someone else's credentials.
+- The application is primarily read-only and does not deploy permission changes to Salesforce.
+- **Public source visibility is not a software license.** No root `LICENSE` file is included at present; contact the repository owner for reuse or redistribution permissions.
+- For bugs and feedback, use [GitHub Issues](https://github.com/Shubhamu68/SalesforceRepositoryAnalyzer/issues/new/choose) without exposing organization-specific data or secrets.
 
----
-For issues or feature requests, use the [issue templates](https://github.com/Shubhamu68/SalesforceRepositoryAnalyzer/issues/new/choose). Please redact organization IDs, field values and credentials from reports or logs.
+> **Build/version note:** The public `main` branch may contain development changes beyond the separately emailed v0.1.0 ZIP. Verify the exact source commit used for a distributed build before describing it as an official versioned release.
 
 ## In-progress v0.1.1 dynamic SOQL analysis
 
-The [v0.1.1 design and implementation notes](docs/features/dynamic-soql-resolution-v011.md) describe the reusable Apex dependency engine, bounded query-variant resolution, metadata support, and known limitations. The feature is in a **draft PR**: unknown runtime fields and incomplete metadata remain **Unable to verify**, never fabricated permission grants. This source change does not alter the separately released **Windows Portable** version or its download instructions.
+The [dynamic SOQL design and implementation notes](docs/features/dynamic-soql-resolution-v011.md) describe the bounded Apex dependency resolver, query variants, metadata support and limitations. This is a draft feature, not a release of the **Windows Portable** launcher or the Windows desktop package. Unknown runtime fields and incomplete metadata remain Unable to verify.

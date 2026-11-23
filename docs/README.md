@@ -1,22 +1,25 @@
 # Documentation
 
-Start with the current user/developer guides; the historical notes are preserved for traceability and must not be treated as installation instructions for today's `main`.
+Start with the **Electron desktop setup** if you received the initial v0.1.0 folder ZIP. The browser-based portable launcher and source-code developer setup are separate workflows. Historical notes are preserved for traceability and may describe superseded authentication or deployment approaches.
 
 ## Current guides
 
 | Guide | Subject |
 | --- | --- |
-| [Architecture](architecture.md) | Components, execution, security decisions and output |
-| [Development setup](setup/development.md) | Clone, dependencies, local dev, tests and configuration |
-| [Windows portable setup](setup/windows-portable.md) | End-user launcher, artifact versus Release, troubleshooting |
-| [Security](security.md) | Credentials, access verification and repository boundaries |
-| [Releases](releases.md) | Versioning, manual approval and tagged Windows ZIP publication |
-| [Repository settings](repository-settings.md) | Maintainer-only About, branch cleanup and protection |
-| [SOQL aggregate analysis](features/soql-aggregates.md) | Parser, field extraction, limits and UAT |
-| [Org permission fallback](features/org-access-fallback.md) | Repository-first effective-permission verification |
+| [Windows desktop setup](setup/windows-desktop.md) | **Primary recipient guide** for the Electron folder ZIP, executable, CLI login and troubleshooting |
+| [Electron desktop build notes](../desktop/electron/README.md) | Maintainer packaging instructions for the `win-unpacked` distribution |
+| [Windows browser-portable setup](setup/windows-portable.md) | Separate `Start Analyzer.cmd` launcher package |
+| [Development setup](setup/development.md) | Clone, local development API/UI, tests and optional CLI authorization |
+| [Architecture](architecture.md) | Components, analysis flow and output |
+| [Security](security.md) | Public source precautions, credentials, read-only scope, unsigned executable |
+| [Builds and releases](releases.md) | Difference between emailed ZIP, CI artifact and official tagged browser-portable Release |
+| [Repository settings](repository-settings.md) | Maintainer-only GitHub About and branch governance checklist |
+| [Dynamic SOQL v0.1.1 design and test coverage](features/dynamic-soql-resolution-v011.md) | Reusable Apex data-flow engine, resolution contracts and limitations |
+| [SOQL aggregate analysis](features/soql-aggregates.md) | Parser, field extraction, limitations and UAT |
+| [Org permission fallback](features/org-access-fallback.md) | Repository-first effective permission verification |
 
 ## Historical design and implementation notes
 
-See [Historical notes](history/README.md) for previous feature write-ups, migration notes and archived patches. These documents record what changed at that time and may contain obsolete procedures.
+See [Historical notes](history/README.md) for earlier feature write-ups, migrations and archived patches. These capture implementation history; they should not override current setup or authentication guides.
 
-The current software version is in [`package.json`](../package.json). The source of truth for behavior is current source code and regression tests.
+The root [`package.json`](../package.json) records the source version. The current code and regression tests, not historical prose, govern actual behavior. A distributed ZIP should also be tied to its source commit and build ID.
