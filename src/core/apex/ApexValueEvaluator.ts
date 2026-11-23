@@ -203,8 +203,9 @@ export function evaluateApexExpression(
       if(pair.length!==2)return unknown("Apex map initializer is malformed.");
       const key=onlyText(evaluateApexExpression(pair[0],context,depth+1));
       const val=evaluateApexExpression(pair[1],context,depth+1);
-      if(key===null||val.kind==="unknown")
-        return unknown("Apex map initializer contains unproven key/value.");
+      if(key===null)return unknown("Apex map initializer has an unproven key: "+pair[0].trim());
+      if(val.kind==="unknown")
+        return unknown("Apex map initializer for key "+key+" is unproven: "+val.reason);
       entries.push([key,val]);
       if(entries.length>MAX_MAP_ENTRIES)return unknown("Apex map entry limit exceeded.");
     }
