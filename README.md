@@ -109,6 +109,8 @@ Open the Vite URL displayed by the frontend. For desktop packaging, tests, or op
 
 > **Build/version note:** The public `main` branch may contain development changes beyond the separately emailed v0.1.0 ZIP. Verify the exact source commit used for a distributed build before describing it as an official versioned release.
 
+**Packaging distinction:** The browser-portable launcher is not an Electron app; the separate Windows desktop-folder ZIP is an Electron application.
+
 ## In-progress v0.1.1 dynamic SOQL analysis
 
 The [dynamic SOQL design and implementation notes](docs/features/dynamic-soql-resolution-v011.md) describe the bounded Apex dependency resolver, query variants, metadata support and limitations. This is a draft feature, not a release of the **Windows Portable** launcher or the Windows desktop package. Unknown runtime fields and incomplete metadata remain Unable to verify.
