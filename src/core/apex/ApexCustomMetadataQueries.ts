@@ -2,7 +2,7 @@ import { evaluateApexExpression, textValue, booleanValue, unknown, type ApexValu
   from "./ApexValueEvaluator.js";
 import { maskApexSource, matchingPair, stripApexComments } from "./ApexSourceModel.js";
 import { parseCustomMetadataQuery, type MetadataLoopQuery } from "./ApexCustomMetadataQueryModel.js";
-import type { ApexMetadataProvider, MetadataResult, CustomMetadataFilter } from "../metadata/ApexMetadataProvider.js";
+import type { ApexMetadataProvider, CustomMetadataResult, CustomMetadataFilter } from "../metadata/ApexMetadataProvider.js";
 
 const MAX_ROWS=100;
 const MAX_REFERENCES=30;
@@ -41,7 +41,7 @@ export interface CustomMetadataRequest {
   query:MetadataLoopQuery;
   filters:CustomMetadataFilter[];
 }
-export type CustomMetadataInventory=MetadataResult<Array<Record<string,unknown>>>;
+export type CustomMetadataInventory=CustomMetadataResult;
 
 /** Cache the exact typed filter context, not a broader inventory. */
 export function planCustomMetadataRequest(expression:string,values:readonly ApexValue[]):
@@ -82,7 +82,10 @@ export function resolveCustomMetadataRows(request:CustomMetadataRequest,found:Cu
     if(request.selected.some(field=>!keys.has(field.toLowerCase())))
       return unknown("Custom Metadata "+request.type+" row omitted selected/filter fields.");
     let included=true;
-    for(const {field,value} of request.filters){
+    // A complete server-filtered result is authoritative, including the
+    // platform-specific treatment of empty strings and null field values.
+    // Unfiltered/legacy providers must still prove the local predicates.
+    for(const {field,value} of found.source==="LIVE_ORG"&&found.filterEvidence==="SERVER_FILTERED"?[]:request.filters){
       const actual=read(field);
       // A null field cannot equal a known non-null scalar. Missing fields
       // are separately rejected above, not silently treated as null.
