@@ -4,6 +4,7 @@ import {
   stat,
 } from "node:fs/promises";
 import path from "node:path";
+import {setImmediate as yieldToEventLoop} from "node:timers/promises";
 import { classifySoqlMode } from "../analyzer/soqlExecutionMode.js";
 import { parseNestedSoql, maskSoql } from "../analyzer/nestedSoqlScopes.js";
 import { extractDynamicSoqlQueries, type UnresolvedDynamicSoql } from "./dynamicSoqlScanner.js";
@@ -14,7 +15,7 @@ import { maskApexSource } from "../core/apex/ApexSourceModel.js";
 import type { ApexMetadataProvider } from "../core/metadata/ApexMetadataProvider.js";
 
 import type { SoqlQuery } from "../models/SoqlQuery.js";
-import { recordSoqlCount, timeSoqlPhase } from "../services/SoqlPerformanceMetrics.js";
+import { recordSoqlCount, timeSoqlPhase, timeSoqlSync } from "../services/SoqlPerformanceMetrics.js";
 
  
 /**
@@ -42,7 +43,9 @@ type CachedApexFile = {
 type CachedRepositoryGraph = { signature: string; index: ApexRepositoryMethodIndex };
 const repositoryGraphs = new Map<string,CachedRepositoryGraph>();
 const indexedRepositories = new Map<string, Map<string, CachedApexFile>>();
-const inFlightScans = new Map<string, Promise<SoqlScanInventory>>();
+type ScanProgress=(completed:number,total:number)=>void;
+type PendingScan={work:Promise<SoqlScanInventory>;listeners:Set<ScanProgress>;completed:number;total:number};
+const inFlightScans = new Map<string, PendingScan>();
 
 async function parallelMap<T, R>(
   input: readonly T[], task: (value: T) => Promise<R>,
@@ -64,22 +67,26 @@ export async function scanApexSoql(repositoryPath: string): Promise<SoqlQuery[]>
 
 /** One shared repository scan supplies normal queries plus review-only dynamic sites. */
 export async function scanApexSoqlWithUnresolved(
-  repositoryPath: string, metadata?: ApexMetadataProvider,
+  repositoryPath: string, metadata?: ApexMetadataProvider, onProgress?:ScanProgress,
 ): Promise<SoqlScanInventory> {
   const root = path.resolve(repositoryPath);
   const cacheKey = root + "|" + (metadata?.scopeKey ?? "REPOSITORY_ONLY");
   const pending = inFlightScans.get(cacheKey);
   if (pending) {
     recordSoqlCount("scanner.inflight_reuse");
-    return pending;
+    if(onProgress){pending.listeners.add(onProgress);onProgress(pending.completed,pending.total);}
+    try{return await pending.work;}finally{if(onProgress)pending.listeners.delete(onProgress);}
   }
-  const work = scanRepositoryApex(root, cacheKey, metadata);
-  inFlightScans.set(cacheKey, work);
-  try {
-    return await work;
-  } finally {
-    if (inFlightScans.get(cacheKey) === work) inFlightScans.delete(cacheKey);
-  }
+  const listeners=new Set<ScanProgress>();
+  if(onProgress)listeners.add(onProgress);
+  const job:PendingScan={work:Promise.resolve({queries:[],unresolvedDynamic:[]}),listeners,completed:0,total:0};
+  job.work=scanRepositoryApex(root,cacheKey,metadata,(completed,total)=>{
+    job.completed=completed;job.total=total;
+    for(const listener of job.listeners)listener(completed,total);
+  });
+  inFlightScans.set(cacheKey,job);
+  try{return await job.work;}
+  finally{if(inFlightScans.get(cacheKey)===job)inFlightScans.delete(cacheKey);}
 }
 
 /**
@@ -113,7 +120,7 @@ function preserveDynamicFailureDiagnostics(
 
 
 async function scanRepositoryApex(
-  repositoryPath: string, cacheKey: string, metadata?: ApexMetadataProvider,
+  repositoryPath: string, cacheKey: string, metadata?: ApexMetadataProvider, onProgress?:ScanProgress,
 ): Promise<SoqlScanInventory> {
   const apexFiles = await timeSoqlPhase("scanner.discovery", () => findApexClasses(repositoryPath));
   apexFiles.sort((a, b) => a.localeCompare(b));
@@ -137,11 +144,19 @@ async function scanRepositoryApex(
   const previousGraph=repositoryGraphs.get(cacheKey);
   const graphUnchanged=previousGraph?.signature===signature;
   const repositoryIndex=graphUnchanged?previousGraph!.index:
-    new ApexRepositoryMethodIndex(sources.map(({filePath,source})=>({filePath,source})));
+    timeSoqlSync("scanner.repository_graph",()=>new ApexRepositoryMethodIndex(sources.map(({filePath,source})=>({filePath,source}))));
 
   // A changed caller invalidates a callee's dynamic query analysis even if
   // the callee source is unchanged. Never retain a stale cross-class result.
   const engine=new ApexAnalysisEngine(repositoryIndex,metadata);
+  let completed=0;
+  onProgress?.(0,sources.length);
+  const finishFile=async()=>{
+    onProgress?.(++completed,sources.length);
+    // Give the HTTP progress poll and pending metadata I/O a chance to run.
+    // This is cooperative yielding, not parallel CPU execution.
+    if(completed%8===0)await yieldToEventLoop();
+  };
   const currentEntries=await timeSoqlPhase("scanner.stat_and_parse",()=>parallelMap(sources,
     async (entry:typeof sources[number]):Promise<[string,CachedApexFile]>=>{
       const existing=previous?.get(entry.filePath);
@@ -152,15 +167,18 @@ async function scanRepositoryApex(
       const hasDynamicCall=/\bDatabase\s*\.\s*(?:query|countQuery|getQueryLocator)(?:WithBinds)?\s*\(/i
         .test(maskApexSource(entry.source));
       if(entry.reused && graphUnchanged && existing &&
-         !(metadata && hasDynamicCall))
-        return [entry.filePath,existing];
+         !(metadata && hasDynamicCall)){
+        await finishFile();return [entry.filePath,existing];
+      }
       const staticQueries=entry.reused && existing
         ?existing.queries.filter(query=>!query.dynamicOrigin)
         :extractSoqlQueries(entry.source,entry.filePath);
-      const dynamic=await engine.analyze(entry.filePath,context=>
+      const dynamic=hasDynamicCall?await engine.analyze(entry.filePath,context=>
         preserveDynamicFailureDiagnostics(entry.source,entry.filePath,
           extractDynamicSoqlQueries(entry.source,entry.filePath,context.resolveExternal,context.repositoryIndex),
-          context.resolveLocal));
+          context.resolveLocal)):{queries:[],unresolved:[]};
+      if(!hasDynamicCall)recordSoqlCount("scanner.static_only_files");
+      await finishFile();
       return [entry.filePath,{
         fingerprint:entry.fingerprint,source:entry.source,
         queries:[...staticQueries,...dynamic.queries],
