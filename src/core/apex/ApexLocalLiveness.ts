@@ -37,7 +37,7 @@ export class ApexLocalLiveness {
    * and unknown ownership alone. */
   discardDeadScalars(values:ApexEnvironment,statementEnd:number):void {
     for(const [name,value] of values){
-      if(value.kind!=="text"&&value.kind!=="number"&&value.kind!=="unknown")continue;
+      if(value.kind!=="text"&&value.kind!=="number"&&value.kind!=="unknown"&&value.kind!=="null")continue;
       const last=this.lastReference.get(name.toLowerCase());
       if(last!==undefined&&last<=statementEnd)values.delete(name);
     }
