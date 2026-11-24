@@ -1,6 +1,6 @@
 import path from "node:path";
 import {evaluateApexExpression, unknown, type ApexValue} from "./ApexValueEvaluator.js";
-import {maskApexSource, matchingPair, parseApexStatements, stripApexComments, indexApexMethods} from "./ApexSourceModel.js";
+import {maskApexSource, matchingPair, parseApexStatements, stripApexComments, indexApexMethods,type ApexRepositorySyntaxInventory,type IndexedApexMethod} from "./ApexSourceModel.js";
 
 export interface ApexStaticSource {filePath:string;source:string;}
 interface Declaration {
@@ -37,12 +37,12 @@ export class ApexStaticValueIndex {
   private readonly lazyGetters=new Map<string,ApexValue>();
   private readonly metadataCaches=new WeakMap<MetadataResolver,Map<string,ApexValue>>();
 
-  constructor(sources:readonly ApexStaticSource[]){
+  constructor(sources:readonly ApexStaticSource[],syntax?:ApexRepositorySyntaxInventory){
     let total=0;
     const blockCandidates:Array<{entry:Declaration;filePath:string;start:number;end:number;value:ApexValue}>=[];
     const lazyCandidates:Array<{entry:Declaration;filePath:string;start:number;end:number;value:ApexValue;getter:string}>=[];
     for(const file of sources){
-      const masked=maskApexSource(file.source);
+      const masked=syntax?.masked(file.source)??maskApexSource(file.source);
       const classMatch=/\bclass\s+([A-Za-z_]\w*)\b/i.exec(masked);
       if(!classMatch)continue;
       const owner=classMatch[1];
@@ -90,7 +90,8 @@ export class ApexStaticValueIndex {
       }
       for(const candidate of staticBlockCandidates(file.source,masked,depth,classBrace,classEnd,ownFields))
         blockCandidates.push({...candidate,filePath:path.resolve(file.filePath)});
-      for(const candidate of lazyGetterCandidates(file.source,masked,depth,classBrace,classEnd,ownFields))
+      if([...ownFields.values()].some(e=>e.isStatic&&(!e.initializerPresent||/^null$/i.test(e.initializer.trim()))))
+      for(const candidate of lazyGetterCandidates(masked,depth,classBrace,classEnd,ownFields,syntax?.methods(file.source)??indexApexMethods(file.source)))
         lazyCandidates.push({...candidate,filePath:path.resolve(file.filePath)});
     }
     // Direct writes and simple collection escapes are repository evidence,
@@ -102,10 +103,10 @@ export class ApexStaticValueIndex {
       const names=new Set(candidates.map(e=>e.field.toLowerCase()));
       const writes=new Map<string,Array<{filePath:string;offset:number}>>();
       for(const file of sources){
-        const masked=maskApexSource(file.source);
+        const masked=syntax?.masked(file.source)??maskApexSource(file.source);
         const owner=/\bclass\s+([A-Za-z_]\w*)\b/i.exec(masked)?.[1];
         if(!owner)continue;
-        const methods=indexApexMethods(file.source);
+        const methods=syntax?.methods(file.source)??indexApexMethods(file.source);
         const token=/\b[A-Za-z_]\w*\b/g;
         let hit:RegExpExecArray|null;
         while((hit=token.exec(masked))!==null){
@@ -354,11 +355,10 @@ function readOnlyCollectionAlias(masked:string,start:number,end:number,reference
 /** Canonical lazy getter: if (field == null) { field = literal; } return field;
  * or return a defensive List/Set copy. No arbitrary helpers or side effects.
  * The backing declaration must be blank or explicitly null. */
-function lazyGetterCandidates(source:string,masked:string,depth:Int16Array,
-  classBrace:number,classEnd:number,fields:ReadonlyMap<string,Declaration>):
+function lazyGetterCandidates(masked:string,depth:Int16Array,
+  classBrace:number,classEnd:number,fields:ReadonlyMap<string,Declaration>,methods:IndexedApexMethod[]):
   Array<{entry:Declaration;start:number;end:number;value:ApexValue;getter:string}>{
   const result:Array<{entry:Declaration;start:number;end:number;value:ApexValue;getter:string}>=[];
-  const methods=indexApexMethods(source);
   for(const method of methods){
     if(!method.isStatic||method.parameters.length||method.start<=classBrace||method.end>=classEnd||
       depth[method.start-1]!==1||methods.filter(m=>m.name.toLowerCase()===method.name.toLowerCase()&&m.parameters.length===0).length!==1)continue;
