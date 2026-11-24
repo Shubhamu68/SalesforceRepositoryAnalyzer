@@ -390,7 +390,7 @@ export function evaluateApexExpression(
         (args[0].kind==="unknown"?args[0].reason:"input is not text."));
       return merged(args[0].values.map(x=>x.replace(/'/g,"\\'")));
     }
-    const methods=["removeend","trim","tolowercase","touppercase","isempty","split","equalsignorecase","containsignorecase"];
+    const methods=["removeend","trim","tolowercase","touppercase","isempty","split","equalsignorecase","containsignorecase","contains"];
     const dot=name.lastIndexOf(".");
     const operation=name.slice(dot+1).toLowerCase();
     if(dot>=0&&methods.includes(operation)){
@@ -398,6 +398,12 @@ export function evaluateApexExpression(
       if(operation==="isempty"&&receiver.kind==="collection")return booleanValue(receiver.items.length===0);
       if(operation==="isempty"&&receiver.kind==="map")return booleanValue(receiver.entries.length===0);
       if(operation==="isempty"&&receiver.kind==="records")return booleanValue(receiver.items.length===0);
+      if(operation==="contains"&&receiver.kind==="collection"){
+        const item=args.length===1?args[0]:undefined;
+        if(item?.kind!=="text"||item.values.length!==1||item.scalarType==="boolean")
+          return unknown("Collection.contains requires one proven string element.");
+        return booleanValue(receiver.items.includes(item.values[0]));
+      }
       if(receiver.kind!=="text")return unknown("Receiver for "+operation+" not resolved: "+
         (receiver.kind==="unknown"?receiver.reason:"receiver is not text."));
       const argument=args.length?onlyText(args[0]):null;
@@ -408,6 +414,7 @@ export function evaluateApexExpression(
       if(argument===null)return unknown("Argument for "+operation+" is not resolved.");
       if(operation==="removeend")return merged(receiver.values.map(x=>x.endsWith(argument)?x.slice(0,-argument.length):x));
       if(operation==="equalsignorecase")return merged(receiver.values.map(x=>String(x.toLowerCase()===argument.toLowerCase())),"boolean");
+      if(operation==="contains"&&args.length===1)return merged(receiver.values.map(x=>String(x.includes(argument))),"boolean");
       if(operation==="containsignorecase")return merged(receiver.values.map(x=>String(x.toLowerCase().includes(argument.toLowerCase()))),"boolean");
       if(operation==="split"){
         const one=onlyText(receiver);
