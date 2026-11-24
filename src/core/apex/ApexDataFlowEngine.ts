@@ -217,7 +217,7 @@ export class ApexDataFlowEngine {
         const env=new Map<string,ApexValue>();
         candidates[0].parameters.forEach((p,i)=>env.set(p,args[i]));
         let result:FrameResult;
-        const previousMethod=this.currentMethod;
+        const previousMethod:IndexedApexMethod|undefined=this.currentMethod;
         this.currentMethod=candidates[0];
         try {
           result=this.execute(candidates[0].body,[{values:env}],depth+1);
@@ -536,7 +536,7 @@ export class ApexDataFlowEngine {
     this.activeStopOffset=undefined;
     const values=new Map<string,ApexValue>();
     method.parameters.forEach((name,index)=>values.set(name,args[index]));
-    const previousMethod=this.currentMethod;
+    const previousMethod:IndexedApexMethod|undefined=this.currentMethod;
     this.currentMethod=method;
     let result:FrameResult;
     try{result=this.execute(method.body,[{values}],1);}
@@ -674,7 +674,7 @@ export class ApexDataFlowEngine {
           const env=new Map<string,ApexValue>();
           for(const p of caller.method.parameters)
             env.set(p,unknown("Runtime caller parameter: "+p));
-          const previousMethod=this.currentMethod;
+          const previousMethod:IndexedApexMethod|undefined=this.currentMethod;
           this.currentMethod=caller.method;
           try{this.execute(caller.method.body,[{values:env}],0);}
           finally{this.currentMethod=previousMethod;}
