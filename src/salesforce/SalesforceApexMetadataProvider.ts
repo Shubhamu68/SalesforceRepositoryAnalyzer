@@ -1,4 +1,4 @@
-import type { ApexMetadataProvider, MetadataResult, CustomMetadataFilter } from "../core/metadata/ApexMetadataProvider.js";
+import type { ApexMetadataProvider, MetadataResult, CustomMetadataFilter, CustomMetadataResult } from "../core/metadata/ApexMetadataProvider.js";
 import type { SalesforceOrgConnection } from "./SalesforceOrgConnection.js";
 
 const VALID_NAME=/^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -124,7 +124,7 @@ export class SalesforceApexMetadataProvider implements ApexMetadataProvider {
   }
 
   async getCustomMetadataRecords(objectApiName:string,fields:readonly string[],filters:readonly CustomMetadataFilter[]=[]):
-    Promise<MetadataResult<Array<Record<string,unknown>>>>{
+    Promise<CustomMetadataResult>{
     if(!VALID_NAME.test(objectApiName)||!/__mdt$/i.test(objectApiName) ||
        !fields.length||fields.some(field=>!VALID_NAME.test(field))||filters.length>20||
        filters.some(filter=>!VALID_NAME.test(filter.field)||
@@ -164,7 +164,7 @@ export class SalesforceApexMetadataProvider implements ApexMetadataProvider {
         }
         normalized.push(row);
       }
-      return {complete:true,source:"LIVE_ORG",value:normalized};
+      return {complete:true,source:"LIVE_ORG",value:normalized,filterEvidence:"SERVER_FILTERED"};
     }catch(error){
       return {complete:false,source:"LIVE_ORG",
         reason:error instanceof Error?error.message:
