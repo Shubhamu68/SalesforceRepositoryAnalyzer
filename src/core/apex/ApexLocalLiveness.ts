@@ -56,3 +56,19 @@ export function declaredLoopLocals(nodes:readonly SourceNode[]):Set<string>{
   }
   return names;
 }
+
+/** Cache only frozen syntax; independent of evaluator state and metadata. */
+const livenessCache=new WeakMap<IndexedApexMethod,Map<number,ApexLocalLiveness>>();
+export function sharedApexLocalLiveness(source:string,method:IndexedApexMethod,stopOffset?:number):ApexLocalLiveness{
+  if(!Object.isFrozen(method))return new ApexLocalLiveness(source,method,stopOffset);
+  let cache=livenessCache.get(method);
+  if(!cache){cache=new Map();livenessCache.set(method,cache);}
+  // Several sites within the same outer statement have the same prefix.
+  const root=stopOffset===undefined?undefined:method.body.find(n=>n.start<=stopOffset&&stopOffset<n.end);
+  const key=root?.end??method.end;
+  const previous=cache.get(key);
+  if(previous)return previous;
+  const value=new ApexLocalLiveness(source,method,stopOffset);
+  if(cache.size>=32)cache.delete(cache.keys().next().value!);
+  cache.set(key,value);return value;
+}
