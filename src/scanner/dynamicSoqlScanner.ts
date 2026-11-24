@@ -1,4 +1,5 @@
 import { ApexDataFlowEngine, type ApexCallSite } from "../core/apex/ApexDataFlowEngine.js";
+import {explainUncapturedApexQuery} from "../core/apex/ApexExecutionPathDiagnostics.js";
 import type { ApexRepositoryMethodIndex } from "../core/apex/ApexRepositoryMethodIndex.js";
 import type { ApexValue } from "../core/apex/ApexValueEvaluator.js";
 import { classifySoqlMode } from "../analyzer/soqlExecutionMode.js";
@@ -60,7 +61,8 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
     const failure=flow.failures.get(site.offset);
     if(failure){fail(failure);continue;}
     const captures=flow.captures.get(site.offset)??[];
-    if(!captures.length){fail("Invocation is outside a supported method or execution path.");continue;}
+    if(!captures.length){fail("Invocation is outside a supported method or execution path. "+
+      explainUncapturedApexQuery(source,site.offset,site.argument));continue;}
     const mode=explicitMode(site);
     if(mode===null){fail("Dynamic Database AccessLevel expression could not be established.");continue;}
     const strings:string[]=[];
