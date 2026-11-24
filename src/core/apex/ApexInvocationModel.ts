@@ -1,4 +1,4 @@
-import {maskApexSource,matchingPair,sourceLine,splitApexTopLevel} from "./ApexSourceModel.js";
+import {indexApexMethods,maskApexSource,matchingPair,sourceLine,splitApexTopLevel,type IndexedApexMethod} from "./ApexSourceModel.js";
 
 /** Consumers choose invocation names and the arguments that matter to them.
  * The core never needs to know the business meaning of those arguments. */
@@ -16,15 +16,23 @@ export interface ApexCallSite {
   argument:string;
   accessLevelArgument?:string;
 }
+// Cache only the built-in pure selector. User-supplied selectors may carry
+// state, so never memoize their decisions. Lifetime follows the syntax cache.
+const databaseSites=new WeakMap<IndexedApexMethod[],ApexCallSite[]>();
 export function discoverApexInvocations(source:string,select:ApexInvocationSelector):ApexCallSite[]{
+  const key=select===dynamicDatabaseQuerySelector?indexApexMethods(source):undefined;
+  const cached=key?databaseSites.get(key):undefined;
+  if(cached)return cached.map(site=>({...site,arguments:[...site.arguments]}));
   const masked=maskApexSource(source);
   const call=/\b([A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)*)\s*\(/g;
   const sites:ApexCallSite[]=[];
   for(const match of masked.matchAll(call)){
+    const name=match[1].replace(/\s+/g,"");
+    // Avoid matching parentheses and splitting unrelated invocation arguments.
+    if(select===dynamicDatabaseQuerySelector&&!/^Database\.(?:queryWithBinds|countQueryWithBinds|getQueryLocatorWithBinds|query|countQuery|getQueryLocator)$/i.test(name))continue;
     const open=masked.indexOf("(",match.index!);
     const end=matchingPair(masked,open);
     const args=end<0?[]:splitApexTopLevel(source.slice(open+1,end),",");
-    const name=match[1].replace(/\s+/g,"");
     const choice=select(name,args);
     if(!choice)continue;
     const selected=choice.argumentIndices.map(index=>args[index]??"");
@@ -32,6 +40,7 @@ export function discoverApexInvocations(source:string,select:ApexInvocationSelec
       arguments:selected,argument:selected[0]??"",
       ...(selected[1]?{accessLevelArgument:selected[1]}:{})});
   }
+  if(key)databaseSites.set(key,sites.map(site=>({...site,arguments:[...site.arguments]})));
   return sites;
 }
 
