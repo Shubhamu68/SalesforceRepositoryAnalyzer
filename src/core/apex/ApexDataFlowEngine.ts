@@ -425,6 +425,34 @@ export class ApexDataFlowEngine {
       this.taintCollectionsPassedToUnknownCalls(original,state);
     }
   }
+  /** Restrict refinement to immutable parameter usage solely in repeated
+   * identical guards. Other reads (including binds), writes, shadowing or
+   * opposite-polarity tests can observe null/unknown semantics and are left
+   * unrefined. Count raw references conservatively, including comments. */
+  private repeatedGuardOnly(name:string,negated:boolean):boolean{
+    const method=this.currentMethod;
+    if(!method)return false;
+    const key=method.start+"|"+name+"|"+negated;
+    const cached=this.guardOnlyCache.get(key);
+    if(cached!==undefined)return cached;
+    let guards=0;
+    const visit=(nodes:SourceNode[])=>{
+      for(const n of nodes){
+        if(n.kind==="if"){
+          const g=/^\s*(!\s*)?([A-Za-z_]\w*)\s*$/.exec(n.condition??"");
+          if(g&&g[2]===name&&!!g[1]===negated)guards++;
+        }
+        visit(n.body??[]);visit(n.otherwise??[]);
+      }
+    };
+    visit(method.body);
+    const references=[...this.source.slice(method.start,method.end).matchAll(/\b[A-Za-z_]\w*\b/g)]
+      .filter(m=>m[0].toLowerCase()===name.toLowerCase()).length;
+    const proven=guards>1&&references===guards;
+    this.guardOnlyCache.set(key,proven);
+    return proven;
+  }
+  private readonly guardOnlyCache=new Map<string,boolean>();
   private runNode(node:SourceNode,state:State,depth:number):
     {states:State[];returns:ApexValue[]}{
     if(state.stopped)return {states:[state],returns:[]};
@@ -459,7 +487,7 @@ export class ApexDataFlowEngine {
       const name=parameterIndex>=0?this.currentMethod!.parameters[parameterIndex]:undefined;
       const refine=known===undefined&&name!==undefined&&
         this.currentMethod?.parameterTypes?.[parameterIndex]?.toLowerCase()==="boolean"&&
-        state.values.get(name)?.kind==="unknown";
+        state.values.get(name)?.kind==="unknown"&&this.repeatedGuardOnly(name,!!guard?.[1]);
       const branch=(truth:boolean,nodes:SourceNode[]):FrameResult=>{
         if(!refine||!name)return scoped(nodes);
         const seed=clone(state);
