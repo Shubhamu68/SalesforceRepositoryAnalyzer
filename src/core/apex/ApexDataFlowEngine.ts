@@ -239,7 +239,7 @@ export class ApexDataFlowEngine {
         if(new RegExp("\\b"+escaped+"\\b","i").test(argumentText)||
           (value.kind==="instance"&&receiver.toLowerCase()===identifier.toLowerCase())){
           replaceCollectionAliases(state,value,unknown(
-            "Mutable reference "+identifier+" may be changed by unsupported method "+name+"."));
+            (value.kind==="instance"?"Mutable instance ":"Mutable collection ")+identifier+" may be changed by unsupported method "+name+"."));
         }
       }
       call.lastIndex=open+1;
@@ -523,8 +523,12 @@ export class ApexDataFlowEngine {
     const owner=this.currentMethod;
     let live:ApexLocalLiveness|undefined;
     if(owner&&nodes===owner.body){
-      live=this.liveness.get(owner);
-      if(!live){live=new ApexLocalLiveness(this.source,owner);this.liveness.set(owner,live);}
+      if(depth===0&&this.activeStopOffset!==undefined)
+        live=new ApexLocalLiveness(this.source,owner,this.activeStopOffset);
+      else {
+        live=this.liveness.get(owner);
+        if(!live){live=new ApexLocalLiveness(this.source,owner);this.liveness.set(owner,live);}
+      }
     }
     for(const node of nodes){
       // Only the source prefix leading to this execution site can contribute
@@ -574,6 +578,7 @@ export class ApexDataFlowEngine {
     if(this.exceeded)return unknown("Apex helper exceeds bounded analysis budget: "+this.budget.reason);
     if(!result.returns.length || result.states.some(state=>!state.stopped))
       return unknown("Apex helper has an execution path without a proven return.");
+    if(result.returns.some(value=>value.kind==="instance"))return unknown("Instance-return alias transfer is not yet proven.");
     if(result.returns.some(value=>value.kind==="unknown"))
       return result.returns.find(value=>value.kind==="unknown")!;
     if(result.returns.every(value=>value.kind==="text")) {
