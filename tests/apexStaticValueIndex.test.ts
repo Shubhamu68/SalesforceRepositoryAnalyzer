@@ -113,3 +113,20 @@ test("v0.1.1 missing source, ambiguous class and unsupported initializer are exp
     " public static final String FIELD = System.Label.Dynamic_Field;\n}"]);
   expectUnknown(only,"Config.FIELD",/label|unsupported/i);
 });
+
+test("real AdvantageConstants declarations: public mutable product names stay unknown but final OTC selectors resolve",()=>{
+  const idx=index(["AdvantageConstants.cls",[
+    "public class AdvantageConstants {",
+    " public static String AUTHORIZED_PRODUCT_APINAME='Authorized_Product__c';",
+    " public static String PRODUCT_APINAME='Product2';",
+    " public static String BILL_ONLY ='Bill Only';",
+    " public static final String TRX_SET_945 = '945';",
+    " public static final String OTC_DRAFT_INVOICE_CREATION = 'OTC Draft Invoice Creation';",
+    "}",
+  ].join("\n")]);
+  expectUnknown(idx,"AdvantageConstants.PRODUCT_APINAME",/externally mutable/i);
+  expectUnknown(idx,"AdvantageConstants.AUTHORIZED_PRODUCT_APINAME",/externally mutable/i);
+  expectUnknown(idx,"AdvantageConstants.BILL_ONLY",/externally mutable/i);
+  expectText(idx,"AdvantageConstants.TRX_SET_945","945");
+  expectText(idx,"AdvantageConstants.OTC_DRAFT_INVOICE_CREATION","OTC Draft Invoice Creation");
+});
