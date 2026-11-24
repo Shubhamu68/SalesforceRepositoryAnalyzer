@@ -113,6 +113,31 @@ const DEFAULT_PATHS = 32, DEFAULT_OPERATIONS = 5000, DEFAULT_DEPTH = 6;
 const MAX_LOOP_ITEMS = 100;
 
 function clone(state:State):State {return {values:new Map(state.values),stopped:state.stopped};}
+/** Replace an abstract collection in this frame, including tracked aliases
+ * and references stored in a bounded nested map. Never mutate snapshot objects. */
+function replaceCollectionAliases(state:State,existing:ApexValue,next:ApexValue):boolean{
+  if(existing.kind!=="collection"&&existing.kind!=="map")return false;
+  const memo=new Map<ApexValue,ApexValue>();
+  const replace=(value:ApexValue,depth=0):ApexValue=>{
+    if(value===existing)return next;
+    const cached=memo.get(value);
+    if(cached!==undefined)return cached;
+    if(value.kind==="map"&&depth<12){
+      const entries=value.entries.map(([k,v]):[string,ApexValue]=>[k,replace(v,depth+1)]);
+      if(entries.some(([,v],i)=>v!==value.entries[i][1])){
+        const changed:ApexValue={kind:"map",entries};
+        memo.set(value,changed);return changed;
+      }
+    }
+    return value;
+  };
+  let found=false;
+  for(const [key,value] of state.values){
+    const changed=replace(value);
+    if(changed!==value){state.values.set(key,changed);if(value===existing)found=true;}
+  }
+  return found;
+}
 function bool(value: ApexValue): boolean | undefined {
   if(value.kind!=="text"||value.values.length!==1)return undefined;
   if(value.values[0]==="true")return true;
@@ -293,11 +318,12 @@ export class ApexDataFlowEngine {
         state.values.get(receiver)?.kind==="collection"){
         call.lastIndex=open+1;continue;
       }
-      const argumentText=source.slice(open+1,close);
-      for(const [identifier,value] of state.values){
+      const argumentText=maskApexSource(source.slice(open+1,close));
+      for(const [identifier,value] of [...state.values]){
         if(value.kind!=="collection"&&value.kind!=="map")continue;
-        if(new RegExp("\\b"+identifier+"\\b").test(argumentText)){
-          state.values.set(identifier,unknown(
+        const escaped=identifier.replace(/[.*+?^$()|[\]{}\\]/g,"\\$&");
+        if(new RegExp("\\b"+escaped+"\\b","i").test(argumentText)){
+          replaceCollectionAliases(state,value,unknown(
             "Mutable collection "+identifier+" may be changed by unsupported method "+name+"."));
         }
       }
@@ -381,24 +407,8 @@ export class ApexDataFlowEngine {
       }
       if(next.kind==="collection"&&next.items.length>2000||next.kind==="map"&&next.entries.length>200)
         next=unknown("Collection mutation exceeded the bounded inventory size.");
-      let replaced=false;
-      if(existing.kind==="collection"||existing.kind==="map"){
-        // Propagate changes to direct aliases, including class-level aliases
-        // already read into this frame. Nested alias/escape handling is bounded.
-        const replace=(value:ApexValue,depth=0):ApexValue=>{
-          if(value===existing)return next;
-          if(value.kind==="map"&&depth<12){
-            const entries=value.entries.map(([k,v]):[string,ApexValue]=>[k,replace(v,depth+1)]);
-            if(entries.some(([,v],i)=>v!==value.entries[i][1]))return {kind:"map",entries};
-          }
-          return value;
-        };
-        for(const [key,value] of state.values){
-          const changed=replace(value);
-          if(changed!==value){state.values.set(key,changed);if(value===existing)replaced=true;}
-        }
-      }
-      if(!replaced)state.values.set(name.includes(".")?name.toLowerCase():name,next);
+      if(!replaceCollectionAliases(state,existing,next))
+        state.values.set(name.includes(".")?name.toLowerCase():name,next);
       return;
     }
     // Declarations, reassignment and += are independently versioned by state.
@@ -515,9 +525,11 @@ export class ApexDataFlowEngine {
       const changed=clone(state);
       for(const variable of mentioned){
         const target=variable.includes(".")?variable.toLowerCase():variable;
-        changed.values.set(target,unknown("Loop may change "+variable+" using runtime values. Iterable "+
+        const replacement=unknown("Loop may change "+variable+" using runtime values. Iterable "+
           (node.iterable??"(unsupported header)")+": "+(iterable.kind==="unknown"?iterable.reason:
-            "iteration count or value shape exceeds supported bounds.")));
+            "iteration count or value shape exceeds supported bounds."));
+        const existing=this.evaluate(variable,changed,depth);
+        if(!replaceCollectionAliases(changed,existing,replacement))changed.values.set(target,replacement);
       }
       // If query occurs inside the body, capture an explicitly unknown version.
       for(const site of this.sites){
