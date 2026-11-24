@@ -107,6 +107,12 @@ export function splitApexTopLevel(text: string, delimiter: string): string[] {
   let nesting = 0;
   for (let i = 0; i < masked.length; i++) {
     const ch = masked[i];
+    // Generic collection types can contain commas even at expression level
+    // (e.g. nested Map constructors). Do not mistake those for arguments.
+    if(ch==="<"&&delimiter===","&&/\b(?:Map|List|Set)\s*$/i.test(masked.slice(Math.max(0,i-40),i))){
+      const close=matchingPair(masked,i,"<",">");
+      if(close>=0&&/^[\w\s,.<>]+$/.test(masked.slice(i+1,close))){i=close;continue;}
+    }
     if ("([{".includes(ch)) nesting++;
     else if (")]}".includes(ch)) nesting--;
     else if (nesting === 0 && masked.startsWith(delimiter, i) && delimiter.length) {
@@ -167,7 +173,7 @@ export function parseApexStatements(
       const close = masked[open] === "(" ? matchingPair(masked,open) : -1;
       if (close < 0) { nodes.push({kind:"opaque",start:at,end,text:"Invalid for"}); break; }
       const header = source.slice(open+1,close);
-      const match = /^(?:[\w<>,.?]+\s+)+([A-Za-z_]\w*)\s*:\s*([\s\S]+)$/.exec(header.trim());
+      const match = /^(?:final\s+)?[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*(?:\s*<[\w\s,.<>?]+>)?(?:\[\])?\s+([A-Za-z_]\w*)\s*:\s*([\s\S]+)$/i.exec(header.trim());
       const body = parseBody(source,masked,close+1,end);
       nodes.push({kind:"for",start:at,end:body.next,loopVariable:match?.[1],iterable:match?.[2],
         body:body.nodes, text:header});
