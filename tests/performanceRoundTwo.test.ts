@@ -34,7 +34,7 @@ test("targeted batches preserve explicit grant and denial and recheck omitted fi
     if(soql.includes("QualifiedApiName = 'Third__c'"))return [row("Third__c",true,false)];
     return [];
   });
-  const gateway=new SalesforceUserFieldAccessGateway(conn);
+  const gateway=new SalesforceUserFieldAccessGateway(conn,undefined,{targetedBatching:true});
   const results=await Promise.all(["First__c","Second__c","Third__c"].map(field=>gateway.verifyUserField(user,"Account",field)));
   assert.deepEqual(results,[{read:true,edit:true},{read:false,edit:false},{read:true,edit:false}]);
   assert.equal(queries.filter(q=>q.includes("QualifiedApiName IN (")).length,1);
@@ -49,7 +49,7 @@ test("unsupported targeted IN query falls back to original exact checks",async()
     if(soql.includes("QualifiedApiName = 'First__c'"))return [row("First__c",false,false)];
     return [];
   });
-  const gateway=new SalesforceUserFieldAccessGateway(conn);
+  const gateway=new SalesforceUserFieldAccessGateway(conn,undefined,{targetedBatching:true});
   const result=await Promise.all(["First__c","Second__c"].map(field=>gateway.verifyUserField(user,"Account",field)));
   assert.deepEqual(result,[{read:false,edit:false},{read:null,edit:null}]);
   assert.equal(queries.filter(q=>q.includes("QualifiedApiName IN (")).length,1);
@@ -62,7 +62,21 @@ test("mismatched or conflicting targeted rows cannot grant access",async()=>{
     if(soql.includes("QualifiedApiName = 'First__c'"))return [row("First__c",false,false)];
     return [];
   });
-  const gateway=new SalesforceUserFieldAccessGateway(conn);
+  const gateway=new SalesforceUserFieldAccessGateway(conn,undefined,{targetedBatching:true});
   assert.deepEqual(await Promise.all(["First__c","Second__c"].map(field=>gateway.verifyUserField(user,"Account",field))),
     [{read:false,edit:false},{read:null,edit:null}]);
+});
+
+test("targeted batching is disabled by default for every gateway consumer",async()=>{
+  const queries:string[]=[];
+  const conn=connection(async soql=>{
+    queries.push(soql);
+    if(soql.includes("QualifiedApiName = 'First__c'"))return [row("First__c",true,false)];
+    return [];
+  });
+  const gateway=new SalesforceUserFieldAccessGateway(conn);
+  assert.deepEqual(await Promise.all(["First__c","Second__c"].map(field=>gateway.verifyUserField(user,"Account",field))),
+    [{read:true,edit:false},{read:null,edit:null}]);
+  assert.equal(queries.filter(q=>q.includes("QualifiedApiName IN (")).length,0);
+  assert.equal(queries.filter(q=>/FieldDefinition\.QualifiedApiName = /.test(q)).length,2);
 });
