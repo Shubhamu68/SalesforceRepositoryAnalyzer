@@ -115,7 +115,12 @@ export function evaluateApexExpression(
   if(/^-?\d+(?:\.\d+)?$/.test(expr))return {kind:"number",value:Number(expr)};
   if(/^(true|false)$/i.test(expr))return textValue(expr.toLowerCase());
   if(expr==="null")return textValue("null");
-  if(/^[A-Za-z_]\w*$/.test(expr))return context.values.get(expr)??unknown("Apex symbol "+expr+" has no proven value.");
+  if(/^[A-Za-z_]\w*$/.test(expr))return context.values.get(expr) ??
+    context.resolveCall?.("Apex.unqualifiedField",[textValue(expr)]) ??
+    unknown("Apex symbol "+expr+" has no proven value.");
+  const thisField=/^this\.([A-Za-z_]\w*)$/i.exec(expr);
+  if(thisField)return context.resolveCall?.("Apex.thisField",[textValue(thisField[1])]) ??
+    unknown("Instance field "+thisField[1]+" has no proven object-specific value.");
   const label=/^System\.Label\.([A-Za-z_]\w*)$/i.exec(expr);
   if(label)return context.resolveCall?.("System.Label",[textValue(label[1])]) ??
     unknown("Custom Label "+label[1]+" is not available from complete org metadata.");
