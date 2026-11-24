@@ -119,7 +119,7 @@ export class ApexStaticValueIndex {
           const direct=/^(?:\s*(?:=(?!=|>)|[+\-*/%&|^]=|\+\+|--)|\s*\[[^\];]*\]\s*(?:=(?!=|>)|[+\-*/%&|^]=|\+\+|--)|\s*\.\s*(?:add|addAll|remove|removeAll|retainAll|clear|put|putAll|set|sort|reverse)\s*\()/i.test(after)||/(?:\+\+|--)\s*$/.test(prefix);
           // A direct reference assignment can create an untracked mutable
           // alias. Treat it as an escape even if later writes are not found.
-          const alias=entry.collection&&/=\s*$/.test(prefix)&&!/==\s*$/.test(prefix)&&/^\s*;/.test(after);
+          const alias=entry.collection&&/^\s*;/.test(after)&&((/=\s*$/.test(prefix)&&!/==\s*$/.test(prefix))||/\breturn\s*$/i.test(prefix));
           if(!direct&&!alias)continue;
           const found=writes.get(key)??[];
           found.push({filePath:path.resolve(file.filePath),offset:hit.index});
@@ -150,7 +150,10 @@ export class ApexStaticValueIndex {
   /** Only invocation of the proven getter initializes this value. A bare
    * read of its backing field is still unknown. */
   resolveLazyGetter(owner:string,method:string):ApexValue|undefined{
-    return this.lazyGetters.get((owner+"."+method).toLowerCase());
+    const value=this.lazyGetters.get((owner+"."+method).toLowerCase());
+    // Defensive-copy getters must allocate an independent abstract collection
+    // on every call, not share the cached reference identity.
+    return value?.kind==="collection"?{...value,items:[...value.items]}:value;
   }
 
   hasClass(name:string):boolean{
