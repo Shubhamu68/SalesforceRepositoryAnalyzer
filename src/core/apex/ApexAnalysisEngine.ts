@@ -28,9 +28,19 @@ export type ApexInvocationAnalysis=ReturnType<ApexDataFlowEngine["analyze"]>&{si
 export function analyzeApexInvocations(source:string,filePath:string,select:ApexInvocationSelector,
   resolveExternal?:ApexExternalResolver,repositoryIndex?:ApexRepositoryMethodIndex,
   limits?:Pick<ApexFlowOptions,"maxOperations"|"maxPaths"|"maxDepth">):ApexInvocationAnalysis{
-  const engine=new ApexDataFlowEngine(source,{...limits,selectInvocation:select,resolveExternal,
+  const resolver:ApexExternalResolver=(name,args)=>{
+    if(name==="Apex.construct"&&args[0]?.kind==="text"&&args[0].values.length===1)
+      return repositoryIndex?.constructInstance(filePath,args[0].values[0],args.slice(1),resolveExternal)??resolveExternal?.(name,args);
+    return resolveExternal?.(name,args);
+  };
+  const engine=new ApexDataFlowEngine(source,{...limits,selectInvocation:select,resolveExternal:resolver,
     resolvePrivateContexts:owner=>repositoryIndex?.resolvePrivateContexts(filePath,owner,resolveExternal)});
   return {...engine.analyze(),sites:engine.sites};
+}
+/** Known caller variants do not imply complete coverage of a public method. */
+export function inspectApexInvocationContexts(filePath:string,offset:number,expressions:readonly string[],
+  resolveExternal?:ApexExternalResolver,repositoryIndex?:ApexRepositoryMethodIndex){
+  return repositoryIndex?.probeInvocationContexts(filePath,offset,expressions,resolveExternal);
 }
 export interface ApexAnalysisContext {
   readonly repositoryIndex?:ApexRepositoryMethodIndex;
