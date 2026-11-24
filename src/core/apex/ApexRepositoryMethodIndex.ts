@@ -6,6 +6,7 @@ import { unknown, type ApexValue } from "./ApexValueEvaluator.js";
 import {ApexInstanceIndex} from "./ApexInstanceModel.js";
 import { ApexStaticValueIndex } from "./ApexStaticValueIndex.js";
 import {discoverApexInvocations} from "./ApexInvocationModel.js";
+import {apexStateIdentity} from "./ApexStateIdentity.js";
 
 /** Shared repository evidence, independent of SOQL and persona permissions. */
 export interface ApexRepositorySource {
@@ -41,6 +42,10 @@ export interface ApexCallerEvidence {
   candidateCalls: number;
   /** Public/protected/global methods remain open to callers outside this repo. */
   externallyCallable: boolean;
+}
+/** Canonical argument-vector identity includes aliases, not only JSON content. */
+function argumentIdentity(args:readonly ApexValue[]):string{
+  return apexStateIdentity(new Map(args.map((value,i)=>[String(i),value])),false);
 }
 const MAX_METHOD_DEPTH = 6;
 const MAX_CALL_CONTEXTS = 64;
@@ -149,6 +154,11 @@ export class ApexRepositoryMethodIndex {
     return this.staticValues.resolve(name,metadata);
   }
 
+  /** Resolve only a source-proven lazy getter, not its uninitialized backing field. */
+  evaluateLazyGetter(owner:string,method:string):ApexValue|undefined{
+    return this.staticValues.resolveLazyGetter(owner,method);
+  }
+
   /** Resolve an unqualified static/instance member using its actual owner. */
   evaluateScopeField(owner:string,field:string,mode:"this"|"unqualified",
     inStaticMethod:boolean,metadata?: (name:string,args:ApexValue[])=>ApexValue|undefined):ApexValue|undefined {
@@ -196,7 +206,9 @@ export class ApexRepositoryMethodIndex {
     const crossClass=path.resolve(fromFilePath)!==path.resolve(owner.filePath);
     if(crossClass && (method.visibility==="private" || method.visibility==="unspecified"))
       return unknown("Cross-class Apex method is not provably accessible: "+name);
-    const id=owner.filePath+"|"+method.start+"|"+JSON.stringify(args)+"|"+
+    if(!method.isStatic)return unknown("Class-qualified helper is not proven static: "+name);
+    if(!args.length){const lazy=this.evaluateLazyGetter(cls,methodName);if(lazy!==undefined)return lazy;}
+    const id=owner.filePath+"|"+method.start+"|"+argumentIdentity(args)+"|"+
       this.scopeId(resolveExternal);
     if(this.active.has(id))return unknown("Recursive repository helper call: "+name);
     if(this.active.size>=MAX_METHOD_DEPTH)return unknown("Cross-class helper depth exceeded: "+name);
@@ -304,7 +316,7 @@ export class ApexRepositoryMethodIndex {
         if(failed)break;
       }
       if(!failed&&callCount>0&&contexts.length>0){
-        const distinct=new Map(contexts.map(args=>[JSON.stringify(args),args]));
+        const distinct=new Map(contexts.map(args=>[argumentIdentity(args),args]));
         if(distinct.size<=MAX_CALL_CONTEXTS)proven=[...distinct.values()];
       }
     }finally{
@@ -363,8 +375,12 @@ export class ApexRepositoryMethodIndex {
         this.resolveCallerContexts(call.caller.filePath,call.method,resolveExternal,nextStack,work);
       const seeds:(ApexValue[]|undefined)[]=closed?.length?closed:
         [undefined,...(upstream?.known??[]),...(upstream?.partial??[])];
+      // Repeated caller argument vectors from different hops need only one
+      // evaluation, while distinct reference alias topologies stay distinct.
+      const uniqueSeeds=[...new Map(seeds.map(seed=>[seed?argumentIdentity(seed):"runtime-entry",seed])).values()];
+      if(upstream?.bounded)bounded=true;
       let unproven=false;
-      for(const seed of seeds){
+      for(const seed of uniqueSeeds){
         if(work.remaining--<=0){bounded=true;break;}
         const engine=new ApexDataFlowEngine(call.caller.source,{maxOperations:2000,
           resolveExternal:(name,args)=>resolveExternal?.(name,args) ??
@@ -380,8 +396,8 @@ export class ApexRepositoryMethodIndex {
             // proven inputs. Only the selected invocation arguments need to
             // become complete later; no unknown placeholder becomes a grant.
             if(args.every(v=>v.kind==="unknown"))continue;
-            partial.set(JSON.stringify(args),args);
-          }else known.set(JSON.stringify(args),args);
+            partial.set(argumentIdentity(args),args);
+          }else known.set(argumentIdentity(args),args);
           if(known.size+partial.size>=MAX_CALL_CONTEXTS){bounded=true;break;}
         }
         if(bounded)break;
@@ -467,7 +483,7 @@ export class ApexRepositoryMethodIndex {
     const contexts=this.resolveCallerContexts(filePath,method,resolveExternal);
     const argumentsByValue=new Map<string,ApexValue[]>();
     const maxSeeds=8;
-    const seeds=[...contexts.known,...contexts.partial];
+    const seeds=[...new Map([...contexts.known,...contexts.partial].map(seed=>[argumentIdentity(seed),seed])).values()];
     let bounded=contexts.bounded||seeds.length>maxSeeds;
     for(const seed of seeds.slice(0,maxSeeds)){
       const engine=new ApexDataFlowEngine(owner.source,{maxOperations:2000,
