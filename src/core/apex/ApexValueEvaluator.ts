@@ -166,10 +166,15 @@ export function evaluateApexExpression(
   for(const operator of ["==","!="]){
     const parts=splitApexTopLevel(expr,operator);
     if(parts.length===2){
-      const a=onlyText(evaluateApexExpression(parts[0],context,depth+1));
-      const b=onlyText(evaluateApexExpression(parts[1],context,depth+1));
-      return a!==null&&b!==null?textValue(String(operator==="=="?a===b:a!==b))
-        :unknown("Runtime conditional comparison "+expr);
+      const left=evaluateApexExpression(parts[0],context,depth+1);
+      const right=evaluateApexExpression(parts[1],context,depth+1);
+      const a=onlyText(left),b=onlyText(right);
+      if(a!==null&&b!==null)
+        return textValue(String(operator==="=="?a===b:a!==b));
+      const cause=left.kind==="unknown"?left.reason:
+        right.kind==="unknown"?right.reason:
+        "Both operands must have one complete scalar value.";
+      return unknown("Runtime conditional comparison "+expr+" is unproven: "+cause);
     }
   }
   const plus=splitApexTopLevel(expr,"+");
@@ -241,9 +246,12 @@ export function evaluateApexExpression(
       if(!item.trim())continue;
       const pair=splitApexTopLevel(item,"=>");
       if(pair.length!==2)return unknown("Apex map initializer is malformed.");
-      const key=onlyText(evaluateApexExpression(pair[0],context,depth+1));
+      const keyValue=evaluateApexExpression(pair[0],context,depth+1);
+      const key=onlyText(keyValue);
       const val=evaluateApexExpression(pair[1],context,depth+1);
-      if(key===null)return unknown("Apex map initializer has an unproven key: "+pair[0].trim());
+      if(key===null)return unknown("Apex map initializer has an unproven key: "+
+        pair[0].trim()+"; cause: "+
+        (keyValue.kind==="unknown"?keyValue.reason:"Map key is not a single scalar."));
       if(val.kind==="unknown")
         return unknown("Apex map initializer for key "+key+" is unproven: "+val.reason);
       entries.push([key,val]);
