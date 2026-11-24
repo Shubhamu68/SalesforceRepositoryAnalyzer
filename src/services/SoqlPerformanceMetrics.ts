@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { performance } from "node:perf_hooks";
+import {withApexPerformance} from "../core/apex/ApexPerformance.js";
 
 /**
  * Opt-in, request-scoped SOQL diagnostics. Never print SOQL text, metadata
@@ -83,7 +84,7 @@ export async function withSoqlPerformance<T>(work: () => Promise<T>): Promise<T>
     const started = performance.now();
     let ok = false;
     try {
-      const result = await work();
+      const result = await withApexPerformance({count:(name,count)=>recordSoqlCount("apex."+name,count),duration:(name,ms)=>addTime(context,"apex."+name,ms)},work);
       ok = true;
       return result;
     } finally {
@@ -91,7 +92,7 @@ export async function withSoqlPerformance<T>(work: () => Promise<T>): Promise<T>
       // not another sequential phase to add onto the end-to-end wall clock.
       console.info(`[SOQL Perf] total: ${elapsedMs(started)} ms (${ok ? "ok" : "failed"})`);
       for (const [name, ms] of context.timings) {
-        console.info(`[SOQL Perf] ${name}: ${ms} ms`);
+        console.info(`[SOQL Perf] ${name}: ${Math.round(ms)} ms`);
       }
       for (const [name, value] of context.counts) {
         console.info(`[SOQL Perf] ${name}: ${value}`);
