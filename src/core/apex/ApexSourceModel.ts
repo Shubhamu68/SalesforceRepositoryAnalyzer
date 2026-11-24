@@ -264,20 +264,41 @@ export function indexApexMethods(source:string):IndexedApexMethod[]{
   if(entry?.methods){countApex("syntax.method_cache_hit");return entry.methods;}
   countApex("syntax.method_cache_miss");
   const methods=timeApex("syntax.parse_ms",()=>indexMethodsUncached(source));
-  if(entry){
-    // Source nodes are shared read-only syntax. Freeze recursively to prevent
-    // a consumer from contaminating another request's parsed representation.
-    const freezeNodes=(nodes:SourceNode[])=>{
-      for(const node of nodes){if(node.body)freezeNodes(node.body);if(node.otherwise)freezeNodes(node.otherwise);Object.freeze(node);}
-      Object.freeze(nodes);
-    };
-    for(const method of methods){freezeNodes(method.body);Object.freeze(method.parameters);if(method.parameterTypes)Object.freeze(method.parameterTypes);Object.freeze(method);}
-    Object.freeze(methods);entry.methods=methods;
-  }
+  if(entry){freezeMethods(methods);entry.methods=methods;}
   return methods;
 }
-function indexMethodsUncached(source: string): IndexedApexMethod[] {
-  const masked = maskApexSource(source);
+function freezeMethods(methods:IndexedApexMethod[]):IndexedApexMethod[]{
+  const freezeNodes=(nodes:SourceNode[])=>{
+    for(const node of nodes){if(node.body)freezeNodes(node.body);if(node.otherwise)freezeNodes(node.otherwise);Object.freeze(node);}
+    Object.freeze(nodes);
+  };
+  for(const method of methods){freezeNodes(method.body);Object.freeze(method.parameters);if(method.parameterTypes)Object.freeze(method.parameterTypes);Object.freeze(method);}
+  Object.freeze(methods);return methods;
+}
+
+/** One syntax inventory per repository build. Masks are released after the
+ * indexes are constructed; method trees are retained by the graph owners.
+ * No evaluated values, metadata or permissions enter this inventory. */
+export class ApexRepositorySyntaxInventory{
+  private readonly entries=new Map<string,{masked:string;methods?:IndexedApexMethod[]}>();
+  masked(source:string):string{
+    const entry=this.entries.get(source);
+    if(entry){countApex("syntax.inventory_mask_hit");return entry.masked;}
+    const masked=maskUncached(source);
+    this.entries.set(source,{masked});return masked;
+  }
+  methods(source:string):IndexedApexMethod[]{
+    const masked=this.masked(source);
+    const entry=this.entries.get(source)!;
+    if(entry.methods){countApex("syntax.method_cache_hit");return entry.methods;}
+    countApex("syntax.method_cache_miss");
+    entry.methods=freezeMethods(timeApex("syntax.parse_ms",()=>indexMethodsUncached(source,masked)));
+    return entry.methods;
+  }
+  clear():void{this.entries.clear();}
+}
+
+function indexMethodsUncached(source: string,masked=maskApexSource(source)): IndexedApexMethod[] {
   const methods: IndexedApexMethod[] = [];
   const call = /\b([A-Za-z_]\w*)\s*\(/g;
   let match: RegExpExecArray | null;
