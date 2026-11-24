@@ -57,7 +57,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
           (evidence.externallyCallable
             ?" Method is externally callable; complete caller coverage cannot be established from repository metadata."
             :"");
-        const scoped=inspectApexInvocationContexts(filePath,site.offset,site.arguments,resolveExternal,repositoryIndex);
+        const scoped=inspectApexInvocationContexts(filePath,site.offset,[site.argument],resolveExternal,repositoryIndex);
         if(scoped&&(scoped.contexts.known.length||scoped.contexts.partial.length)){
           const variants=new Set<string>();
           // Do not publish a guessed security mode, even if SELECT is valid.
