@@ -365,7 +365,8 @@ function lazyGetterCandidates(masked:string,depth:Int16Array,
     const [guard,ret]=method.body;
     if(method.body.length!==2||guard?.kind!=="if"||guard.otherwise?.length||guard.body?.length!==1||
       guard.body[0].kind!=="statement"||ret?.kind!=="statement")continue;
-    const test=/^\s*([A-Za-z_]\w*)\s*==\s*null\s*$/i.exec(stripApexComments(guard.condition??""));
+    const condition=stripApexComments(guard.condition??"");
+    const test=/^\s*([A-Za-z_]\w*)\s*==\s*null\s*$/i.exec(condition)??/^\s*null\s*==\s*([A-Za-z_]\w*)\s*$/i.exec(condition);
     if(!test)continue;
     const entry=fields.get(test[1].toLowerCase());
     if(!entry?.isStatic||entry.initializerPresent&&!/^null$/i.test(entry.initializer.trim()))continue;
