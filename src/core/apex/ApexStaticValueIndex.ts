@@ -1,6 +1,6 @@
 import path from "node:path";
 import {evaluateApexExpression, unknown, type ApexValue} from "./ApexValueEvaluator.js";
-import {maskApexSource, matchingPair, parseApexStatements, stripApexComments} from "./ApexSourceModel.js";
+import {maskApexSource, matchingPair, parseApexStatements, stripApexComments, indexApexMethods} from "./ApexSourceModel.js";
 
 export interface ApexStaticSource {filePath:string;source:string;}
 interface Declaration {
@@ -9,7 +9,11 @@ interface Declaration {
   initializer:string;
   isStatic:boolean;
   initializerPresent:boolean;
+  declarationStart:number;
   declarationEnd:number;
+  collection:boolean;
+  filePath:string;
+  laterWrite?:boolean;
   blockValue?:ApexValue;
 }
 type MetadataResolver=(name:string,args:ApexValue[])=>ApexValue|undefined;
@@ -20,10 +24,9 @@ const MAX_DEPTH=24;
 /**
  * Repository-wide declared-initializer snapshot for Apex scalar and collection members.
  *
- * Analysis policy: a complete, evaluable class-level initializer is the
- * assumed value, independent of visibility, final, annotations, or possible
- * reassignment elsewhere. This is repository-based query reconstruction,
- * not proof that every runtime execution sees the initializer.
+ * Analysis policy: a complete, evaluable class-level initializer is a
+ * repository snapshot unless visible writes or direct collection aliases
+ * invalidate it. Indirect effects remain outside this bounded model.
  * Scope, missing initializers, unsupported values, and dependency cycles
  * remain subject to the same bounded evaluation rules.
  */
@@ -31,11 +34,13 @@ export class ApexStaticValueIndex {
   private readonly declarations=new Map<string,Declaration[]>();
   private readonly classOwners=new Map<string,Set<string>>();
   private readonly cache=new Map<string,ApexValue>();
+  private readonly lazyGetters=new Map<string,ApexValue>();
   private readonly metadataCaches=new WeakMap<MetadataResolver,Map<string,ApexValue>>();
 
   constructor(sources:readonly ApexStaticSource[]){
     let total=0;
     const blockCandidates:Array<{entry:Declaration;filePath:string;start:number;end:number;value:ApexValue}>=[];
+    const lazyCandidates:Array<{entry:Declaration;filePath:string;start:number;end:number;value:ApexValue;getter:string}>=[];
     for(const file of sources){
       const masked=maskApexSource(file.source);
       const classMatch=/\bclass\s+([A-Za-z_]\w*)\b/i.exec(masked);
@@ -75,7 +80,8 @@ export class ApexStaticValueIndex {
           owner,field,initializer:expr,
           isStatic:modifiers.includes("static"),
           initializerPresent:initialized&&expr.length>0,
-          declarationEnd:semi+1,
+          declarationStart:hit.index,declarationEnd:semi+1,
+          collection:/^(?:List|Set|Map)\s*</i.test(hit[2]),filePath:path.resolve(file.filePath),
         };
         const key=(owner+"."+field).toLowerCase();
         this.declarations.set(key,[...(this.declarations.get(key)??[]),entry]);
@@ -84,42 +90,67 @@ export class ApexStaticValueIndex {
       }
       for(const candidate of staticBlockCandidates(file.source,masked,depth,classBrace,classEnd,ownFields))
         blockCandidates.push({...candidate,filePath:path.resolve(file.filePath)});
+      for(const candidate of lazyGetterCandidates(file.source,masked,depth,classBrace,classEnd,ownFields))
+        lazyCandidates.push({...candidate,filePath:path.resolve(file.filePath)});
     }
-    // Repository-visible direct writes invalidate new block-derived snapshots.
-    // Keep legacy declaration-only snapshot behavior unchanged in this slice.
-    if(blockCandidates.length){
+    // Direct writes and simple collection escapes are repository evidence,
+    // not a proof of runtime immutability. Exclude each declaration and
+    // explicitly supported initialization assignment from its own write set.
+    const candidates=[...this.declarations.values()].flat().filter(e=>e.isStatic);
+    if(candidates.length){
+      const byKey=new Map(candidates.map(e=>[(e.owner+"."+e.field).toLowerCase(),e]));
+      const names=new Set(candidates.map(e=>e.field.toLowerCase()));
       const writes=new Map<string,Array<{filePath:string;offset:number}>>();
-      const keys=new Set(blockCandidates.map(c=>(c.entry.owner+"."+c.entry.field).toLowerCase()));
-      const fieldNames=new Set(blockCandidates.map(c=>c.entry.field.toLowerCase()));
       for(const file of sources){
         const masked=maskApexSource(file.source);
         const owner=/\bclass\s+([A-Za-z_]\w*)\b/i.exec(masked)?.[1];
         if(!owner)continue;
-        // Include direct assignments, compound assignments, increments, indexed
-        // assignments and standard collection mutators. Shadowed locals may
-        // conservatively invalidate a candidate; aliases are not proven here.
         const token=/\b[A-Za-z_]\w*\b/g;
         let hit:RegExpExecArray|null;
         while((hit=token.exec(masked))!==null){
-          if(!fieldNames.has(hit[0].toLowerCase()))continue;
+          if(!names.has(hit[0].toLowerCase()))continue;
           const before=masked.slice(Math.max(0,hit.index-256),hit.index);
           const qualified=/\b([A-Za-z_]\w*)\s*\.\s*$/.exec(before);
           const key=((qualified?.[1]??owner)+"."+hit[0]).toLowerCase();
-          if(!keys.has(key))continue;
+          const entry=byKey.get(key);
+          if(!entry)continue;
           const after=masked.slice(token.lastIndex,token.lastIndex+256);
           const prefix=qualified?before.slice(0,qualified.index):before;
-          if(!/^(?:\s*(?:=(?!=|>)|[+\-*/%&|^]=|\+\+|--)|\s*\[[^\];]*\]\s*(?:=(?!=|>)|[+\-*/%&|^]=|\+\+|--)|\s*\.\s*(?:add|addAll|remove|removeAll|retainAll|clear|put|putAll|set|sort)\s*\()/i.test(after)&&!/(?:\+\+|--)\s*$/.test(prefix))continue;
+          const direct=/^(?:\s*(?:=(?!=|>)|[+\-*/%&|^]=|\+\+|--)|\s*\[[^\];]*\]\s*(?:=(?!=|>)|[+\-*/%&|^]=|\+\+|--)|\s*\.\s*(?:add|addAll|remove|removeAll|retainAll|clear|put|putAll|set|sort|reverse)\s*\()/i.test(after)||/(?:\+\+|--)\s*$/.test(prefix);
+          // A direct reference assignment can create an untracked mutable
+          // alias. Treat it as an escape even if later writes are not found.
+          const alias=entry.collection&&/=\s*$/.test(prefix)&&!/==\s*$/.test(prefix)&&/^\s*;/.test(after);
+          if(!direct&&!alias)continue;
           const found=writes.get(key)??[];
           found.push({filePath:path.resolve(file.filePath),offset:hit.index});
           writes.set(key,found);
         }
       }
+      const conflict=(entry:Declaration,allowed?:{filePath:string;start:number;end:number})=>{
+        const key=(entry.owner+"."+entry.field).toLowerCase();
+        return (writes.get(key)??[]).some(w=>{
+          if(w.filePath===entry.filePath&&w.offset>=entry.declarationStart&&w.offset<entry.declarationEnd)return false;
+          return !allowed||w.filePath!==allowed.filePath||w.offset<allowed.start||w.offset>=allowed.end;
+        });
+      };
+      for(const entry of candidates)if(entry.initializerPresent)entry.laterWrite=conflict(entry);
       for(const candidate of blockCandidates){
         const key=(candidate.entry.owner+"."+candidate.entry.field).toLowerCase();
-        const conflicting=(writes.get(key)??[]).some(w=>w.filePath!==candidate.filePath||w.offset<candidate.start||w.offset>=candidate.end);
-        candidate.entry.blockValue=conflicting?unknown("Apex static-block field "+key+" has additional repository-visible writes."):candidate.value;
+        candidate.entry.blockValue=conflict(candidate.entry,candidate)
+          ?unknown("Apex static-block field "+key+" has additional repository-visible writes."):candidate.value;
+      }
+      for(const candidate of lazyCandidates){
+        const key=(candidate.entry.owner+"."+candidate.getter).toLowerCase();
+        if(!conflict(candidate.entry,candidate)&&this.classOwners.get(candidate.entry.owner.toLowerCase())?.size===1&&
+          !this.lazyGetters.has(key))this.lazyGetters.set(key,candidate.value);
       }
     }
+  }
+
+  /** Only invocation of the proven getter initializes this value. A bare
+   * read of its backing field is still unknown. */
+  resolveLazyGetter(owner:string,method:string):ApexValue|undefined{
+    return this.lazyGetters.get((owner+"."+method).toLowerCase());
   }
 
   hasClass(name:string):boolean{
@@ -171,6 +202,7 @@ export class ApexStaticValueIndex {
     if(!allowInstance&&!entry.isStatic)
       return unknown("Apex member "+key+" is an instance field (not static); class-qualified references cannot prove its value without a specific instance.");
     if(entry.blockValue!==undefined)return entry.blockValue;
+    if(entry.laterWrite)return unknown("Apex static field "+key+" has additional repository-visible writes or an untracked collection alias.");
     if(!entry.initializerPresent)
       return unknown(entry.isStatic?"Apex static field "+key+" has no declaration initializer; static initialization is not proven.":
         "Instance field "+key+" requires constructor or initializer-block tracking.");
@@ -257,6 +289,43 @@ function staticBlockCandidates(source:string,masked:string,depth:Int16Array,
       result.push({entry,start:node.start,end:node.end,value});
     }
     blocks.lastIndex=close+1;
+  }
+  return result;
+}
+
+/** Canonical lazy getter: if (field == null) { field = literal; } return field;
+ * or return a defensive List/Set copy. No arbitrary helpers or side effects.
+ * The backing declaration must be blank or explicitly null. */
+function lazyGetterCandidates(source:string,masked:string,depth:Int16Array,
+  classBrace:number,classEnd:number,fields:ReadonlyMap<string,Declaration>):
+  Array<{entry:Declaration;start:number;end:number;value:ApexValue;getter:string}>{
+  const result:Array<{entry:Declaration;start:number;end:number;value:ApexValue;getter:string}>=[];
+  const methods=indexApexMethods(source);
+  for(const method of methods){
+    if(!method.isStatic||method.parameters.length||method.start<=classBrace||method.end>=classEnd||
+      depth[method.start-1]!==1||methods.filter(m=>m.name.toLowerCase()===method.name.toLowerCase()&&m.parameters.length===0).length!==1)continue;
+    const [guard,ret]=method.body;
+    if(method.body.length!==2||guard?.kind!=="if"||guard.otherwise?.length||guard.body?.length!==1||
+      guard.body[0].kind!=="statement"||ret?.kind!=="statement")continue;
+    const test=/^\s*([A-Za-z_]\w*)\s*==\s*null\s*$/i.exec(stripApexComments(guard.condition??""));
+    if(!test)continue;
+    const entry=fields.get(test[1].toLowerCase());
+    if(!entry?.isStatic||entry.initializerPresent&&!/^null$/i.test(entry.initializer.trim()))continue;
+    const node=guard.body[0];
+    const assignment=/^\s*([A-Za-z_]\w*)\s*=(?!=|>)\s*([\s\S]+);\s*$/.exec(stripApexComments(node.text??""));
+    if(!assignment||assignment[1].toLowerCase()!==entry.field.toLowerCase())continue;
+    const initial=evaluateApexExpression(assignment[2],{values:new Map()});
+    if(initial.kind==="unknown"||initial.kind==="null"||!completeInitializer(initial))continue;
+    const returned=/^\s*return\s+([\s\S]+);\s*$/i.exec(stripApexComments(ret.text??""))?.[1].trim();
+    if(!returned)continue;
+    if(entry.collection){
+      // Returning the mutable reference itself is an unproven escape.
+      const copy=/^new\s+(?:List|Set)\s*<[\w\s,.<>]+>\s*\(\s*([A-Za-z_]\w*)\s*\)$/i.exec(returned);
+      if(!copy||copy[1].toLowerCase()!==entry.field.toLowerCase())continue;
+    }else if(returned.toLowerCase()!==entry.field.toLowerCase())continue;
+    const value=evaluateApexExpression(returned,{values:new Map([[entry.field,initial],[test[1],initial]])});
+    if(value.kind==="unknown"||!completeInitializer(value))continue;
+    result.push({entry,start:node.start,end:node.end,value,getter:method.name});
   }
   return result;
 }
