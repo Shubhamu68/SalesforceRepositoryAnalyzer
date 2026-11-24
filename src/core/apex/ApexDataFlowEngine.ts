@@ -382,8 +382,8 @@ export class ApexDataFlowEngine {
     const indexedWrite=/^([A-Za-z_]\w*)\s*\[[\s\S]+\]\s*(?:\+?=)(?!=|>)/.exec(original);
     if(indexedWrite){
       const existing=state.values.get(indexedWrite[1]);
-      if(existing?.kind==="instanceList"){
-        replaceCollectionAliases(state,existing,unknown("Indexed custom Apex list assignment is not proven."));
+      if(existing?.kind==="instanceList"||existing?.kind==="collection"||existing?.kind==="map"){
+        replaceCollectionAliases(state,existing,unknown("Indexed Apex collection assignment is not proven."));
         return;
       }
     }
@@ -419,6 +419,21 @@ export class ApexDataFlowEngine {
         else state.values.set(name,added);
       }
       this.taintCollectionsPassedToUnknownCalls(rhs,state);
+      return;
+    }
+    // Retained unfamiliar compound assignments/increments must not leave
+    // stale scalar or receiver state behind. Unsupported is not a no-op.
+    const visible=maskApexSource(original).trim();
+    const compound=/^(?:\+\+|--)\s*((?:[A-Za-z_]\w*\s*\.\s*)?[A-Za-z_]\w*)\s*$/.exec(visible)?.[1]??
+      /^((?:[A-Za-z_]\w*\s*\.\s*)?[A-Za-z_]\w*)\s*(?:\+\+|--|[-*/%&|^]=|<<=|>>=)/.exec(visible)?.[1];
+    if(compound){
+      const target=compound.replace(/\s+/g,"");
+      const existing=this.evaluate(target,state,depth);
+      const next=unknown("Unsupported Apex write to "+target+"; previous value cannot be retained.");
+      const receiver=target.includes(".")?state.values.get(target.split(".")[0]):undefined;
+      if(receiver?.kind==="instance")replaceCollectionAliases(state,receiver,next);
+      else if(!replaceCollectionAliases(state,existing,next))
+        state.values.set(target.includes(".")?target.toLowerCase():target,next);
       return;
     }
     const declaration=trackedStandaloneDeclaration(original);
