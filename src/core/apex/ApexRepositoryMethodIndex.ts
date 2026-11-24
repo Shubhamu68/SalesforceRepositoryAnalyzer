@@ -192,6 +192,11 @@ export class ApexRepositoryMethodIndex {
     }
   }
 
+  indexedMethods(filePath:string,source:string):IndexedApexMethod[]|undefined{
+    const owner=this.paths.get(path.resolve(filePath));
+    return owner?.source===source?owner.methods:undefined;
+  }
+
   constructInstance(filePath:string,name:string,args:ApexValue[],resolveExternal?: (name:string,args:ApexValue[])=>ApexValue|undefined):ApexValue|undefined{
     return this.instances.construct(name,args,filePath,resolveExternal);
   }
@@ -265,7 +270,7 @@ export class ApexRepositoryMethodIndex {
     this.active.add(id);
     let result:ApexValue;
     try {
-      const engine=new ApexDataFlowEngine(owner.source,{
+      const engine=new ApexDataFlowEngine(owner.source,{sourceMethods:owner.methods,
         resolveExternal:(nestedName,nestedArgs)=>resolveExternal?.(nestedName,nestedArgs) ??
           this.evaluateReturn(owner.filePath,nestedName,nestedArgs,resolveExternal),
       });
@@ -348,7 +353,7 @@ export class ApexRepositoryMethodIndex {
         }
         const seeds=callerContexts?.length?callerContexts:[undefined];
         for(const seed of seeds){
-          const engine=new ApexDataFlowEngine(owner.source,{
+          const engine=new ApexDataFlowEngine(owner.source,{sourceMethods:owner.methods,
             resolveExternal:(name,args)=>resolveExternal?.(name,args) ??
               this.evaluateReturn(owner.filePath,name,args,resolveExternal),
           });
@@ -430,7 +435,7 @@ export class ApexRepositoryMethodIndex {
       let unproven=false;
       for(const seed of uniqueSeeds){
         if(work.remaining--<=0){bounded=true;break;}
-        const engine=new ApexDataFlowEngine(call.caller.source,{maxOperations:2000,
+        const engine=new ApexDataFlowEngine(call.caller.source,{sourceMethods:call.caller.methods,maxOperations:2000,
           resolveExternal:(name,args)=>resolveExternal?.(name,args) ??
             this.evaluateReturn(call.caller.filePath,name,args,resolveExternal),
         });
@@ -485,7 +490,7 @@ export class ApexRepositoryMethodIndex {
     const receivers=new Map<string,Extract<ApexValue,{kind:"instance"}>>();
     let bounded=calls.length>8;
     for(const call of calls.slice(0,8)){
-      const engine=new ApexDataFlowEngine(call.caller.source,{maxOperations:2000,
+      const engine=new ApexDataFlowEngine(call.caller.source,{sourceMethods:call.caller.methods,maxOperations:2000,
         resolveExternal:(name,args)=>{
           if(name==="Apex.construct"&&args[0]?.kind==="text"&&args[0].values.length===1)
             return this.constructInstance(call.caller.filePath,args[0].values[0],args.slice(1),resolveExternal);
@@ -501,7 +506,7 @@ export class ApexRepositoryMethodIndex {
     }
     const argumentsByValue=new Map<string,ApexValue[]>();
     for(const instance of receivers.values()){
-      const engine=new ApexDataFlowEngine(owner.source,{maxOperations:2000,
+      const engine=new ApexDataFlowEngine(owner.source,{sourceMethods:owner.methods,maxOperations:2000,
         resolveExternal:(name,args)=>{
           if(name==="Apex.scopeField"&&args[0]?.kind==="text"&&args[0].values[0]?.toLowerCase()===owner.className.toLowerCase()&&args[1]?.kind==="text"){
             const fieldName=args[1].values[0]?.toLowerCase();
@@ -536,7 +541,7 @@ export class ApexRepositoryMethodIndex {
     const selected=selectApexCallerSeeds(seeds,method.parameters,relevant,maxSeeds);
     let bounded=contexts.bounded||seeds.length>selected.length;
     for(const seed of selected){
-      const engine=new ApexDataFlowEngine(owner.source,{maxOperations:2000,
+      const engine=new ApexDataFlowEngine(owner.source,{sourceMethods:owner.methods,maxOperations:2000,
         resolveExternal:(name,args)=>resolveExternal?.(name,args) ??
           this.evaluateReturn(owner.filePath,name,args,resolveExternal)});
       for(const args of engine.evaluateArgumentsAt(method,offset,expressions,seed)){
@@ -576,7 +581,7 @@ export class ApexRepositoryMethodIndex {
       const seeds=privateInputs?.length?privateInputs:[undefined];
       let allKnown=true;
       for(const seed of seeds){
-        const engine=new ApexDataFlowEngine(call.caller.source,{
+        const engine=new ApexDataFlowEngine(call.caller.source,{sourceMethods:call.caller.methods,
           resolveExternal:(name,args)=>this.evaluateReturn(call.caller.filePath,name,args),
         });
         const contexts=engine.evaluateArgumentsAt(call.method,call.offset,call.expressions,seed);
