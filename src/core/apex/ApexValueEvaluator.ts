@@ -310,6 +310,25 @@ export function evaluateApexExpression(
           unknown("Map.get key "+key+" absent from proven configuration.");
       }
     }
+    // Pure scalar conversions used by immutable static initializers and
+    // dynamic SELECT fragments. Runtime/collection inputs remain unknown.
+    if(lname==="string.valueof"&&args.length===1){
+      if(args[0].kind==="text")return args[0];
+      if(args[0].kind==="number")return textValue(String(args[0].value));
+      return unknown("String.valueOf argument has no proven scalar value.");
+    }
+    if((lname==="integer.valueof"||lname==="decimal.valueof"||
+        lname==="long.valueof")&&args.length===1){
+      const input=onlyText(args[0]);
+      if(input===null||!/^-?\d+(?:\.\d+)?$/.test(input))
+        return unknown(name+" requires a proven numeric scalar.");
+      const value=Number(input);
+      if(!Number.isFinite(value))
+        return unknown(name+" numeric result is not finite.");
+      if(lname==="integer.valueof"&&!Number.isInteger(value))
+        return unknown("Integer.valueOf received a non-integer.");
+      return {kind:"number",value};
+    }
     if(lname==="string.join"&&args.length===2){
       if(args[0].kind!=="collection")return unknown("String.join collection is not known: "+
         (args[0].kind==="unknown"?args[0].reason:"input is not a collection."));
