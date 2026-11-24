@@ -80,3 +80,16 @@ test("targeted batching is disabled by default for every gateway consumer",async
   assert.equal(queries.filter(q=>q.includes("QualifiedApiName IN (")).length,0);
   assert.equal(queries.filter(q=>/FieldDefinition\.QualifiedApiName = /.test(q)).length,2);
 });
+
+
+test("diagnostic categories identify metadata operations without exposing custom names or server strings",async()=>{
+  const {categoryOf,safeSalesforceErrorCode}=await import("../src/services/SoqlPerformanceMetrics.js");
+  assert.equal(categoryOf("SELECT Value FROM ExternalString WHERE Name='Private_Label'"),"org.custom_label");
+  assert.equal(categoryOf("SELECT Metadata FROM FieldSet"),"org.field_set");
+  assert.equal(categoryOf("SELECT DeveloperName FROM Private_Config__mdt"),"org.custom_metadata");
+  assert.equal(categoryOf("SELECT Id FROM UserLogin"),"org.persona_inventory");
+  assert.equal(categoryOf("SELECT Id FROM EntityDefinition"),"org.schema_metadata");
+  assert.equal(categoryOf("SELECT Id FROM Private_Object__c WHERE Name='FROM ExternalString'"),"org.other");
+  assert.equal(safeSalesforceErrorCode("INVALID_FIELD"),"INVALID_FIELD");
+  assert.equal(safeSalesforceErrorCode("private source or data"),"OTHER");
+});
