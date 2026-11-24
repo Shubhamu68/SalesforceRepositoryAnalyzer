@@ -112,6 +112,7 @@ export class ApexRepositoryMethodIndex {
   private readonly privateContextStack=new Set<string>();
   private readonly active=new Set<string>();
   private readonly summaries=new Map<string,ApexValue>();
+  private readonly argumentProbes=new Map<string,ApexValue[][]>();
   private readonly scopes=new WeakMap<Function,number>();
   private nextScope=1;
 
@@ -165,6 +166,7 @@ export class ApexRepositoryMethodIndex {
         const candidate=receiver&&receiver.toLowerCase()!=="this"
           ?this.classes.get(receiver.toLowerCase()):[owner];
         if(!candidate||candidate.length!==1)continue;
+        if(!candidate[0].methods.some(m=>m.name.toLowerCase()===name.toLowerCase()))continue;
         const opening=masked.indexOf("(",match.index);
         const close=matchingPair(masked,opening);
         if(close<0)continue;
@@ -281,7 +283,7 @@ export class ApexRepositoryMethodIndex {
       result=timeApex("helper.repository_evaluation_ms",()=>engine.summarizeMethodReturn(method,args));
       if(result.kind==="instance"||result.kind==="instanceList")result=unknown("Instance-return alias transfer is not yet proven.");
     }finally{this.active.delete(id);}
-    if(this.summaries.size>=MAX_CACHED_SUMMARIES)this.summaries.clear();
+    if(this.summaries.size>=MAX_CACHED_SUMMARIES)this.summaries.delete(this.summaries.keys().next().value!);
     if(cacheable&&(result.kind==="text"||result.kind==="number"||result.kind==="null"||result.kind==="unknown"))this.summaries.set(id,result);
     return result;
   }
@@ -397,6 +399,25 @@ export class ApexRepositoryMethodIndex {
       arity:owner.parameters.length,visibility:owner.visibility}:undefined;
   }
 
+  /** Reuse complete scalar argument probes only in the same resolver scope.
+   * No mutable reference results, failed probes or cross-pass metadata reuse. */
+  private probeArguments(owner:IndexedSource,method:IndexedApexMethod,offset:number,expressions:readonly string[],seed:ApexValue[]|undefined,
+    resolveExternal?: (name:string,args:ApexValue[])=>ApexValue|undefined):ApexValue[][]{
+    const scalar=(v:ApexValue)=>v.kind==="text"||v.kind==="number"||v.kind==="null";
+    const eligible=!this.active.size&&(!seed||seed.every(v=>scalar(v)||v.kind==="unknown"));
+    const key=eligible?JSON.stringify([owner.filePath,method.start,offset,expressions,seed?argumentIdentity(seed):null,this.scopeId(resolveExternal)]):undefined;
+    const cached=key?this.argumentProbes.get(key):undefined;
+    if(cached){countApex("caller.probe_cache_hit");return cached.map(args=>[...args]);}
+    const engine=new ApexDataFlowEngine(owner.source,{sourceMethods:owner.methods,maxOperations:2000,
+      resolveExternal:(name,args)=>resolveExternal?.(name,args)??this.evaluateReturn(owner.filePath,name,args,resolveExternal)});
+    const values=engine.evaluateArgumentsAt(method,offset,expressions,seed);
+    if(key&&values.length&&values.every(args=>args.every(scalar))){
+      if(this.argumentProbes.size>=MAX_CACHED_SUMMARIES)this.argumentProbes.delete(this.argumentProbes.keys().next().value!);
+      this.argumentProbes.set(key,values.map(args=>[...args]));
+    }
+    return values;
+  }
+
   /**
    * Bounded incoming argument propagation across explicit indexed calls.
    * Known contexts are evidence only for externally callable methods.
@@ -440,11 +461,7 @@ export class ApexRepositoryMethodIndex {
       let unproven=false;
       for(const seed of uniqueSeeds){
         if(work.remaining--<=0){bounded=true;break;}
-        const engine=new ApexDataFlowEngine(call.caller.source,{sourceMethods:call.caller.methods,maxOperations:2000,
-          resolveExternal:(name,args)=>resolveExternal?.(name,args) ??
-            this.evaluateReturn(call.caller.filePath,name,args,resolveExternal),
-        });
-        const contexts=engine.evaluateArgumentsAt(call.method,call.offset,call.expressions,seed);
+        const contexts=this.probeArguments(call.caller,call.method,call.offset,call.expressions,seed,resolveExternal);
         for(const args of contexts){
           if(args.length!==target.parameters.length){unproven=true;continue;}
           const incomplete=args.some(v=>v.kind==="unknown");
@@ -548,10 +565,7 @@ export class ApexRepositoryMethodIndex {
     countApex("caller.selected_seeds",selected.length);
     let bounded=contexts.bounded||seeds.length>selected.length;
     for(const seed of selected){
-      const engine=new ApexDataFlowEngine(owner.source,{sourceMethods:owner.methods,maxOperations:2000,
-        resolveExternal:(name,args)=>resolveExternal?.(name,args) ??
-          this.evaluateReturn(owner.filePath,name,args,resolveExternal)});
-      for(const args of engine.evaluateArgumentsAt(method,offset,expressions,seed)){
+      for(const args of this.probeArguments(owner,method,offset,expressions,seed,resolveExternal)){
         if(args.some(v=>v.kind==="unknown"))continue;
         argumentsByValue.set(JSON.stringify(args),args);
       }
