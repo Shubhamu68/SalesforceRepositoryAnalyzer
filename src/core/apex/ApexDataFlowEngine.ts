@@ -56,12 +56,18 @@ function clone(state:State):State {return {values:new Map(state.values),stopped:
 /** Replace an abstract collection in this frame, including tracked aliases
  * and references stored in a bounded nested map. Never mutate snapshot objects. */
 function replaceCollectionAliases(state:State,existing:ApexValue,next:ApexValue):boolean{
-  if(existing.kind!=="collection"&&existing.kind!=="map"&&existing.kind!=="instance")return false;
+  if(existing.kind!=="collection"&&existing.kind!=="map"&&existing.kind!=="instance"&&existing.kind!=="instanceList")return false;
   const memo=new Map<ApexValue,ApexValue>();
   const replace=(value:ApexValue,depth=0):ApexValue=>{
     if(value===existing)return next;
     const cached=memo.get(value);
     if(cached!==undefined)return cached;
+    if(value.kind==="instanceList"&&depth<12){
+      const items=value.items.map(item=>replace(item,depth+1));
+      if(items.some((item,i)=>item!==value.items[i])){
+        const changed:ApexValue={...value,items};memo.set(value,changed);return changed;
+      }
+    }
     if((value.kind==="map"||value.kind==="instance")&&depth<12){
       const entries=value.entries.map(([k,v]):[string,ApexValue]=>[k,replace(v,depth+1)]);
       if(entries.some(([,v],i)=>v!==value.entries[i][1])){
@@ -206,7 +212,7 @@ export class ApexDataFlowEngine {
           value=distinct.size===1?distinct.values().next().value!:
             unknown("Helper returns incompatible collection or numeric alternatives: "+ownName);
         }
-        if(value.kind==="instance")return unknown("Instance-return alias transfer is not yet proven.");
+        if(value.kind==="instance"||value.kind==="instanceList")return unknown("Instance-return alias transfer is not yet proven.");
         this.summaries.set(key,value);
         return value;
       }};
@@ -219,7 +225,7 @@ export class ApexDataFlowEngine {
    */
   private taintCollectionsPassedToUnknownCalls(source:string,state:State):void{
     if(!source.includes("(") || ![...state.values.values()].some(v=>
-      v.kind==="collection"||v.kind==="map"||v.kind==="instance"))return;
+      v.kind==="collection"||v.kind==="map"||v.kind==="instance"||v.kind==="instanceList"))return;
     const masked=maskApexSource(source);
     const call=/\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(/g;
     const pure=/^(?:String\.(?:join|isBlank|isNotBlank|escapeSingleQuotes)|System\.debug|Math\.\w+|Database\.(?:query|queryWithBinds|countQuery|countQueryWithBinds|getQueryLocator|getQueryLocatorWithBinds))$/i;
@@ -237,11 +243,13 @@ export class ApexDataFlowEngine {
       }
       const argumentText=maskApexSource(source.slice(open+1,close));
       for(const [identifier,value] of [...state.values]){
-        if(value.kind!=="collection"&&value.kind!=="map"&&value.kind!=="instance")continue;
+        if(value.kind!=="collection"&&value.kind!=="map"&&value.kind!=="instance"&&value.kind!=="instanceList")continue;
         const escaped=identifier.replace(/[.*+?^$()|[\]{}\\]/g,"\\$&");
         if(new RegExp("\\b"+escaped+"\\b","i").test(argumentText)||
-          (value.kind==="instance"&&receiver.toLowerCase()===identifier.toLowerCase())){
-          replaceCollectionAliases(state,value,unknown(
+          ((value.kind==="instance"||value.kind==="instanceList"&&!/\.(?:get|isEmpty|size)$/i.test(name))&&receiver.toLowerCase()===identifier.toLowerCase())){
+          if(value.kind==="instanceList")for(const item of value.items)
+            replaceCollectionAliases(state,item,unknown("Custom Apex list element may escape through "+name+"."));
+          replaceCollectionAliases(state,state.values.get(identifier)??value,unknown(
             (value.kind==="instance"?"Mutable instance ":"Mutable collection ")+identifier+" may be changed by unsupported method "+name+"."));
         }
       }
@@ -336,6 +344,13 @@ export class ApexDataFlowEngine {
         else if(action==="add"||action==="addall")
           next=unknown("Collection "+operation+" argument "+expr+" is unknown: "+(arg?cause(arg):"missing argument"));
         else next=unknown("Unsupported mutation "+operation+" may change the complete query field inventory.");
+      }else if(existing.kind==="instanceList"){
+        const matches=(v:ApexValue)=>v.kind==="instance"&&(v.className.toLowerCase()===existing.elementType.toLowerCase()||v.className.toLowerCase().endsWith("."+existing.elementType.toLowerCase()));
+        if(action==="clear"&&args.length===0)next={...existing,items:[]};
+        else if(action==="add"&&args.length===1&&matches(arg))next={...existing,items:[...existing.items,arg]};
+        else if(action==="addall"&&args.length===1&&arg.kind==="instanceList"&&arg.items.every(matches))next={...existing,items:[...existing.items,...arg.items]};
+        else if(action==="set"&&args.length===2&&arg.kind==="number"&&Number.isInteger(arg.value)&&arg.value>=0&&arg.value<existing.items.length&&matches(args[1]))next={...existing,items:existing.items.map((item,i)=>i===arg.value?args[1]:item)};
+        else next=unknown("Unsupported custom Apex list mutation: "+operation);
       }else if(existing.kind==="map"){
         const key=arg?asText(arg):undefined;
         if(action==="clear"&&args.length===0)next={kind:"map",entries:[]};
@@ -350,11 +365,20 @@ export class ApexDataFlowEngine {
       }else{
         next=unknown("Collection "+name+" was mutated without a known initial value: "+cause(existing));
       }
-      if(next.kind==="collection"&&next.items.length>2000||next.kind==="map"&&next.entries.length>200)
+      if(next.kind==="collection"&&next.items.length>2000||next.kind==="map"&&next.entries.length>200||next.kind==="instanceList"&&next.items.length>100)
         next=unknown("Collection mutation exceeded the bounded inventory size.");
       if(!replaceCollectionAliases(state,existing,next))
         state.values.set(name.includes(".")?name.toLowerCase():name,next);
       return;
+    }
+    // Unsupported indexed writes must not preserve an obsolete list snapshot.
+    const indexedWrite=/^([A-Za-z_]\w*)\s*\[[\s\S]+\]\s*(?:\+?=)(?!=|>)/.exec(original);
+    if(indexedWrite){
+      const existing=state.values.get(indexedWrite[1]);
+      if(existing?.kind==="instanceList"){
+        replaceCollectionAliases(state,existing,unknown("Indexed custom Apex list assignment is not proven."));
+        return;
+      }
     }
     // Explicit instance writes update every alias in this frame, not other
     // allocations with equal field values. Unmodeled receiver writes taint.
@@ -435,6 +459,54 @@ export class ApexDataFlowEngine {
       const headEnd=node.body?.[0]?.start??node.end;
       this.captureCalls(node.start,headEnd,state,depth);
       const iterable=node.iterable?this.evaluate(node.iterable,state,depth):unknown("Unsupported for-loop header");
+      if(iterable.kind==="instanceList"&&node.loopVariable&&iterable.items.length<=MAX_LOOP_ITEMS){
+        // Pin the original iterable as an alias, so member writes through the
+        // loop variable or another alias update subsequent iterations.
+        const pin="#iterator:"+node.start;
+        const original=clone(state);original.values.set(pin,iterable);
+        let states=[original],returns:ApexValue[]=[];
+        const outerKeys=new Set(original.values.keys());
+        const locals=declaredLoopLocals(node.body??[]);
+        let unsafe=false;
+        for(let i=0;i<iterable.items.length;i++){
+          if(this.exceeded)break;
+          states=states.map(frame=>{
+            if(frame.stopped)return frame;
+            const child=clone(frame);
+            const current=child.values.get(pin);
+            if(current?.kind!=="instanceList"||current.items.length!==iterable.items.length){
+              unsafe=true;child.values.set(node.loopVariable!,unknown("Custom Apex list changed during iteration."));
+            }else child.values.set(node.loopVariable!,current.items[i]);
+            return child;
+          });
+          const result=this.execute(node.body??[],states,depth);
+          for(const frame of result.states){
+            for(const key of frame.values.keys())if(locals.has(key)&&!outerKeys.has(key)&&key!==node.loopVariable)frame.values.delete(key);
+            const current=frame.values.get(pin);
+            if(!frame.stopped&&(current?.kind!=="instanceList"||current.items.length!==iterable.items.length))unsafe=true;
+          }
+          states=mergeEquivalentStates(result.states);returns.push(...result.returns);
+          if(unsafe)break;
+        }
+        if(unsafe){
+          // Never publish earlier captured variants as complete when iteration
+          // cardinality or alias state could not be preserved.
+          for(const site of this.sites)if(site.offset>=node.start&&site.offset<node.end){
+            const missing=unknown("Custom Apex list changed during iteration; complete query coverage is not proven.");
+            const prior=this.captures.get(site.offset)??[];
+            this.captures.set(site.offset,[...prior,{site,query:missing,accessLevel:missing,arguments:site.arguments.map(()=>missing)}]);
+          }
+          if(this.argumentProbe&&this.argumentProbe.offset>=node.start&&this.argumentProbe.offset<node.end)
+            this.argumentProbe.results.push(this.argumentProbe.expressions.map(()=>unknown("Custom Apex list changed during iteration.")));
+          for(const frame of states)if(!frame.stopped)for(const key of frame.values.keys())frame.values.set(key,unknown("Custom Apex list iteration has unproven effects."));
+        }
+        for(const frame of states){
+          frame.values.delete(pin);
+          if(state.values.has(node.loopVariable))frame.values.set(node.loopVariable,state.values.get(node.loopVariable)!);
+          else frame.values.delete(node.loopVariable);
+        }
+        return {states,returns};
+      }
       if((iterable.kind==="collection"||iterable.kind==="records")&&
          node.loopVariable&&iterable.items.length<=MAX_LOOP_ITEMS){
         let states=[clone(state)], returns:ApexValue[]=[];
@@ -569,7 +641,7 @@ export class ApexDataFlowEngine {
     if(this.exceeded)return unknown("Apex helper exceeds bounded analysis budget: "+this.budget.reason);
     if(!result.returns.length || result.states.some(state=>!state.stopped))
       return unknown("Apex helper has an execution path without a proven return.");
-    if(result.returns.some(value=>value.kind==="instance"))return unknown("Instance-return alias transfer is not yet proven.");
+    if(result.returns.some(value=>value.kind==="instance"||value.kind==="instanceList"))return unknown("Instance-return alias transfer is not yet proven.");
     if(result.returns.some(value=>value.kind==="unknown"))
       return result.returns.find(value=>value.kind==="unknown")!;
     if(result.returns.every(value=>value.kind==="text")) {
