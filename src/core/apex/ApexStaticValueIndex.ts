@@ -1,6 +1,6 @@
 import path from "node:path";
 import {evaluateApexExpression, unknown, type ApexValue} from "./ApexValueEvaluator.js";
-import {maskApexSource} from "./ApexSourceModel.js";
+import {maskApexSource, matchingPair, parseApexStatements, stripApexComments} from "./ApexSourceModel.js";
 
 export interface ApexStaticSource {filePath:string;source:string;}
 interface Declaration {
@@ -9,6 +9,8 @@ interface Declaration {
   initializer:string;
   isStatic:boolean;
   initializerPresent:boolean;
+  declarationEnd:number;
+  blockValue?:ApexValue;
 }
 type MetadataResolver=(name:string,args:ApexValue[])=>ApexValue|undefined;
 const identifier=/^[A-Za-z_]\w*$/;
@@ -33,6 +35,7 @@ export class ApexStaticValueIndex {
 
   constructor(sources:readonly ApexStaticSource[]){
     let total=0;
+    const blockCandidates:Array<{entry:Declaration;filePath:string;start:number;end:number;value:ApexValue}>=[];
     for(const file of sources){
       const masked=maskApexSource(file.source);
       const classMatch=/\bclass\s+([A-Za-z_]\w*)\b/i.exec(masked);
@@ -51,6 +54,9 @@ export class ApexStaticValueIndex {
         if(masked[i]==="{")current++;
         else if(masked[i]==="}")current=Math.max(0,current-1);
       }
+      const classEnd=matchingPair(masked,classBrace,"{","}");
+      if(classEnd<0)continue;
+      const ownFields=new Map<string,Declaration>();
       const declaration=/\b((?:(?:public|private|protected|global|static|final|transient)\s+)*)(String|Integer|Long|Decimal|Double|Boolean|Id|(?:List|Set|Map)\s*<[\w\s,.<>]+>)\s+([A-Za-z_]\w*)\s*(=|;)/gi;
       let hit:RegExpExecArray|null;
       while((hit=declaration.exec(masked))!==null){
@@ -69,10 +75,45 @@ export class ApexStaticValueIndex {
           owner,field,initializer:expr,
           isStatic:modifiers.includes("static"),
           initializerPresent:initialized&&expr.length>0,
+          declarationEnd:semi+1,
         };
         const key=(owner+"."+field).toLowerCase();
         this.declarations.set(key,[...(this.declarations.get(key)??[]),entry]);
+        ownFields.set(field.toLowerCase(),entry);
         declaration.lastIndex=semi+1;
+      }
+      for(const candidate of staticBlockCandidates(file.source,masked,depth,classBrace,classEnd,ownFields))
+        blockCandidates.push({...candidate,filePath:path.resolve(file.filePath)});
+    }
+    // Repository-visible direct writes invalidate new block-derived snapshots.
+    // Keep legacy declaration-only snapshot behavior unchanged in this slice.
+    if(blockCandidates.length){
+      const writes=new Map<string,Array<{filePath:string;offset:number}>>();
+      const keys=new Set(blockCandidates.map(c=>(c.entry.owner+"."+c.entry.field).toLowerCase()));
+      for(const file of sources){
+        const masked=maskApexSource(file.source);
+        const owner=/\\bclass\\s+([A-Za-z_]\\w*)\\b/i.exec(masked)?.[1];
+        if(!owner)continue;
+        // Include direct assignments, compound assignments, increments, indexed
+        // assignments and standard collection mutators. Shadowed locals may
+        // conservatively invalidate a candidate; aliases are not proven here.
+        const token=/\\b(?:([A-Za-z_]\\w*)\\s*\\.\\s*)?([A-Za-z_]\\w*)\\b/g;
+        let hit:RegExpExecArray|null;
+        while((hit=token.exec(masked))!==null){
+          const key=((hit[1]??owner)+"."+hit[2]).toLowerCase();
+          if(!keys.has(key))continue;
+          const after=masked.slice(token.lastIndex,token.lastIndex+256);
+          const before=masked.slice(Math.max(0,hit.index-24),hit.index);
+          if(!/^(?:\\s*(?:=(?!=|>)|[+\\-*/%&|^]=|\\+\\+|--)|\\s*\\[[^\\];]*\\]\\s*(?:=(?!=|>)|[+\\-*/%&|^]=|\\+\\+|--)|\\s*\\.\\s*(?:add|addAll|remove|removeAll|retainAll|clear|put|putAll|set|sort)\\s*\\()/i.test(after)&&!/(?:\\+\\+|--)\\s*$/.test(before))continue;
+          const found=writes.get(key)??[];
+          found.push({filePath:path.resolve(file.filePath),offset:hit.index});
+          writes.set(key,found);
+        }
+      }
+      for(const candidate of blockCandidates){
+        const key=(candidate.entry.owner+"."+candidate.entry.field).toLowerCase();
+        const conflicting=(writes.get(key)??[]).some(w=>w.filePath!==candidate.filePath||w.offset<candidate.start||w.offset>=candidate.end);
+        candidate.entry.blockValue=conflicting?unknown("Apex static-block field "+key+" has additional repository-visible writes."):candidate.value;
       }
     }
   }
@@ -125,6 +166,7 @@ export class ApexStaticValueIndex {
       return unknown("Field "+key+" is static, not an instance member.");
     if(!allowInstance&&!entry.isStatic)
       return unknown("Apex member "+key+" is an instance field (not static); class-qualified references cannot prove its value without a specific instance.");
+    if(entry.blockValue!==undefined)return entry.blockValue;
     if(!entry.initializerPresent)
       return unknown(entry.isStatic?"Apex static field "+key+" has no declaration initializer; static initialization is not proven.":
         "Instance field "+key+" requires constructor or initializer-block tracking.");
@@ -172,6 +214,45 @@ export class ApexStaticValueIndex {
     cache.set(key,result);
     return result;
   }
+}
+
+/**
+ * Bounded static-block slice: accept only direct, single assignments to
+ * previously declared, uninitialized static members. All static blocks in
+ * this class must have this supported shape. No local variables, helper
+ * calls, control flow or cross-field dependencies are assumed.
+ */
+function staticBlockCandidates(source:string,masked:string,depth:Int16Array,
+  classBrace:number,classEnd:number,fields:ReadonlyMap<string,Declaration>):
+  Array<{entry:Declaration;start:number;end:number;value:ApexValue}>{
+  const result:Array<{entry:Declaration;start:number;end:number;value:ApexValue}>=[];
+  const assigned=new Set<string>();
+  const blocks=/\bstatic\s*\{/gi;
+  blocks.lastIndex=classBrace+1;
+  let hit:RegExpExecArray|null;
+  while((hit=blocks.exec(masked))!==null&&hit.index<classEnd){
+    if(depth[hit.index]!==1)continue;
+    const open=blocks.lastIndex-1;
+    const close=matchingPair(masked,open,"{","}");
+    if(close<0||close>classEnd)return [];
+    for(const node of parseApexStatements(source,open+1,close,masked)){
+      if(node.kind!=="statement"||!node.text)return [];
+      const clean=stripApexComments(node.text);
+      const assignment=/^\s*([A-Za-z_]\w*)\s*=(?!=|>)\s*([\s\S]+);\s*$/.exec(clean);
+      if(!assignment)return [];
+      const field=assignment[1].toLowerCase();
+      const entry=fields.get(field);
+      if(!entry?.isStatic||entry.initializerPresent||entry.declarationEnd>open||assigned.has(field))return [];
+      // No external call resolver or field environment: only independently
+      // evaluable scalar/collection expressions can establish a value.
+      const value=evaluateApexExpression(assignment[2],{values:new Map()});
+      if(value.kind==="unknown"||value.kind==="null"||!completeInitializer(value))return [];
+      assigned.add(field);
+      result.push({entry,start:node.start,end:node.end,value});
+    }
+    blocks.lastIndex=close+1;
+  }
+  return result;
 }
 
 /** Snapshot values are immutable abstract values. Only bounded, completely
