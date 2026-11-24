@@ -1,4 +1,5 @@
 import { splitApexTopLevel, stripApexComments, maskApexSource } from "./ApexSourceModel.js";
+import {compareScalars,integerArithmetic,knownBoolean,splitScalarOperator} from "./ApexScalarOperators.js";
 import {findApexTernary} from "./ApexConditionalInvocation.js";
 import { parseCustomMetadataQuery } from "./ApexCustomMetadataQueryModel.js";
 
@@ -11,6 +12,7 @@ export type ApexValue =
   | { kind: "record"; entries: Array<[string,ApexValue]> }
   | { kind: "records"; items: Array<Array<[string,ApexValue]>> }
   | { kind: "fieldSet"; objectApiName:string; developerName:string }
+  | { kind: "null" }
   | { kind: "number"; value: number }
   | { kind: "unknown"; reason: string };
 
@@ -67,11 +69,12 @@ function merged(values: string[],scalarType?:"boolean"): ApexValue {
     return unknown("Query expression exceeds the bounded alternative/length limit.");
   return {kind:"text",values:unique,...(scalarType?{scalarType}:{})};
 }
-function combinations(left: ApexValue,right: ApexValue): ApexValue {
+export function addApexValues(left: ApexValue,right: ApexValue): ApexValue {
   if(left.kind==="unknown")return left;
   if(right.kind==="unknown")return right;
   if(left.kind==="number"&&right.kind==="number")
-    return {kind:"number",value:left.value+right.value};
+    return integerArithmetic(left,right,"+");
+  if(left.kind==="null"||right.kind==="null")return unknown("Null concatenation is not proven.");
   if(left.kind==="collection"||right.kind==="collection"||
      left.kind==="map"||right.kind==="map"||
      left.kind==="record"||right.kind==="record"||left.kind==="instance"||right.kind==="instance"||
@@ -118,7 +121,7 @@ export function evaluateApexExpression(
   if(literal!==null)return textValue(literal);
   if(/^-?\d+(?:\.\d+)?$/.test(expr))return {kind:"number",value:Number(expr)};
   if(/^(true|false)$/i.test(expr))return booleanValue(expr.toLowerCase()==="true");
-  if(expr==="null")return textValue("null");
+  if(/^null$/i.test(expr))return {kind:"null"};
   // Qualified member overrides are method-local abstract state, not changes
   // to the repository snapshot.
   const tracked=context.values.get(expr);
@@ -153,11 +156,11 @@ export function evaluateApexExpression(
   const ternary=findApexTernary(maskApexSource(expr));
   if(ternary){
     const condition=evaluateApexExpression(expr.slice(0,ternary.question),context,depth+1);
-    const value=onlyText(condition);
+    const value=knownBoolean(condition);
     const yes=expr.slice(ternary.question+1,ternary.colon);
     const no=expr.slice(ternary.colon+1);
-    if(value==="true")return evaluateApexExpression(yes,context,depth+1);
-    if(value==="false")return evaluateApexExpression(no,context,depth+1);
+    if(value===true)return evaluateApexExpression(yes,context,depth+1);
+    if(value===false)return evaluateApexExpression(no,context,depth+1);
     const a=evaluateApexExpression(yes,context,depth+1);
     const b=evaluateApexExpression(no,context,depth+1);
     return a.kind==="text"&&b.kind==="text"
@@ -167,38 +170,30 @@ export function evaluateApexExpression(
   for(const operator of ["||","&&"]){
     const terms=splitApexTopLevel(expr,operator);
     if(terms.length>1){
-      const checks=terms.map(term=>onlyText(evaluateApexExpression(term,context,depth+1)));
-      if(operator==="&&"&&checks.includes("false"))return booleanValue(false);
-      if(operator==="||"&&checks.includes("true"))return booleanValue(true);
-      if(checks.every(c=>c==="true"||c==="false"))
-        return booleanValue(operator==="&&"?checks.every(c=>c==="true"):checks.some(c=>c==="true"));
-      return unknown("Boolean condition depends on runtime inputs.");
+      let unknownTerm=false;
+      for(const term of terms){
+        const check=knownBoolean(evaluateApexExpression(term,context,depth+1));
+        if(check===undefined){unknownTerm=true;continue;}
+        if((operator==="&&"&&!check)||(operator==="||"&&check))return booleanValue(check);
+      }
+      return unknownTerm?unknown("Boolean condition depends on runtime inputs."):booleanValue(operator==="&&");
     }
   }
-  for(const operator of ["==","!="]){
-    const parts=splitApexTopLevel(expr,operator);
-    if(parts.length===2){
-      const left=evaluateApexExpression(parts[0],context,depth+1);
-      const right=evaluateApexExpression(parts[1],context,depth+1);
-      const a=onlyText(left),b=onlyText(right);
-      if(a!==null&&b!==null)
-        return booleanValue(operator==="=="?a===b:a!==b);
-      const cause=left.kind==="unknown"?left.reason:
-        right.kind==="unknown"?right.reason:
-        "Both operands must have one complete scalar value.";
-      return unknown("Runtime conditional comparison "+expr+" is unproven: "+cause);
-    }
+  for(const operators of [["==","!="],["<",">","<=",">="],["+","-"],["*","/"]]){
+    const operation=splitScalarOperator(expr,operators);
+    if(!operation)continue;
+    const left=evaluateApexExpression(operation.left,context,depth+1);
+    const right=evaluateApexExpression(operation.right,context,depth+1);
+    if(operation.operator==="+")return addApexValues(left,right);
+    if(["-","*","/"].includes(operation.operator))return integerArithmetic(left,right,operation.operator);
+    return compareScalars(left,right,operation.operator);
   }
-  const plus=splitApexTopLevel(expr,"+");
-  if(plus.length>1){
-    const parts=plus.map(item=>evaluateApexExpression(item,context,depth+1));
-    return parts.slice(1).reduce<ApexValue>((a,b)=>combinations(a,b),parts[0]);
+  if(expr.startsWith("!")&&!expr.startsWith("!=")){
+    const value=knownBoolean(evaluateApexExpression(expr.slice(1),context,depth+1));
+    return value===undefined?unknown("Negated conditional depends on runtime input."):booleanValue(!value);
   }
-  if(expr.startsWith("!") && !expr.startsWith("!=")){
-    const result=evaluateApexExpression(expr.slice(1),context,depth+1);
-    const simple=onlyText(result);
-    return simple==="true"?booleanValue(false):simple==="false"?booleanValue(true):
-      unknown("Negated conditional depends on runtime input.");
+  if(expr.startsWith("-")){
+    return integerArithmetic({kind:"number",value:0},evaluateApexExpression(expr.slice(1),context,depth+1),"-");
   }
   const create=/^new\s+(List|Set)\s*<[\w\s,.<>]+>\s*(?:\(([\s\S]*)\)|\{([\s\S]*)\})$/i.exec(expr);
   if(create){
@@ -247,7 +242,7 @@ export function evaluateApexExpression(
       const value=evaluateApexExpression(predicate.right,context,depth+1);
       if(value.kind==="unknown")return unknown("Custom Metadata "+query.type+
         " WHERE "+predicate.field+" has an unresolved runtime bind: "+value.reason);
-      if(onlyText(value)===null||(predicate.bind&&onlyText(value)==="null"))
+      if(onlyText(value)===null)
         return unknown("Custom Metadata "+query.type+" WHERE "+predicate.field+
           " does not have one supported scalar value.");
       values.push(value);
@@ -387,11 +382,13 @@ export function evaluateApexExpression(
       return sep!==null?textValue(args[0].items.join(sep)):unknown("String.join delimiter is unknown.");
     }
     if(lname==="string.isempty"&&args.length===1){
+      if(args[0].kind==="null")return booleanValue(true);
       const s=onlyText(args[0]);
       return s!==null?booleanValue(s.length===0):
         unknown("String.isEmpty input depends on runtime value.");
     }
     if((lname==="string.isblank"||lname==="string.isnotblank")&&args.length===1){
+      if(args[0].kind==="null")return booleanValue(lname==="string.isblank");
       const text=onlyText(args[0]);if(text===null)return unknown("String blankness depends on runtime input.");
       const blank=text.trim().length===0;
       return booleanValue(lname==="string.isblank"?blank:!blank);
