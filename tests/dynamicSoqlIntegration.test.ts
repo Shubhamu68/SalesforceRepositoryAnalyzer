@@ -1239,7 +1239,7 @@ test("Custom Metadata helper return resolves invocation binds and shares fresh i
       " public static String KIND = 'Draft';",
       "}",
     ].join("\n"));
-    for(const [cls,edi] of [["InvoiceConsumer","MappingConfig.EDI"],["ShipmentConsumer","'946'"]]){
+    for(const [cls,edi] of [["InvoiceConsumer","MappingConfig.EDI"],["SameInvoiceConsumer","MappingConfig.EDI"],["ShipmentConsumer","'946'"]]){
       await writeFile(path.join(dir,cls+".cls"),[
         "public class "+cls+" {",
         " public static void run(){",
@@ -1261,15 +1261,19 @@ test("Custom Metadata helper return resolves invocation binds and shares fresh i
     const provider={
       scopeKey:"org-cmdt-helper/connection-1",
       getObjectFieldNames:async()=>({complete:false as const,source:"LIVE_ORG" as const}),
-      getCustomMetadataRecords:async(object:string,fields:readonly string[])=>{
+      getCustomMetadataRecords:async(object:string,fields:readonly string[],filters?:readonly {field:string;value:string|number|boolean}[])=>{
         reads++;
         assert.equal(object,"Field_Mapping__mdt");
         assert.ok(fields.some(f=>f.toLowerCase()==="type__c"));
+        assert.equal(filters?.find(f=>f.field.toLowerCase()==="active__c")?.value,true);
+        assert.equal(filters?.find(f=>f.field.toLowerCase()==="type__c")?.value,"Draft");
+        const edi=filters?.find(f=>f.field.toLowerCase()==="edi_code__c")?.value;
+        assert.ok(edi==="945"||edi==="946");
         return {complete:true as const,source:"LIVE_ORG" as const,value:[
           row("945",firstField,true),row("946","OrderNumber",true),
           row("945","Excluded__c",false),row("945","WrongType__c",true,"Other"),
           {...row("999","Unused__c",true),Target_Field__c:null},
-        ]};
+        ].filter(record=>record.EDI_Code__c===edi&&record.Active__c&&record.Type__c==="Draft")};
       },
     };
     const resolved=await scanApexSoqlWithUnresolved(dir,provider);
@@ -1277,13 +1281,14 @@ test("Custom Metadata helper return resolves invocation binds and shares fresh i
     assert.deepEqual(resolved.queries.filter(x=>x.dynamicOrigin).map(x=>x.query).sort(),[
       "SELECT Id,OrderNumber FROM OrderSummary WHERE Id IN :orderIds WITH USER_MODE",
       "SELECT Id,Status FROM OrderSummary WHERE Id IN :orderIds WITH USER_MODE",
+      "SELECT Id,Status FROM OrderSummary WHERE Id IN :orderIds WITH USER_MODE",
     ].sort());
-    assert.equal(reads,1,"same row inventory shared for different caller binds");
+    assert.equal(reads,2,"identical filters share a read; different binds are isolated");
     firstField="CreatedDate";
     const changed=await scanApexSoqlWithUnresolved(dir,provider);
     assert.equal(changed.unresolvedDynamic.length,0,JSON.stringify(changed.unresolvedDynamic));
     assert.ok(changed.queries.some(q=>q.dynamicOrigin&&q.query.includes("Id,CreatedDate")));
-    assert.equal(reads,2,"fresh inventory for each user-triggered scan");
+    assert.equal(reads,4,"fresh filtered inventory for each user-triggered scan");
   }finally{await rm(dir,{recursive:true,force:true});}
 });
 
