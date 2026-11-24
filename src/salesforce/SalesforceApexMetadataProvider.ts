@@ -54,21 +54,9 @@ export class SalesforceApexMetadataProvider implements ApexMetadataProvider {
           reason:exact.length===0
             ?"Custom Label was not found in the selected Salesforce org."
             :"Custom Label is ambiguous or has an invalid value."};
-      const record=exact[0];
-      const masterValue=record.Value as string; // checked as String above
-      if(typeof record.Id!=="string"||!/^[A-Za-z0-9]{15,18}$/.test(record.Id))
-        return {complete:false,source:"LIVE_ORG",
-          reason:"Custom Label Tooling API identity is missing or invalid."};
-      // System.Label is locale-sensitive. Without a proven execution locale,
-      // labels with distinct translated values cannot be assigned a single
-      // complete structural field list.
-      const translations=await this.connection.queryAll<Record<string,unknown>>(
-        "SELECT Value FROM ExternalStringLocalization WHERE ExternalStringId = '"+
-        record.Id+"'", "tooling", 2000);
-      if(translations.some(row=>typeof row.Value!=="string"||row.Value!==masterValue))
-        return {complete:false,source:"LIVE_ORG",
-          reason:"Custom Label has locale-dependent translations; query structure is not unique."};
-      return {complete:true,source:"LIVE_ORG",value:masterValue};
+      // Repository snapshot policy uses the org master value, independent
+      // of execution locale. Translation Workbench is not a prerequisite.
+      return {complete:true,source:"LIVE_ORG",value:exact[0].Value as string};
     }catch(error){
       return {complete:false,source:"LIVE_ORG",
         reason:error instanceof Error?error.message:"Tooling API Custom Label lookup failed."};
@@ -137,7 +125,7 @@ export class SalesforceApexMetadataProvider implements ApexMetadataProvider {
 
   async getCustomMetadataRecords(objectApiName:string,fields:readonly string[]):
     Promise<MetadataResult<Array<Record<string,unknown>>>>{
-    if(!VALID_NAME.test(objectApiName)||!objectApiName.endsWith("__mdt") ||
+    if(!VALID_NAME.test(objectApiName)||!/__mdt$/i.test(objectApiName) ||
        !fields.length||fields.some(field=>!VALID_NAME.test(field)))return {
       complete:false,source:"LIVE_ORG",reason:"Custom Metadata query object or fields invalid.",
     };
@@ -145,11 +133,24 @@ export class SalesforceApexMetadataProvider implements ApexMetadataProvider {
     try{
       const query="SELECT "+selected.join(",")+" FROM "+objectApiName;
       const data=await this.connection.queryAll<Record<string,unknown>>(query,"data",MAX_RECORDS);
-      if(data.some(item=>!item||typeof item!=="object"||
-         selected.some(field=>!Object.prototype.hasOwnProperty.call(item,field))))
-        return {complete:false,source:"LIVE_ORG",
-          reason:"Custom Metadata query omitted one or more selected fields."};
-      return {complete:true,source:"LIVE_ORG",value:data};
+      // Salesforce can return canonical field casing even when the Apex
+      // query uses a different case (e.g. type__c versus Type__c).
+      if(data.some(item=>!item||typeof item!=="object"))
+        return {complete:false,source:"LIVE_ORG",reason:"Invalid Custom Metadata row."};
+      const normalized:Array<Record<string,unknown>>=[];
+      for(const item of data){
+        const keys=new Map(Object.keys(item).map(k=>[k.toLowerCase(),k]));
+        const row:Record<string,unknown>={};
+        for(const field of selected){
+          const key=keys.get(field.toLowerCase());
+          if(key===undefined)
+            return {complete:false,source:"LIVE_ORG",
+              reason:"Custom Metadata query omitted selected field "+field+"."};
+          row[field]=item[key];
+        }
+        normalized.push(row);
+      }
+      return {complete:true,source:"LIVE_ORG",value:normalized};
     }catch(error){
       return {complete:false,source:"LIVE_ORG",
         reason:error instanceof Error?error.message:
