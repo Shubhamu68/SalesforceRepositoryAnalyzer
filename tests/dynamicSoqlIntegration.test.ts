@@ -1218,3 +1218,139 @@ test("label-backed class map flows through cross-class nested loops; fresh scans
       assert.match(item.reason,/Product_Fields.*permission denied/i);
   }finally{await rm(dir,{recursive:true,force:true});}
 });
+
+test("Custom Metadata helper return resolves invocation binds and shares fresh inventories across query classes",async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),"v011-cmdt-helper-"));
+  let firstField="Status";
+  let reads=0;
+  try{
+    await writeFile(path.join(dir,"MappingService.cls"),[
+      "public class MappingService {",
+      " public static Field_Mapping__mdt[] mappings(String ediCode,String whatType){",
+      "   return [SELECT Source_Field__c, Source_Object__c, Target_Field__c, Target_Object__c",
+      "     FROM Field_Mapping__mdt WHERE EDI_Code__c = :ediCode AND type__c = :whatType",
+      "       AND Active__c = TRUE WITH SECURITY_ENFORCED];",
+      " }",
+      "}",
+    ].join("\n"));
+    await writeFile(path.join(dir,"MappingConfig.cls"),[
+      "public class MappingConfig {",
+      " public static String EDI = '945';",
+      " public static String KIND = 'Draft';",
+      "}",
+    ].join("\n"));
+    for(const [cls,edi] of [["InvoiceConsumer","MappingConfig.EDI"],["ShipmentConsumer","'946'"]]){
+      await writeFile(path.join(dir,cls+".cls"),[
+        "public class "+cls+" {",
+        " public static void run(){",
+        "   String edi = "+edi+";",
+        "   List<Field_Mapping__mdt> fieldMapmdt = MappingService.mappings(edi,MappingConfig.KIND);",
+        "   String q = 'SELECT Id';",
+        "   for(Field_Mapping__mdt m : fieldMapmdt){",
+        "     if(m.Source_Object__c == 'OrderSummary'){q += ','+m.Source_Field__c;}",
+        "   }",
+        "   Database.query(q+' FROM OrderSummary WHERE Id IN :orderIds WITH USER_MODE');",
+        " }",
+        "}",
+      ].join("\n"));
+    }
+    const row=(edi:string,field:string,active:boolean,kind="Draft")=>({
+      EDI_Code__c:edi,Type__c:kind,Active__c:active,Source_Field__c:field,
+      Source_Object__c:"OrderSummary",Target_Field__c:"Name",Target_Object__c:"Invoice__c",
+    });
+    const provider={
+      scopeKey:"org-cmdt-helper/connection-1",
+      getObjectFieldNames:async()=>({complete:false as const,source:"LIVE_ORG" as const}),
+      getCustomMetadataRecords:async(object:string,fields:readonly string[])=>{
+        reads++;
+        assert.equal(object,"Field_Mapping__mdt");
+        assert.ok(fields.some(f=>f.toLowerCase()==="type__c"));
+        return {complete:true as const,source:"LIVE_ORG" as const,value:[
+          row("945",firstField,true),row("946","OrderNumber",true),
+          row("945","Excluded__c",false),row("945","WrongType__c",true,"Other"),
+          {...row("999","Unused__c",true),Target_Field__c:null},
+        ]};
+      },
+    };
+    const resolved=await scanApexSoqlWithUnresolved(dir,provider);
+    assert.equal(resolved.unresolvedDynamic.length,0,JSON.stringify(resolved.unresolvedDynamic));
+    assert.deepEqual(resolved.queries.filter(x=>x.dynamicOrigin).map(x=>x.query).sort(),[
+      "SELECT Id,OrderNumber FROM OrderSummary WHERE Id IN :orderIds WITH USER_MODE",
+      "SELECT Id,Status FROM OrderSummary WHERE Id IN :orderIds WITH USER_MODE",
+    ].sort());
+    assert.equal(reads,1,"same row inventory shared for different caller binds");
+    firstField="CreatedDate";
+    const changed=await scanApexSoqlWithUnresolved(dir,provider);
+    assert.equal(changed.unresolvedDynamic.length,0,JSON.stringify(changed.unresolvedDynamic));
+    assert.ok(changed.queries.some(q=>q.dynamicOrigin&&q.query.includes("Id,CreatedDate")));
+    assert.equal(reads,2,"fresh inventory for each user-triggered scan");
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test("Custom Metadata helper with unknown runtime filter remains unresolved without org read",async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),"v011-cmdt-unknown-bind-"));
+  try{
+    await writeFile(path.join(dir,"MappingService.cls"),[
+      "public class MappingService {",
+      " public static List<Field_Mapping__mdt> mappings(String ediCode){",
+      "   return [SELECT Source_Field__c FROM Field_Mapping__mdt WHERE EDI_Code__c=:ediCode];",
+      " }",
+      "}",
+    ].join("\n"));
+    await writeFile(path.join(dir,"QueryConsumer.cls"),[
+      "public class QueryConsumer {",
+      " public static void run(String code){",
+      "   String q='SELECT Id';",
+      "   for(Field_Mapping__mdt m : MappingService.mappings(code)){",
+      "     q += ','+m.Source_Field__c;",
+      "   }",
+      "   Database.query(q+' FROM OrderSummary');",
+      " }",
+      "}",
+    ].join("\n"));
+    let reads=0;
+    const result=await scanApexSoqlWithUnresolved(dir,{
+      scopeKey:"unknown-cmdt-helper",
+      getObjectFieldNames:async()=>({complete:false as const,source:"LIVE_ORG" as const}),
+      getCustomMetadataRecords:async()=>{
+        reads++;
+        return {complete:true as const,source:"LIVE_ORG" as const,value:[]};
+      },
+    });
+    assert.equal(result.queries.filter(q=>q.dynamicOrigin).length,0);
+    assert.equal(result.unresolvedDynamic.length,1);
+    assert.match(result.unresolvedDynamic[0].reason,/Custom Metadata.*EDI_Code__c.*runtime/i);
+    assert.equal(reads,0);
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test("Custom Metadata query parser does not split quoted AND or silently allow unsupported predicates",async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),"v011-cmdt-literal-filter-"));
+  try{
+    await writeFile(path.join(dir,"MetadataQuery.cls"),[
+      "public class MetadataQuery {",
+      " public static void supported(){",
+      "   String q='SELECT Id';",
+      "   for(Field_Mapping__mdt m : [SELECT Source_Field__c FROM Field_Mapping__mdt WHERE Type__c='Draft AND Final']){q += ','+m.Source_Field__c;}",
+      "   Database.query(q+' FROM Account');",
+      " }",
+      " public static void unsupported(){",
+      "   String q='SELECT Id';",
+      "   for(Field_Mapping__mdt m : [SELECT Source_Field__c FROM Field_Mapping__mdt WHERE Type__c='A' OR Type__c='B']){q += ','+m.Source_Field__c;}",
+      "   Database.query(q+' FROM Account');",
+      " }",
+      "}",
+    ].join("\n"));
+    const result=await scanApexSoqlWithUnresolved(dir,{
+      scopeKey:"cmdt-literal-filter",
+      getObjectFieldNames:async()=>({complete:false as const,source:"LIVE_ORG" as const}),
+      getCustomMetadataRecords:async()=>({complete:true as const,source:"LIVE_ORG" as const,value:[
+        {Source_Field__c:"Name",Type__c:"Draft AND Final"},
+        {Source_Field__c:"Secret__c",Type__c:"Other"},
+      ]}),
+    });
+    assert.deepEqual(result.queries.filter(q=>q.dynamicOrigin).map(q=>q.query),["SELECT Id,Name FROM Account"]);
+    assert.equal(result.unresolvedDynamic.length,1);
+    assert.match(result.unresolvedDynamic[0].reason,/unsupported/i);
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
