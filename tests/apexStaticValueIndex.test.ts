@@ -401,3 +401,11 @@ test("lazy getters with additional writes, runtime initializers or escaping coll
   ].join("\n")]);
   for(const name of ["getField","getOther","getFields"])assert.equal(idx.resolveLazyGetter("Config",name),undefined,name);
 });
+
+
+test("reversed null comparison retains lazy getter and mutation safeguards",()=>{
+  const idx=index(["Config.cls","public class Config { static String FIELD; static String OTHER; public static String getField(){if(null==FIELD){FIELD='Name';}return FIELD;} public static String getOther(){if(null==OTHER){OTHER='Id';}return OTHER;} public static void mutate(){OTHER='Phone';} }"]);
+  assert.equal(idx.resolve("Config.FIELD").kind,"unknown");
+  assert.deepEqual(idx.resolveLazyGetter("Config","getField"),{kind:"text",values:["Name"]});
+  assert.equal(idx.resolveLazyGetter("Config","getOther"),undefined);
+});
