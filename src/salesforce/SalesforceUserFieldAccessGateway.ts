@@ -141,6 +141,7 @@ export class SalesforceUserFieldAccessGateway {
   private readonly exactCache = new Map<string, CacheEntry<DirectAccess>>();
   private readonly pendingExact=new Map<string,ExactGroup>();
   private readonly unsupportedBatchUntil=new Map<string,number>();
+  private readonly unproductiveBatchUntil=new Map<string,number>();
   private readonly parentCache = new Map<string, CacheEntry<Map<string, string>>>();
 
   constructor(
@@ -204,7 +205,7 @@ export class SalesforceUserFieldAccessGateway {
 
   private enqueueExact(userId:string,object:string,field:string):Promise<DirectAccess>{
     const scope=this.scope(),key=scope+"|"+userKey(userId)+"|"+norm(object);
-    if((this.unsupportedBatchUntil.get(scope)??0)>Date.now())
+    if((this.unsupportedBatchUntil.get(scope)??0)>Date.now()||(this.unproductiveBatchUntil.get(key)??0)>Date.now())
       return this.singleExact(scope,userId,object,field);
     return new Promise((resolve,reject)=>{
       let group=this.pendingExact.get(key);
@@ -225,10 +226,11 @@ export class SalesforceUserFieldAccessGateway {
    * Retain the original equality fallback, including compound parent rules. */
   private async flushExact(group:ExactGroup):Promise<void>{
     const {scope,userId,object,requests}=group;
+    const key=scope+"|"+userKey(userId)+"|"+norm(object);
     for(let i=0;i<requests.length;i+=EXACT_BATCH_SIZE){
       const chunk=requests.slice(i,i+EXACT_BATCH_SIZE);
       const unresolved=new Set(chunk);
-      if(chunk.length>1&&(this.unsupportedBatchUntil.get(scope)??0)<=Date.now()){
+      if(chunk.length>1&&(this.unsupportedBatchUntil.get(scope)??0)<=Date.now()&&(this.unproductiveBatchUntil.get(key)??0)<=Date.now()){
         try{
           if(this.scope()!==scope)throw new Error("Salesforce scope changed before field verification.");
           const names=chunk.map(item=>"'"+item.field+"'").join(",");
@@ -247,6 +249,13 @@ export class SalesforceUserFieldAccessGateway {
                 recordSoqlCount("org.user_field_gateway.targeted_batch_resolved");
               }
             }
+          }
+          if(unresolved.size===chunk.length){
+            // No saved equality lookups: avoid repeating a speculative batch
+            // for this object/user during the existing freshness window.
+            if(this.unproductiveBatchUntil.size>=MAX_CACHE_ENTRIES)this.unproductiveBatchUntil.clear();
+            this.unproductiveBatchUntil.set(key,Date.now()+CACHE_MS);
+            recordSoqlCount("org.user_field_gateway.targeted_batch_unproductive");
           }
         }catch(error){
           recordSoqlCount("org.user_field_gateway.targeted_batch_failures");
