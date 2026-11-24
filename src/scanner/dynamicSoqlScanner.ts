@@ -2,6 +2,7 @@ import { ApexDataFlowEngine, type ApexCallSite } from "../core/apex/ApexDataFlow
 import {explainUncapturedApexQuery} from "../core/apex/ApexExecutionPathDiagnostics.js";
 import type { ApexRepositoryMethodIndex } from "../core/apex/ApexRepositoryMethodIndex.js";
 import type { ApexValue } from "../core/apex/ApexValueEvaluator.js";
+import {describeMalformedSoql} from "../analyzer/soqlReconstructionDiagnostics.js";
 import { classifySoqlMode } from "../analyzer/soqlExecutionMode.js";
 import { extractSoqlExpressionFields } from "../analyzer/soqlExpressionInventory.js";
 import { parseNestedSoql } from "../analyzer/nestedSoqlScopes.js";
@@ -83,7 +84,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
     for(let index=0;index<variants.length;index++){
       const queryText=variants[index];
       if(!/^(?:SELECT|FIND)\b/i.test(queryText)){
-        reason="Built query does not start with a supported SOQL SELECT.";
+        reason="Built query does not start with a supported SOQL SELECT."+describeMalformedSoql(queryText,"");
         break;
       }
       // The current field-access analyzer is SOQL-specific, not SOSL.
@@ -91,7 +92,8 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
       const parsed=parseNestedSoql(queryText,site.line);
       const fields=extractSoqlExpressionFields(queryText);
       if(!parsed||!fields.parsed||fields.limitations.length){
-        reason="Complete query failed SOQL parsing: "+(fields.limitations[0]??"Root scope invalid.");
+        const detail=fields.limitations[0]??"Root scope invalid.";
+        reason="Complete query failed SOQL parsing: "+detail+describeMalformedSoql(queryText,detail);
         break;
       }
       const declared=classifySoqlMode(queryText);
