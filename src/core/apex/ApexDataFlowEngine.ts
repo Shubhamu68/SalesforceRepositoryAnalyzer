@@ -10,6 +10,7 @@ import {ApexLocalLiveness,declaredLoopLocals} from "./ApexLocalLiveness.js";
 import {apexStateIdentity} from "./ApexStateIdentity.js";
 import {ApexExecutionBudget} from "./ApexExecutionBudget.js";
 import {invocationMayExecute} from "./ApexConditionalInvocation.js";
+import {invocationDependencySlice,trackedStandaloneDeclaration} from "./ApexDependencySlice.js";
 import {discoverApexInvocations,dynamicDatabaseQuerySelector,type ApexInvocationSelector,type ApexCallSite} from "./ApexInvocationModel.js";
 export type {ApexCallSite} from "./ApexInvocationModel.js";
 
@@ -33,12 +34,6 @@ export interface ApexFlowOptions {
 interface State { values: ApexEnvironment; stopped?: boolean }
 interface FrameResult { states: State[]; returns: ApexValue[] }
 
-/** Shared declaration recognizer for source slicing and symbolic execution. */
-function trackedStandaloneDeclaration(statement:string):string|undefined {
-  return /^(?:final\s+)?(?:String|List<[^>]+>|Set<[^>]+>|Integer|Boolean)\s+([A-Za-z_]\w*)\s*;?\s*$/i
-    .exec(statement.trim())?.[1];
-}
-
 /** Identical symbolic states do not represent additional structural query variants. */
 function mergeEquivalentStates(states:State[]):State[] {
   if(states.length<2)return states;
@@ -50,65 +45,6 @@ function mergeEquivalentStates(states:State[]):State[] {
   return [...distinct.values()];
 }
 
-/**
- * Query-site backward dependency slice. Only simple, provably side-effect-free
- * statements are eligible for pruning. Calls, control-flow exits and opaque
- * Apex remain live unless explicitly demonstrated irrelevant.
- */
-function queryDependencySlice(nodes:SourceNode[], offset:number, expression:string):Set<SourceNode> {
-  const live=new Set<SourceNode>();
-  const relevant=new Set<string>();
-  const identifiers=(text:string):string[]=>[...maskApexSource(text).matchAll(/\b[A-Za-z_]\w*\b/g)]
-    .map(match=>match[0]);
-  for(const name of identifiers(expression))relevant.add(name);
-  const mark=(node:SourceNode):boolean=>{
-    if(node.start>offset)return false;
-    const isTarget=node.start<=offset&&node.end>offset;
-    if(node.kind==="opaque"){live.add(node);return true;}
-    if(node.kind==="statement") {
-      const statement=(node.text??"").trim();
-      const includesCall=isTarget||/\bDatabase\s*\.\s*(?:query|countQuery|getQueryLocator)/i.test(statement);
-      const terminates=/^(?:return|throw|break|continue)\b/i.test(statement);
-      const assignment=/\b([A-Za-z_]\w*)\s*(\+?=)\s*([\s\S]+?);?\s*$/.exec(statement);
-      const mutation=/\b([A-Za-z_]\w*)\s*\.\s*(?:add|addAll|clear|remove|put|putAll)\s*\(/i.exec(statement);
-      const write=assignment?.[1]??mutation?.[1];
-      // Keeping a referenced outer declaration preserves its lexical scope:
-      // otherwise branch cleanup incorrectly deletes assignments to it.
-      const declaration=trackedStandaloneDeclaration(statement);
-      // Methods may mutate collections by reference or instance state.
-      // Keep calls until an explicit side-effect model proves them harmless.
-      const containsCall=/\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\s*\(/.test(maskApexSource(statement));
-      const safeDebug=/^System\.debug\s*\(/i.test(statement);
-      const needed=includesCall||terminates||(write!==undefined&&relevant.has(write))||
-        (declaration!==undefined&&relevant.has(declaration))||
-        (containsCall&&!safeDebug)||(!write&&/[\[\]{}]/.test(statement));
-      if(!needed)return false;
-      live.add(node);
-      if(write!==undefined&&relevant.has(write)) {
-        for(const name of identifiers(assignment?.[3]??statement))relevant.add(name);
-      }
-      // A retained unknown call may mutate a relevant collection or shared state.
-      if(containsCall&&!safeDebug)for(const name of identifiers(statement))relevant.add(name);
-      return true;
-    }
-    let childNeeded=false;
-    const children=[...(node.body??[]),...(node.otherwise??[])];
-    for(let i=children.length-1;i>=0;i--)if(mark(children[i]))childNeeded=true;
-    const condition=(node.condition??"")+" "+(node.iterable??"");
-    const conditionCalls=[...maskApexSource(condition).matchAll(
-      /\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(/g)].map(match=>match[1]);
-    const opaqueCondition=conditionCalls.some(name=>
-      !/^(?:String\.(?:isBlank|isNotBlank)|Math\.\w+)$/i.test(name));
-    const needed=isTarget||childNeeded||opaqueCondition;
-    if(needed) {
-      live.add(node);
-      if(childNeeded)for(const name of identifiers(condition))relevant.add(name);
-    }
-    return needed;
-  };
-  for(let i=nodes.length-1;i>=0;i--)mark(nodes[i]);
-  return live;
-}
 const DEFAULT_PATHS = 32, DEFAULT_OPERATIONS = 5000, DEFAULT_DEPTH = 6;
 const MAX_LOOP_ITEMS = 100;
 
@@ -571,6 +507,9 @@ export class ApexDataFlowEngine {
       // to its query value. Helpers (depth>0) must evaluate their full body.
       if(depth===0&&this.activeStopOffset!==undefined&&node.start>this.activeStopOffset)break;
       if(this.exceeded||states.every(state=>state.stopped))break;
+      // Skip dead nodes once for the whole frontier, avoiding a clone/hash
+      // and path-budget check for every otherwise unchanged state.
+      if(depth===0&&this.activeSlice&&!this.activeSlice.has(node))continue;
       const next:State[]=[];
       for(const state of states){
         if(this.exceeded)break;
@@ -637,7 +576,7 @@ export class ApexDataFlowEngine {
     this.activeStopOffset=offset;
     this.activeCalls.clear();
     this.summaries.clear();
-    this.activeSlice=queryDependencySlice(method.body,offset,expressions.join(" + "));
+    this.activeSlice=invocationDependencySlice(method.body,offset,expressions.join(" + "));
     this.argumentProbe={offset,expressions:[...expressions],results:[]};
     const env=new Map<string,ApexValue>();
     method.parameters.forEach((name,index)=>env.set(name,
@@ -715,7 +654,7 @@ export class ApexDataFlowEngine {
         // contexts. Evaluate its query directly under each actual argument set.
         // Public/protected/global methods must never use this optimization.
         this.activeStopOffset=site.offset;
-        this.activeSlice=queryDependencySlice(owner.body,site.offset,
+        this.activeSlice=invocationDependencySlice(owner.body,site.offset,
           site.arguments.join(" "));
         for(const args of closedContexts){
           if(args.length!==owner.parameters.length||
@@ -758,7 +697,7 @@ export class ApexDataFlowEngine {
         for(const p of owner.parameters)env.set(p,unknown("Runtime method parameter: "+p));
         // Restrict the query's root method to statements that can affect its
         // argument. Calls and opaque operations are deliberately retained.
-        this.activeSlice=queryDependencySlice(owner.body,site.offset,
+        this.activeSlice=invocationDependencySlice(owner.body,site.offset,
           site.arguments.join(" "));
         this.execute(owner.body,[{values:env}],0);
         this.activeSlice=undefined;
