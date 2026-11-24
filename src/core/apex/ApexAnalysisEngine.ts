@@ -1,3 +1,4 @@
+import {countApex,timeApex} from "./ApexPerformance.js";
 import {ApexDataFlowEngine,type ApexFlowOptions} from "./ApexDataFlowEngine.js";
 import type {ApexInvocationSelector} from "./ApexInvocationModel.js";
 import {listValue,unknown,type ApexValue} from "./ApexValueEvaluator.js";
@@ -33,9 +34,9 @@ export function analyzeApexInvocations(source:string,filePath:string,select:Apex
       return repositoryIndex?.constructInstance(filePath,args[0].values[0],args.slice(1),resolveExternal)??resolveExternal?.(name,args);
     return resolveExternal?.(name,args);
   };
-  const engine=new ApexDataFlowEngine(source,{...limits,selectInvocation:select,resolveExternal:resolver,
+  const engine=new ApexDataFlowEngine(source,{...limits,sourceMethods:repositoryIndex?.indexedMethods(filePath,source),selectInvocation:select,resolveExternal:resolver,
     resolvePrivateContexts:owner=>repositoryIndex?.resolvePrivateContexts(filePath,owner,resolveExternal)});
-  return {...engine.analyze(),sites:engine.sites};
+  return {...timeApex("invocation.analysis_ms",()=>engine.analyze()),sites:engine.sites};
 }
 /** Known caller variants do not imply complete coverage of a public method. */
 export function inspectApexInvocationContexts(filePath:string,offset:number,expressions:readonly string[],
@@ -165,6 +166,7 @@ export class ApexAnalysisEngine {
   for(let pass=0;;pass++){
     requestedLabels.clear();requestedFieldSets.clear();requested.clear();requestedMetadata.clear();
     const {baseResolver,resolver}=makeResolver();
+    countApex("metadata.analysis_passes");
     const analysis=consumer({repositoryIndex,resolveExternal:resolver,resolveLocal:baseResolver});
     if(!metadata||pass>=MAX_PASSES-1)
       return analysis;
