@@ -191,7 +191,7 @@ export class ApexRepositoryMethodIndex {
           this.evaluateReturn(owner.filePath,nestedName,nestedArgs,resolveExternal),
       });
       result=engine.summarizeMethodReturn(method,args);
-      if(result.kind==="instance")result=unknown("Instance-return alias transfer is not yet proven.");
+      if(result.kind==="instance"||result.kind==="instanceList")result=unknown("Instance-return alias transfer is not yet proven.");
     }finally{this.active.delete(id);}
     if(this.summaries.size>=MAX_CACHED_SUMMARIES)this.summaries.clear();
     this.summaries.set(id,result);
