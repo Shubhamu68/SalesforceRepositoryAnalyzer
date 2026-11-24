@@ -1,6 +1,6 @@
 import { SalesforceCliAuthProvider, SalesforceCliLoginCancelledError, type CliOrg, type CliWebLogin } from "./SalesforceCliAuthProvider.js";
 import { timedAuthStep } from "./SalesforceAuthTiming.js";
-import { SalesforceReadRequestGateway, SalesforceReadTransportError } from "./SalesforceReadRequestGateway.js";
+import { SalesforceReadRequestGateway, SalesforceReadTransportError, type SalesforceReadResult } from "./SalesforceReadRequestGateway.js";
 import { XMLParser } from "fast-xml-parser";
 import { recordSoqlCount, timeSoqlOrgQuery, timeSoqlPhase } from "../services/SoqlPerformanceMetrics.js";
 /**
@@ -535,7 +535,7 @@ export class SalesforceOrgConnection {
           (nextPath && (url.search || url.hash))) {
         throw new SalesforceConnectionError("Salesforce returned an invalid query locator.", 502);
       }
-      const {response,payload}=await this.readJson(
+      const {response,payload,attempts,elapsedMs}=await this.readJson(
         this.queryReadLabel(soql,api),url,originEpoch,()=>{
           const session=this.connection;
           if(!session)throw new SalesforceConnectionError("Salesforce connection unavailable.",503);
@@ -555,7 +555,9 @@ export class SalesforceOrgConnection {
       }
       if (!response.ok) {
         const errors = Array.isArray(payload) ? payload : [payload];
-        throw new SalesforceConnectionError(errors.map(apiErrorMessage).join(" | ").slice(0, 500), response.status);
+        throw new SalesforceConnectionError(this.queryReadLabel(soql,api)+
+          " failed (HTTP "+response.status+", "+attempts+" attempt(s), "+elapsedMs+" ms): "+
+          errors.map(apiErrorMessage).join(" | ").slice(0,500),response.status);
       }
       const page = payload as QueryResult | null;
       if (!page || !Array.isArray(page.records) || typeof page.done !== "boolean") {
@@ -642,7 +644,7 @@ export class SalesforceOrgConnection {
 
   private async readThroughGateway<T>(label:string,originEpoch:number,
     work:(signal:AbortSignal)=>Promise<{response:Response;payload:T}>):
-    Promise<{response:Response;payload:T}> {
+    Promise<SalesforceReadResult<T>> {
     try{
       return await this.readGateway.read(label,()=>{
         if(this.epoch!==originEpoch)throw new SalesforceConnectionError(
@@ -657,7 +659,7 @@ export class SalesforceOrgConnection {
   }
 
   private async readJson(label:string,url:URL,originEpoch:number,
-    headers:()=>Record<string,string>):Promise<{response:Response;payload:unknown}>{
+    headers:()=>Record<string,string>):Promise<SalesforceReadResult<unknown>>{
     return this.readThroughGateway(label,originEpoch,async signal=>{
       const response=await fetch(url,{headers:headers(),signal});
       let payload:unknown=null;
