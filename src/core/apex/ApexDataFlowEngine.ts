@@ -9,6 +9,7 @@ import {
 import {ApexLocalLiveness,declaredLoopLocals} from "./ApexLocalLiveness.js";
 import {apexStateIdentity} from "./ApexStateIdentity.js";
 import {ApexExecutionBudget} from "./ApexExecutionBudget.js";
+import {writeInstanceMember} from "./ApexInstanceModel.js";
 import {invocationMayExecute} from "./ApexConditionalInvocation.js";
 import {invocationDependencySlice,trackedStandaloneDeclaration} from "./ApexDependencySlice.js";
 import {discoverApexInvocations,dynamicDatabaseQuerySelector,type ApexInvocationSelector,type ApexCallSite} from "./ApexInvocationModel.js";
@@ -52,16 +53,16 @@ function clone(state:State):State {return {values:new Map(state.values),stopped:
 /** Replace an abstract collection in this frame, including tracked aliases
  * and references stored in a bounded nested map. Never mutate snapshot objects. */
 function replaceCollectionAliases(state:State,existing:ApexValue,next:ApexValue):boolean{
-  if(existing.kind!=="collection"&&existing.kind!=="map")return false;
+  if(existing.kind!=="collection"&&existing.kind!=="map"&&existing.kind!=="instance")return false;
   const memo=new Map<ApexValue,ApexValue>();
   const replace=(value:ApexValue,depth=0):ApexValue=>{
     if(value===existing)return next;
     const cached=memo.get(value);
     if(cached!==undefined)return cached;
-    if(value.kind==="map"&&depth<12){
+    if((value.kind==="map"||value.kind==="instance")&&depth<12){
       const entries=value.entries.map(([k,v]):[string,ApexValue]=>[k,replace(v,depth+1)]);
       if(entries.some(([,v],i)=>v!==value.entries[i][1])){
-        const changed:ApexValue={kind:"map",entries};
+        const changed:ApexValue=value.kind==="instance"?{...value,entries}:{kind:"map",entries};
         memo.set(value,changed);return changed;
       }
     }
@@ -202,6 +203,7 @@ export class ApexDataFlowEngine {
           value=distinct.size===1?distinct.values().next().value!:
             unknown("Helper returns incompatible collection or numeric alternatives: "+ownName);
         }
+        if(value.kind==="instance")return unknown("Instance-return alias transfer is not yet proven.");
         this.summaries.set(key,value);
         return value;
       }};
@@ -214,7 +216,7 @@ export class ApexDataFlowEngine {
    */
   private taintCollectionsPassedToUnknownCalls(source:string,state:State):void{
     if(!source.includes("(") || ![...state.values.values()].some(v=>
-      v.kind==="collection"||v.kind==="map"))return;
+      v.kind==="collection"||v.kind==="map"||v.kind==="instance"))return;
     const masked=maskApexSource(source);
     const call=/\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(/g;
     const pure=/^(?:String\.(?:join|isBlank|isNotBlank|escapeSingleQuotes)|System\.debug|Math\.\w+|Database\.(?:query|queryWithBinds|countQuery|countQueryWithBinds|getQueryLocator|getQueryLocatorWithBinds))$/i;
@@ -232,11 +234,12 @@ export class ApexDataFlowEngine {
       }
       const argumentText=maskApexSource(source.slice(open+1,close));
       for(const [identifier,value] of [...state.values]){
-        if(value.kind!=="collection"&&value.kind!=="map")continue;
+        if(value.kind!=="collection"&&value.kind!=="map"&&value.kind!=="instance")continue;
         const escaped=identifier.replace(/[.*+?^$()|[\]{}\\]/g,"\\$&");
-        if(new RegExp("\\b"+escaped+"\\b","i").test(argumentText)){
+        if(new RegExp("\\b"+escaped+"\\b","i").test(argumentText)||
+          (value.kind==="instance"&&receiver.toLowerCase()===identifier.toLowerCase())){
           replaceCollectionAliases(state,value,unknown(
-            "Mutable collection "+identifier+" may be changed by unsupported method "+name+"."));
+            "Mutable reference "+identifier+" may be changed by unsupported method "+name+"."));
         }
       }
       call.lastIndex=open+1;
@@ -273,8 +276,10 @@ export class ApexDataFlowEngine {
     // not after the containing assignment or nested helper mutates the state.
     if(this.argumentProbe && node.start<=this.argumentProbe.offset &&
         this.argumentProbe.offset<node.end) {
-      this.argumentProbe.results.push(this.argumentProbe.expressions.map(expr=>
-        this.evaluate(expr,state,depth)));
+      if(invocationMayExecute(this.source.slice(node.start,node.end),this.argumentProbe.offset-node.start,
+        condition=>this.evaluate(condition,clone(state),depth)))
+        this.argumentProbe.results.push(this.argumentProbe.expressions.map(expr=>
+          this.evaluate(expr,state,depth)));
     }
     this.captureCalls(node.start,node.end,state,depth);
     if(!original)return;
@@ -347,6 +352,20 @@ export class ApexDataFlowEngine {
       if(!replaceCollectionAliases(state,existing,next))
         state.values.set(name.includes(".")?name.toLowerCase():name,next);
       return;
+    }
+    // Explicit instance writes update every alias in this frame, not other
+    // allocations with equal field values. Unmodeled receiver writes taint.
+    const member=/^([A-Za-z_]\w*)\s*\.\s*([A-Za-z_]\w*)\s*(\+?=)(?!=|>)\s*([\s\S]+)$/.exec(original);
+    if(member){
+      const [,receiver,field,operator,rhs]=member;
+      const existing=state.values.get(receiver);
+      if(existing?.kind==="instance"){
+        let next=this.evaluate(rhs,state,depth);
+        if(operator==="+=")next=this.evaluate(receiver+"."+field+" + ("+rhs+")",state,depth);
+        replaceCollectionAliases(state,existing,writeInstanceMember(existing,field,next));
+        this.taintCollectionsPassedToUnknownCalls(rhs,state);
+        return;
+      }
     }
     // Declarations, reassignment and += are independently versioned by state.
     const assignment=/\b([A-Za-z_]\w*)\s*(\+?=)\s*([\s\S]+)$/.exec(original);
@@ -476,6 +495,11 @@ export class ApexDataFlowEngine {
         const replacement=unknown("Loop may change "+variable+" using runtime values. Iterable "+
           (node.iterable??"(unsupported header)")+": "+(iterable.kind==="unknown"?iterable.reason:
             "iteration count or value shape exceeds supported bounds."));
+        const receiver=variable.split(".")[0];
+        const instance=changed.values.get(receiver);
+        if(variable.includes(".")&&instance?.kind==="instance"){
+          replaceCollectionAliases(changed,instance,replacement);continue;
+        }
         const existing=this.evaluate(variable,changed,depth);
         if(!replaceCollectionAliases(changed,existing,replacement))changed.values.set(target,replacement);
       }
