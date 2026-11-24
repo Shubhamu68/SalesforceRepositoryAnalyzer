@@ -67,6 +67,8 @@ export interface SoqlQuery {
   dynamicAccessLevel?: "USER_MODE" | "SYSTEM_MODE";
   /** Stable execution-site and variant IDs; not exposed as new Excel columns. */
   dynamicOrigin?: boolean;
+  /** This variant is proven only within a sampled explicit caller context. */
+  coverage?: "KNOWN_CALLER_CONTEXT";
   querySiteId?: string;
   queryVariantId?: string;
 }
