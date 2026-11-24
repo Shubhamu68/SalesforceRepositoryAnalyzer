@@ -58,6 +58,15 @@ test("v0.1.1 public or protected mutable static fields do not become query const
   expectText(idx,"AdvantageConstants.VERIFIED","OrderSummary");
 });
 
+test("v0.1.1 null initializers and prefix increments cannot prove static query fields",()=>{
+  const idx=index(["MutableConfig.cls","public class MutableConfig {\n"+
+    " private static Integer COUNT = 1;\n"+
+    " public static final String FIELD = null;\n"+
+    " public static void update(){++COUNT;}\n}"]);
+  expectUnknown(idx,"MutableConfig.COUNT",/assigned after initialization/i);
+  expectUnknown(idx,"MutableConfig.FIELD",/null initializer/i);
+});
+
 test("v0.1.1 cyclic constant dependencies remain unknown",()=>{
   const idx=index(["Cycle.cls","public class Cycle {\n"+
     " public static final String A = B;\n"+
