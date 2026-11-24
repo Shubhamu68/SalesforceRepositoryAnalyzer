@@ -30,7 +30,7 @@ export class ApexInstanceIndex {
         const name=parent?parent.name+"."+hit[1]:hit[1];
         classes.push({name,start:open,end:close});
         const shape:ClassShape={name,filePath:file.filePath,fields:[],constructors:[],initializationOrder:[],
-          supported:!/\b(?:extends|implements)\b/i.test(hit[2])};
+          supported:!/\b(?:extends|implements)\b/i.test(hit[2])||/^\s*implements\s+Database\s*\.\s*Batchable\s*<\s*[A-Za-z_]\w*\s*>\s*$/i.test(hit[2])};
         // Split direct class members at top-level semicolons and blocks.
         let start=open+1;
         while(start<close){
