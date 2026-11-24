@@ -621,10 +621,16 @@ test("Stage 3: org Custom Label JSON drives Product2 and Authorized Product fiel
     Authorized_Product__c:{"2":"Item_Code__c","3":"Store_Code__c"},
   });
   try{
+    await writeFile(path.join(dir,"MetaObjectNames.cls"),[
+      "public class MetaObjectNames {",
+      " public static final String PRODUCT = 'Product2';",
+      " public static final String AUTH = 'Authorized_' + 'Product__c';",
+      "}",
+    ].join("\n"));
     await writeFile(path.join(dir,"AdvantageConstants.cls"),[
       "public class AdvantageConstants {",
-      " public static final String PRODUCT_APINAME = 'Product2';",
-      " public static final String AUTHORIZED_PRODUCT_APINAME = 'Authorized_Product__c';",
+      " public static final String PRODUCT_APINAME = MetaObjectNames.PRODUCT;",
+      " public static final String AUTHORIZED_PRODUCT_APINAME = MetaObjectNames.AUTH;",
       "}",
     ].join("\n"));
     await writeFile(path.join(dir,"ProductSelectorProof.cls"),[
