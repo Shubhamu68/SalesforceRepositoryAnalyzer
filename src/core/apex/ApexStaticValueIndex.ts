@@ -74,7 +74,10 @@ export class ApexStaticValueIndex {
         // An omitted Apex access modifier defaults to private. A private
         // non-final static may be proven only when this entire class has no
         // mutation and it is not exposed to test code.
-        const testVisible=/@TestVisible\s*$/i.test(masked.slice(Math.max(0,hit.index-80),hit.index));
+        const annotationRegion=masked.slice(Math.max(classBrace+1,hit.index-400),hit.index);
+        const annotationBoundary=Math.max(annotationRegion.lastIndexOf(";"),
+          annotationRegion.lastIndexOf("{"),annotationRegion.lastIndexOf("}"));
+        const testVisible=/@TestVisible\b/i.test(annotationRegion.slice(annotationBoundary+1));
         const privateCandidate=isStatic&&!isFinal&&
           (visibility==="private"||visibility==="unspecified")&&!testVisible;
         const rest=masked.slice(semi+1);
