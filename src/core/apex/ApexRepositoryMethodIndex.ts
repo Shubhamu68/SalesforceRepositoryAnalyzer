@@ -493,8 +493,8 @@ export class ApexRepositoryMethodIndex {
 
   /**
    * Partial receiver evidence for direct Database.executeBatch(new T(...)).
-   * Only a first-statement direct invocation in the framework start method
-   * is supported: no intervening writes, helper effects or heap transfer.
+   * Direct framework invocation after a restricted scalar local prefix.
+   * No intervening member writes, arbitrary calls, or heap transfer.
    */
   private probeBatchReceivers(owner:IndexedSource,method:IndexedApexMethod,offset:number,expressions:readonly string[],
     resolveExternal?: (name:string,args:ApexValue[])=>ApexValue|undefined):
@@ -505,9 +505,23 @@ export class ApexRepositoryMethodIndex {
     const declaration=/\bclass\s+([A-Za-z_]\w*)\s+implements\s+Database\s*\.\s*Batchable\s*<\s*[A-Za-z_]\w*\s*>\s*\{/i.exec(masked);
     if(!declaration||declaration[1].toLowerCase()!==owner.className.toLowerCase()||
        !/\bstart\s*\(\s*Database\s*\.\s*BatchableContext\s+[A-Za-z_]\w*\s*\)\s*\{\s*$/i.test(masked.slice(Math.max(0,method.start-250),method.start)))return empty;
-    const first=method.body[0];
-    if(first?.kind!=="statement"||offset<first.start||offset>=first.end||
-      !/^\s*(?:return\s*)?$/.test(masked.slice(first.start,offset)))return empty;
+    const targetIndex=method.body.findIndex(n=>n.start<=offset&&offset<n.end);
+    const target=method.body[targetIndex];
+    if(targetIndex<0||target?.kind!=="statement"||
+      !/^\s*(?:return\s*)?$/i.test(masked.slice(target.start,offset)))return empty;
+    // Only declarations of local scalars whose expressions consist of
+    // literals, parameters, previously declared locals and simple receiver
+    // member reads. No calls, assignments to members, or getter chains.
+    const locals=new Set(method.parameters.map(p=>p.toLowerCase()));
+    for(const node of method.body.slice(0,targetIndex)){
+      if(node.kind!=="statement")return empty;
+      const declaration=/^\s*(?:final\s+)?(?:String|Boolean|Integer|Long|Decimal|Double|Id)\s+([A-Za-z_]\w*)\s*=\s*([\s\S]+);\s*$/i.exec(node.text??"");
+      if(!declaration||locals.has(declaration[1].toLowerCase()))return empty;
+      const expr=maskApexSource(declaration[2]);
+      if(!/^[\w\s.+\-]*$/.test(expr)||/\+\+|--|\bnew\b/i.test(expr)||
+        /\b(?!this\b)[A-Za-z_]\w*\s*\./i.test(expr.replace(/\bthis\s*\.\s*[A-Za-z_]\w*/gi,"")))return empty;
+      locals.add(declaration[1].toLowerCase());
+    }
     const calls=this.batchAllocations.get(owner.className.toLowerCase())??[];
     const receivers=new Map<string,Extract<ApexValue,{kind:"instance"}>>();
     let bounded=calls.length>8;
