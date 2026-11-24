@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import {test} from "node:test";
 import {ApexDataFlowEngine} from "../src/core/apex/ApexDataFlowEngine.js";
-import {indexApexMethods} from "../src/core/apex/ApexSourceModel.js";
+import {indexApexMethods,maskApexSource} from "../src/core/apex/ApexSourceModel.js";
 import {apexStateIdentity} from "../src/core/apex/ApexStateIdentity.js";
 import {ApexExecutionBudget} from "../src/core/apex/ApexExecutionBudget.js";
-import {listValue,unknown,type ApexEnvironment} from "../src/core/apex/ApexValueEvaluator.js";
+import {listValue,textValue,unknown,type ApexEnvironment} from "../src/core/apex/ApexValueEvaluator.js";
 import {extractDynamicSoqlQueries} from "../src/scanner/dynamicSoqlScanner.js";
 
 test("dead root-local scalar alternatives collapse before later independent branches",()=>{
@@ -166,4 +166,39 @@ test("unknown base query followed by security suffix remains an unresolved parti
   assert.equal(result.queries.length,0);
   assert.equal(result.unresolved.length,1);
   assert.match(result.unresolved[0].reason,/Partial expression evidence/);
+});
+
+test("shared syntax cache reuses immutable exact-source methods and invalidates on source edit",()=>{
+  const source="/*"+"padding ".repeat(100)+"*/ public class Cached { public static String build(){return 'Name';} }";
+  const methods=indexApexMethods(source);
+  assert.equal(indexApexMethods(source),methods);
+  assert.ok(Object.isFrozen(methods));
+  assert.ok(Object.isFrozen(methods[0].body));
+  const changed=source.replace("'Name'","'Phone'");
+  assert.notEqual(indexApexMethods(changed),methods);
+  assert.equal(maskApexSource(source).length,source.length);
+  assert.deepEqual(new ApexDataFlowEngine(source,{sourceMethods:methods}).summarizeMethodReturn(methods[0],[]),textValue("Name"));
+  assert.deepEqual(new ApexDataFlowEngine(changed).summarizeMethodReturn(indexApexMethods(changed)[0],[]),textValue("Phone"));
+});
+
+test("repository-owned method structures are only reused for an exact source match",async()=>{
+  const {ApexRepositoryMethodIndex}=await import("../src/core/apex/ApexRepositoryMethodIndex.js");
+  const source="public class Cached { public static String build(){return 'Name';} }";
+  const repo=new ApexRepositoryMethodIndex([{filePath:"Cached.cls",source}]);
+  assert.equal(repo.indexedMethods("Cached.cls",source),repo.indexedMethods("Cached.cls",source));
+  assert.equal(repo.indexedMethods("Cached.cls",source.replace("Name","Phone")),undefined);
+});
+
+test("bounded caller sampling prioritizes diverse relevant inputs, preserving complete original contexts",async()=>{
+  const {selectApexCallerSeeds}=await import("../src/core/apex/ApexRepositoryMethodIndex.js");
+  const seeds=[
+    ...Array.from({length:12},(_,i)=>[textValue("Account"),unknown("bind provenance "+i)]),
+    [textValue("Contact"),unknown("runtime bind")],
+    [textValue("Case"),unknown("runtime bind")],
+    [unknown("runtime object"),textValue("irrelevant")],
+  ];
+  const selected=selectApexCallerSeeds(seeds,["objectName","recordId"],new Set(["objectname"]),3);
+  assert.deepEqual(selected.map(s=>s[0]),["Account","Contact","Case"].map(textValue));
+  assert.ok(selected.every(seed=>seeds.includes(seed)));
+  assert.equal(selectApexCallerSeeds(seeds,["objectName","recordId"],new Set(["objectname"]),8).length,8);
 });
