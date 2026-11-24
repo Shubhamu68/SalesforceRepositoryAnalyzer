@@ -3,7 +3,7 @@ import { parseCustomMetadataQuery } from "./ApexCustomMetadataQueryModel.js";
 
 /** Portable abstract Apex values: no Salesforce API calls and no eval(). */
 export type ApexValue =
-  | { kind: "text"; values: string[] }
+  | { kind: "text"; values: string[]; scalarType?: "boolean" }
   | { kind: "collection"; items: string[]; unique: boolean }
   | { kind: "map"; entries: Array<[string,ApexValue]> }
   | { kind: "record"; entries: Array<[string,ApexValue]> }
@@ -15,6 +15,7 @@ export type ApexValue =
 export type ApexEnvironment = Map<string, ApexValue>;
 export const unknown = (reason: string): ApexValue => ({kind:"unknown",reason});
 export const textValue = (value: string): ApexValue => ({kind:"text",values:[value]});
+export const booleanValue = (value:boolean):ApexValue => ({kind:"text",values:[String(value)],scalarType:"boolean"});
 export const listValue = (items: string[], unique = false): ApexValue => ({
   kind:"collection", items:unique?[...new Set(items)]:items, unique,
 });
@@ -114,7 +115,7 @@ export function evaluateApexExpression(
   const literal=unescapeApex(expr);
   if(literal!==null)return textValue(literal);
   if(/^-?\d+(?:\.\d+)?$/.test(expr))return {kind:"number",value:Number(expr)};
-  if(/^(true|false)$/i.test(expr))return textValue(expr.toLowerCase());
+  if(/^(true|false)$/i.test(expr))return booleanValue(expr.toLowerCase()==="true");
   if(expr==="null")return textValue("null");
   // Qualified member overrides are method-local abstract state, not changes
   // to the repository snapshot.
@@ -352,7 +353,7 @@ export function evaluateApexExpression(
     // Pure scalar conversions used by immutable static initializers and
     // dynamic SELECT fragments. Runtime/collection inputs remain unknown.
     if(lname==="string.valueof"&&args.length===1){
-      if(args[0].kind==="text")return args[0];
+      if(args[0].kind==="text")return {kind:"text",values:args[0].values};
       if(args[0].kind==="number")return textValue(String(args[0].value));
       return unknown("String.valueOf argument has no proven scalar value.");
     }
