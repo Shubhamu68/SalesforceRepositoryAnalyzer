@@ -15,10 +15,55 @@ export type ApexValue =
   | { kind: "fieldSet"; objectApiName:string; developerName:string }
   | { kind: "null" }
   | { kind: "number"; value: number }
-  | { kind: "unknown"; reason: string };
+  | { kind: "unknown"; reason: string; symbol?:ApexRuntimeSymbol; fragments?:ApexTextFragment[] };
+
+export interface ApexRuntimeSymbol {name:string;type:string}
+export type ApexTextFragment={kind:"literal";text:string}|{kind:"hole";symbol?:ApexRuntimeSymbol};
 
 export type ApexEnvironment = Map<string, ApexValue>;
 export const unknown = (reason: string): ApexValue => ({kind:"unknown",reason});
+/** Retain source type and identity, never invent a runtime value. */
+export function runtimeParameter(name:string,type:string|undefined,reason:string):ApexValue{
+  const scalar=type?.toLowerCase();
+  return scalar&&/^(?:integer|long|decimal|double|boolean|string|id|date|datetime)$/.test(scalar)
+    ?{kind:"unknown",reason,symbol:{name,type:scalar}}:unknown(reason);
+}
+
+/** Bounded partial strings remain unknown to every complete-value consumer.
+ * Literal fragments are internal evidence, not executable query templates. */
+function partialConcatenation(left:ApexValue,right:ApexValue):ApexValue|undefined{
+  const incomplete=left.kind==="unknown"?left:right.kind==="unknown"?right:undefined;
+  if(!incomplete)return undefined;
+  const parts=(v:ApexValue):ApexTextFragment[]|undefined=>{
+    if(v.kind==="unknown")return v.fragments??[{kind:"hole",...(v.symbol?{symbol:v.symbol}:{})}];
+    if(v.kind==="text"&&v.values.length===1)return [{kind:"literal",text:v.values[0]}];
+    if(v.kind==="number")return [{kind:"literal",text:String(v.value)}];
+    return undefined;
+  };
+  // Addition of two unknown numeric operands is not string concatenation.
+  const textLike=(v:ApexValue)=>v.kind==="text"||v.kind==="unknown"&&(!!v.fragments||v.symbol?.type==="string");
+  if(!textLike(left)&&!textLike(right))return incomplete;
+  const a=parts(left),b=parts(right);
+  if(!a||!b)return incomplete;
+  const joined:ApexTextFragment[]=[];
+  for(const part of [...a,...b]){
+    const last=joined.at(-1);
+    if(part.kind==="literal"&&last?.kind==="literal")joined[joined.length-1]={kind:"literal",text:last.text+part.text};
+    else joined.push(part);
+  }
+  if(joined.length>32||joined.some(v=>v.kind==="literal"&&v.text.length>16000))return incomplete;
+  return {kind:"unknown",reason:incomplete.reason,fragments:joined};
+}
+
+/** Deliberately excludes literal contents and runtime values from diagnostics. */
+export function describePartialApexText(value:ApexValue):string{
+  if(value.kind!=="unknown"||!value.fragments)return "";
+  const holes=value.fragments.filter((v):v is Extract<ApexTextFragment,{kind:"hole"}>=>v.kind==="hole");
+  const literals=value.fragments.length-holes.length;
+  const types=[...new Set(holes.map(v=>v.symbol?.type??"untyped"))].sort();
+  return " Partial expression evidence: "+literals+" known text fragment(s), "+holes.length+
+    " unknown fragment(s) ("+types.join(", ")+"). Complete structure is not proven.";
+}
 export const textValue = (value: string): ApexValue => ({kind:"text",values:[value]});
 export const booleanValue = (value:boolean):ApexValue => ({kind:"text",values:[String(value)],scalarType:"boolean"});
 export const listValue = (items: string[], unique = false): ApexValue => ({
@@ -71,8 +116,7 @@ function merged(values: string[],scalarType?:"boolean"): ApexValue {
   return {kind:"text",values:unique,...(scalarType?{scalarType}:{})};
 }
 export function addApexValues(left: ApexValue,right: ApexValue): ApexValue {
-  if(left.kind==="unknown")return left;
-  if(right.kind==="unknown")return right;
+  if(left.kind==="unknown"||right.kind==="unknown")return partialConcatenation(left,right)??(left.kind==="unknown"?left:right);
   if(left.kind==="number"&&right.kind==="number")
     return integerArithmetic(left,right,"+");
   if(left.kind==="null"||right.kind==="null")return unknown("Null concatenation is not proven.");
