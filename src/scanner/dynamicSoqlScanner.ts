@@ -58,7 +58,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
             ?" Method is externally callable; complete caller coverage cannot be established from repository metadata."
             :"");
         const scoped=inspectApexInvocationContexts(filePath,site.offset,[site.argument],resolveExternal,repositoryIndex);
-        if(scoped&&(scoped.contexts.known.length||scoped.contexts.partial.length)){
+        if(scoped&&(scoped.contexts.known.length||scoped.contexts.partial.length||scoped.receiverContexts)){
           const variants=new Set<string>();
           // Do not publish a guessed security mode, even if SELECT is valid.
           if(mode!==null)for(const args of scoped.arguments){
@@ -83,6 +83,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
           knownVariants=variants.size;
           explanation+=" Known repository contexts: "+scoped.contexts.known.length+
             "; partially known contexts: "+scoped.contexts.partial.length+
+            (scoped.receiverContexts?"; known framework receiver contexts: "+scoped.receiverContexts:"")+
             "; structurally valid query variants in probed contexts: "+knownVariants+
             (scoped.bounded?" (bounded sample).":"." )+
             (knownVariants?" Known variants are submitted for separate access analysis;":" Context evidence only;")+
