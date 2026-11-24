@@ -1,4 +1,5 @@
 import path from "node:path";
+import {countApex,timeApex} from "./ApexPerformance.js";
 import { ApexDataFlowEngine } from "./ApexDataFlowEngine.js";
 import { indexApexMethods, maskApexSource, matchingPair, splitApexTopLevel,
   type IndexedApexMethod } from "./ApexSourceModel.js";
@@ -266,7 +267,8 @@ export class ApexRepositoryMethodIndex {
     if(this.active.size>=MAX_METHOD_DEPTH)return unknown("Cross-class helper depth exceeded: "+name);
     const cacheable=args.every(v=>v.kind==="text"||v.kind==="number"||v.kind==="null"||v.kind==="unknown");
     const cached=cacheable?this.summaries.get(id):undefined;
-    if(cached)return cached;
+    if(cached){countApex("helper.repository_cache_hit");return cached;}
+    countApex("helper.repository_evaluations");
     this.active.add(id);
     let result:ApexValue;
     try {
@@ -274,7 +276,7 @@ export class ApexRepositoryMethodIndex {
         resolveExternal:(nestedName,nestedArgs)=>resolveExternal?.(nestedName,nestedArgs) ??
           this.evaluateReturn(owner.filePath,nestedName,nestedArgs,resolveExternal),
       });
-      result=engine.summarizeMethodReturn(method,args);
+      result=timeApex("helper.repository_evaluation_ms",()=>engine.summarizeMethodReturn(method,args));
       if(result.kind==="instance"||result.kind==="instanceList")result=unknown("Instance-return alias transfer is not yet proven.");
     }finally{this.active.delete(id);}
     if(this.summaries.size>=MAX_CACHED_SUMMARIES)this.summaries.clear();
@@ -408,7 +410,8 @@ export class ApexRepositoryMethodIndex {
     if(!owner)return empty;
     const key=owner.filePath+"|"+target.start+"|"+this.scopeId(resolveExternal);
     const cached=this.contextualEvidence.get(key);
-    if(cached)return cached;
+    if(cached){countApex("caller.context_cache_hit");return cached;}
+    countApex("caller.context_evaluations");
     if(stack.has(key)||stack.size>=MAX_METHOD_DEPTH||work.remaining<=0)return {...empty,bounded:true};
     const nextStack=new Set(stack);nextStack.add(key);
     const candidates=this.callers.get(this.methodKey(owner.className,target.name,target.parameters.length))??[];
@@ -539,6 +542,8 @@ export class ApexRepositoryMethodIndex {
     const seeds=[...new Map([...contexts.known,...contexts.partial].map(seed=>[argumentIdentity(seed),seed])).values()];
     const relevant=invocationRelevantIdentifiers(method.body,offset,expressions.join(" "));
     const selected=selectApexCallerSeeds(seeds,method.parameters,relevant,maxSeeds);
+    countApex("caller.candidate_seeds",seeds.length);
+    countApex("caller.selected_seeds",selected.length);
     let bounded=contexts.bounded||seeds.length>selected.length;
     for(const seed of selected){
       const engine=new ApexDataFlowEngine(owner.source,{sourceMethods:owner.methods,maxOperations:2000,
