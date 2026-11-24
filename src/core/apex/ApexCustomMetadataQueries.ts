@@ -1,8 +1,8 @@
-import { evaluateApexExpression, textValue, unknown, type ApexValue }
+import { evaluateApexExpression, textValue, booleanValue, unknown, type ApexValue }
   from "./ApexValueEvaluator.js";
 import { maskApexSource, matchingPair, stripApexComments } from "./ApexSourceModel.js";
 import { parseCustomMetadataQuery, type MetadataLoopQuery } from "./ApexCustomMetadataQueryModel.js";
-import type { ApexMetadataProvider, MetadataResult } from "../metadata/ApexMetadataProvider.js";
+import type { ApexMetadataProvider, MetadataResult, CustomMetadataFilter } from "../metadata/ApexMetadataProvider.js";
 
 const MAX_ROWS=100;
 const MAX_REFERENCES=30;
@@ -24,7 +24,7 @@ export function findCustomMetadataLoops(source:string):MetadataLoopQuery[] {
 
 function scalar(value:unknown):ApexValue {
   if(typeof value==="string")return textValue(value);
-  if(typeof value==="boolean")return textValue(String(value));
+  if(typeof value==="boolean")return booleanValue(value);
   if(typeof value==="number"&&Number.isFinite(value))return {kind:"number",value};
   return unknown("Custom Metadata value is null or not a scalar.");
 }
@@ -39,12 +39,11 @@ export interface CustomMetadataRequest {
   type:string;
   selected:string[];
   query:MetadataLoopQuery;
-  filters:Array<{field:string;value:string}>;
+  filters:CustomMetadataFilter[];
 }
 export type CustomMetadataInventory=MetadataResult<Array<Record<string,unknown>>>;
 
-/** The inventory key intentionally excludes filter values: callers with
- * different known binds reuse the same complete, read-only org inventory. */
+/** Cache the exact typed filter context, not a broader inventory. */
 export function planCustomMetadataRequest(expression:string,values:readonly ApexValue[]):
   CustomMetadataRequest|{kind:"unknown";reason:string} {
   const query=parseCustomMetadataQuery(expression);
@@ -54,13 +53,18 @@ export function planCustomMetadataRequest(expression:string,values:readonly Apex
   for(const [i,predicate] of query.predicates.entries()){
     const value=single(values[i]);
     if(value===undefined)return {kind:"unknown",reason:"Custom Metadata WHERE "+predicate.field+" has an unresolved runtime bind."};
-    filters.push({field:predicate.field,value});
+    const item=values[i];
+    const typed=item.kind==="number"?item.value:
+      item.kind==="text"&&item.scalarType==="boolean"?value==="true":value;
+    filters.push({field:predicate.field,value:typed});
   }
   const selectedMap=new Map<string,string>();
   for(const field of [...query.fields,...query.predicates.map(p=>p.field)])
     selectedMap.set(field.toLowerCase(),field);
   const selected=[...selectedMap.values()].sort((a,b)=>a.toLowerCase().localeCompare(b.toLowerCase()));
-  return {key:query.type.toLowerCase()+"|"+[...selectedMap.keys()].sort().join(","),
+  const filterKey=filters.map(f=>[f.field.toLowerCase(),typeof f.value,f.value])
+    .sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  return {key:JSON.stringify([query.type.toLowerCase(),[...selectedMap.keys()].sort(),filterKey]),
     type:query.type,selected,query,filters};
 }
 
@@ -85,7 +89,7 @@ export function resolveCustomMetadataRows(request:CustomMetadataRequest,found:Cu
       if(actual===null){included=false;break;}
       const converted=single(scalar(actual));
       if(converted===undefined)return unknown("Custom Metadata "+request.type+" WHERE "+field+" is not a supported scalar.");
-      if(converted.toLowerCase()!==value.toLowerCase()){included=false;break;}
+      if(typeof value==="string"?converted.toLowerCase()!==value.toLowerCase():actual!==value){included=false;break;}
     }
     if(!included)continue;
     const values:Array<[string,ApexValue]>=[];
@@ -125,7 +129,7 @@ export async function buildCustomMetadataRows(
     const request=planCustomMetadataRequest(descriptor.expression,values);
     if("kind" in request){outputs.set(descriptor.expression,request);continue;}
     outputs.set(descriptor.expression,resolveCustomMetadataRows(request,
-      await metadata.getCustomMetadataRecords(request.type,request.selected)));
+      await metadata.getCustomMetadataRecords(request.type,request.selected,request.filters)));
   }
   return outputs;
 }
