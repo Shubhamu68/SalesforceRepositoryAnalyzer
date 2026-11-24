@@ -23,7 +23,9 @@ test("multi-hop known caller variants remain separate from unknown external entr
   assert.deepEqual(evidence.arguments.map(a=>a[0]).sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b))),
     [textValue("SELECT Id,Email FROM Contact"),textValue("SELECT Id,Name FROM Account")]);
   const report=extractDynamicSoqlQueries(gateway,"Gateway.cls",undefined,index);
-  assert.equal(report.queries.length,0);
+  assert.equal(report.queries.length,2);
+  assert.ok(report.queries.every(q=>q.coverage==="KNOWN_CALLER_CONTEXT"));
+  assert.equal(report.unresolved[0].knownVariants,2);
   assert.equal(report.unresolved.length,1);
   assert.match(report.unresolved[0].reason,/structurally valid query variants in probed contexts: 2/);
 });
