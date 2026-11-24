@@ -12,7 +12,7 @@ import {maskApexSource,type IndexedApexMethod,type SourceNode} from "./ApexSourc
  */
 export class ApexLocalLiveness {
   private readonly lastReference=new Map<string,number>();
-  constructor(source:string,method:IndexedApexMethod){
+  constructor(source:string,method:IndexedApexMethod,stopOffset?:number){
     const names=new Set<string>();
     const parameters=new Set(method.parameters.map(p=>p.toLowerCase()));
     for(const node of method.body){
@@ -22,7 +22,11 @@ export class ApexLocalLiveness {
       if(declaration&&!parameters.has(declaration[1].toLowerCase()))
         names.add(declaration[1].toLowerCase());
     }
-    for(const match of source.slice(method.start,method.end).matchAll(/\b[A-Za-z_]\w*\b/g)){
+    // Include the complete root statement/block that contains the site. A
+    // query in a loop can observe later lexical references on its next iteration.
+    const root=stopOffset===undefined?undefined:method.body.find(node=>node.start<=stopOffset&&stopOffset<node.end);
+    const end=root?.end??method.end;
+    for(const match of source.slice(method.start,end).matchAll(/\b[A-Za-z_]\w*\b/g)){
       const name=match[0].toLowerCase();
       if(names.has(name))this.lastReference.set(name,method.start+match.index!+match[0].length);
     }
