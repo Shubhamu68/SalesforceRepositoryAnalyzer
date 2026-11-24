@@ -172,6 +172,7 @@ export class ApexDataFlowEngine {
   /** Per-site, per-method optimization: never applied to helper summaries. */
   private activeSlice:Set<SourceNode>|undefined;
   private readonly className:string|undefined;
+  private currentMethod:IndexedApexMethod|undefined;
   constructor(readonly source:string,options:ApexFlowOptions={}) {
     this.options={maxPaths:options.maxPaths??DEFAULT_PATHS,
       maxOperations:options.maxOperations??DEFAULT_OPERATIONS,
@@ -184,6 +185,21 @@ export class ApexDataFlowEngine {
   private evaluate(expr:string, state:State, depth:number):ApexValue {
     const context:ApexExpressionContext={values:state.values,
       resolveCall:(name,args)=>{
+        if(name==="Apex.thisField"||name==="Apex.unqualifiedField"){
+          const field=args[0];
+          if(field?.kind!=="text"||field.values.length!==1||!this.className)
+            return unknown("Member field name or class is not proven.");
+          if(!this.currentMethod)
+            return unknown("Member field requires a known Apex method scope.");
+          const mode=name==="Apex.thisField"?"this":"unqualified";
+          if(mode==="this"&&this.currentMethod.isStatic)
+            return unknown("Instance field cannot be accessed via this in a static method.");
+          return this.options.resolveExternal?.("Apex.scopeField",[
+            textValue(this.className),field,textValue(mode),
+            textValue(String(this.currentMethod.isStatic===true)),
+          ]) ?? unknown("Field "+this.className+"."+field.values[0]+
+            " cannot be proven in the current method scope.");
+        }
         const external=this.options.resolveExternal?.(name,args);
         if(external!==undefined)return external;
         const ownName=name.replace(/^this\./i,"");
@@ -201,9 +217,14 @@ export class ApexDataFlowEngine {
         const env=new Map<string,ApexValue>();
         candidates[0].parameters.forEach((p,i)=>env.set(p,args[i]));
         let result:FrameResult;
+        const previousMethod=this.currentMethod;
+        this.currentMethod=candidates[0];
         try {
           result=this.execute(candidates[0].body,[{values:env}],depth+1);
-        }finally{this.activeCalls.delete(key);}
+        }finally{
+          this.currentMethod=previousMethod;
+          this.activeCalls.delete(key);
+        }
         let value:ApexValue;
         if(result.returns.length===0||result.states.some(s=>!s.stopped))
           value=unknown("Helper has an execution path without a proven return: "+ownName);
@@ -515,7 +536,11 @@ export class ApexDataFlowEngine {
     this.activeStopOffset=undefined;
     const values=new Map<string,ApexValue>();
     method.parameters.forEach((name,index)=>values.set(name,args[index]));
-    const result=this.execute(method.body,[{values}],1);
+    const previousMethod=this.currentMethod;
+    this.currentMethod=method;
+    let result:FrameResult;
+    try{result=this.execute(method.body,[{values}],1);}
+    finally{this.currentMethod=previousMethod;}
     if(this.exceeded)return unknown("Apex helper exceeds bounded analysis budget.");
     if(!result.returns.length || result.states.some(state=>!state.stopped))
       return unknown("Apex helper has an execution path without a proven return.");
@@ -610,6 +635,7 @@ export class ApexDataFlowEngine {
         this.failures.set(site.offset,"Execution site is outside a recognized Apex method.");
         continue;
       }
+      this.currentMethod=owner;
       const closedContexts=owner.visibility==="private"
         ?this.options.resolvePrivateContexts?.(owner):undefined;
       const callers=owner.visibility==="private"
@@ -648,7 +674,10 @@ export class ApexDataFlowEngine {
           const env=new Map<string,ApexValue>();
           for(const p of caller.method.parameters)
             env.set(p,unknown("Runtime caller parameter: "+p));
-          this.execute(caller.method.body,[{values:env}],0);
+          const previousMethod=this.currentMethod;
+          this.currentMethod=caller.method;
+          try{this.execute(caller.method.body,[{values:env}],0);}
+          finally{this.currentMethod=previousMethod;}
           if((this.captures.get(site.offset)?.length??0)===before)
             this.failures.set(site.offset,
               "Private helper caller did not establish a complete query execution context.");
@@ -685,6 +714,7 @@ export class ApexDataFlowEngine {
         this.captures.delete(site.offset);
       }
     }
+    this.currentMethod=undefined;
     this.activeStopOffset=undefined;
     this.activeQueryOffset=undefined;
     this.activeSlice=undefined;
