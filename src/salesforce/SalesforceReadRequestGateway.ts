@@ -16,8 +16,8 @@ function classify(error:unknown):TransportFailure{
   const safeCode=typeof code==="string"&&known.has(code)?code:undefined;
   const timeout=e?.name==="TimeoutError"||safeCode==="ETIMEDOUT"||
     Boolean(safeCode?.endsWith("_TIMEOUT"));
-  const retryable=timeout||e?.name==="AbortError"||e?.name==="TypeError"||
-    (safeCode!==undefined&&safeCode!=="ENOTFOUND");
+  const retryable=timeout||e?.name==="AbortError"||
+    (safeCode!==undefined?safeCode!=="ENOTFOUND":code===undefined&&e?.name==="TypeError");
   return {code:safeCode??(timeout?"TIMEOUT":e?.name==="AbortError"?"ABORTED":
     e?.name==="TypeError"?"FETCH_FAILED":"TRANSPORT_ERROR"),timeout,retryable};
 }
@@ -27,6 +27,9 @@ export interface SalesforceReadOptions {
   timeoutMs?:number;
   maxRetries?:number;
   backoffMs?:number;
+}
+export interface SalesforceReadResult<T> {
+  response:Response;payload:T;attempts:number;elapsedMs:number;
 }
 export class SalesforceReadRequestGateway {
   private active=0;
@@ -61,7 +64,7 @@ export class SalesforceReadRequestGateway {
    * A queued request must never run against a newly selected org. */
   async read<T>(label:string,assertScope:()=>void,
     request:(signal:AbortSignal)=>Promise<{response:Response;payload:T}>):
-    Promise<{response:Response;payload:T}>{
+    Promise<SalesforceReadResult<T>>{
     const started=Date.now();
     for(let attempt=0;;attempt++){
       const result=await this.slot(async()=>{
@@ -75,10 +78,22 @@ export class SalesforceReadRequestGateway {
         }
       });
       assertScope();
+      let backoff=this.backoffMs*2**attempt;
       if("value" in result&&result.value!==undefined){
         const status=result.value.response.status;
+        const completed=()=>({...result.value!,attempts:attempt+1,elapsedMs:Date.now()-started});
         if(![408,429,502,503,504].includes(status)||attempt>=this.maxRetries)
-          return result.value;
+          return completed();
+        // Honor a short Retry-After hint; don't tie up a user scan for long
+        // server-imposed delays or retry before the server allows it.
+        const hint=result.value.response.headers?.get?.("Retry-After");
+        if(hint){
+          const wait=/^\d+$/.test(hint)?Number(hint)*1000:Date.parse(hint)-Date.now();
+          if(Number.isFinite(wait)){
+            if(wait>5000)return completed();
+            backoff=Math.max(backoff,wait);
+          }
+        }
       }else if("failure" in result&&result.failure!==undefined){
         const failure=result.failure;
         if(!failure.retryable||attempt>=this.maxRetries){
@@ -88,7 +103,7 @@ export class SalesforceReadRequestGateway {
             (Date.now()-started)+" ms.");
         }
       }
-      await delay(this.backoffMs*2**attempt);
+      await delay(backoff);
     }
   }
 }
