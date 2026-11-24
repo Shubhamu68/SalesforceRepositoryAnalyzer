@@ -189,6 +189,7 @@ export class ApexRepositoryMethodIndex {
           this.evaluateReturn(owner.filePath,nestedName,nestedArgs,resolveExternal),
       });
       result=engine.summarizeMethodReturn(method,args);
+      if(result.kind==="instance")result=unknown("Instance-return alias transfer is not yet proven.");
     }finally{this.active.delete(id);}
     if(this.summaries.size>=MAX_CACHED_SUMMARIES)this.summaries.clear();
     this.summaries.set(id,result);
@@ -314,7 +315,7 @@ export class ApexRepositoryMethodIndex {
    */
   resolveCallerContexts(filePath:string,target:IndexedApexMethod,
     resolveExternal?: (name:string,args:ApexValue[])=>ApexValue|undefined,
-    stack:ReadonlySet<string>=new Set()):ApexCallerContexts {
+    stack:ReadonlySet<string>=new Set(),work={remaining:64}):ApexCallerContexts {
     const owner=this.paths.get(path.resolve(filePath));
     const empty:ApexCallerContexts={known:[],unknownCalls:0,candidateCalls:0,
       externallyCallable:target.visibility!=="private",bounded:false};
@@ -322,7 +323,7 @@ export class ApexRepositoryMethodIndex {
     const key=owner.filePath+"|"+target.start+"|"+this.scopeId(resolveExternal);
     const cached=this.contextualEvidence.get(key);
     if(cached)return cached;
-    if(stack.has(key)||stack.size>=MAX_METHOD_DEPTH)return {...empty,bounded:true};
+    if(stack.has(key)||stack.size>=MAX_METHOD_DEPTH||work.remaining<=0)return {...empty,bounded:true};
     const nextStack=new Set(stack);nextStack.add(key);
     const candidates=this.callers.get(this.methodKey(owner.className,target.name,target.parameters.length))??[];
     if(candidates.length>MAX_CALL_CONTEXTS||
@@ -337,12 +338,13 @@ export class ApexRepositoryMethodIndex {
       const closed=call.method.visibility==="private"
         ?this.resolvePrivateContexts(call.caller.filePath,call.method,resolveExternal):undefined;
       const upstream=closed?.length?undefined:
-        this.resolveCallerContexts(call.caller.filePath,call.method,resolveExternal,nextStack);
+        this.resolveCallerContexts(call.caller.filePath,call.method,resolveExternal,nextStack,work);
       const seeds:(ApexValue[]|undefined)[]=closed?.length?closed:
         [undefined,...(upstream?.known??[])];
       let unproven=false;
       for(const seed of seeds){
-        const engine=new ApexDataFlowEngine(call.caller.source,{
+        if(work.remaining--<=0){bounded=true;break;}
+        const engine=new ApexDataFlowEngine(call.caller.source,{maxOperations:2000,
           resolveExternal:(name,args)=>resolveExternal?.(name,args) ??
             this.evaluateReturn(call.caller.filePath,name,args,resolveExternal),
         });
@@ -368,6 +370,32 @@ export class ApexRepositoryMethodIndex {
       this.contextualEvidence.set(key,result);
     }
     return result;
+  }
+
+  /** Evaluate selected invocation arguments in proven incoming contexts.
+   * Evidence is kept separate from the all-path verdict and from permissions. */
+  probeInvocationContexts(filePath:string,offset:number,expressions:readonly string[],
+    resolveExternal?: (name:string,args:ApexValue[])=>ApexValue|undefined):{
+      contexts:ApexCallerContexts;arguments:ApexValue[][];bounded:boolean
+    }|undefined {
+    const owner=this.paths.get(path.resolve(filePath));
+    const method=owner?.methods.filter(m=>m.start<=offset&&offset<m.end)
+      .sort((a,b)=>(a.end-a.start)-(b.end-b.start))[0];
+    if(!owner||!method||!method.parameters.length)return undefined;
+    const contexts=this.resolveCallerContexts(filePath,method,resolveExternal);
+    const argumentsByValue=new Map<string,ApexValue[]>();
+    const maxSeeds=8;
+    let bounded=contexts.bounded||contexts.known.length>maxSeeds;
+    for(const seed of contexts.known.slice(0,maxSeeds)){
+      const engine=new ApexDataFlowEngine(owner.source,{maxOperations:2000,
+        resolveExternal:(name,args)=>resolveExternal?.(name,args) ??
+          this.evaluateReturn(owner.filePath,name,args,resolveExternal)});
+      for(const args of engine.evaluateArgumentsAt(method,offset,expressions,seed)){
+        if(args.some(v=>v.kind==="unknown"))continue;
+        argumentsByValue.set(JSON.stringify(args),args);
+      }
+    }
+    return {contexts,arguments:[...argumentsByValue.values()],bounded};
   }
 
   /**
