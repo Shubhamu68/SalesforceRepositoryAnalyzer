@@ -6,7 +6,7 @@ import {
   evaluateApexExpression, listValue, textValue, unknown,
   type ApexEnvironment, type ApexValue, type ApexExpressionContext,
 } from "./ApexValueEvaluator.js";
-import {ApexLocalLiveness} from "./ApexLocalLiveness.js";
+import {ApexLocalLiveness,declaredLoopLocals} from "./ApexLocalLiveness.js";
 import {apexStateIdentity} from "./ApexStateIdentity.js";
 import {ApexExecutionBudget} from "./ApexExecutionBudget.js";
 
@@ -497,6 +497,7 @@ export class ApexDataFlowEngine {
          node.loopVariable&&iterable.items.length<=MAX_LOOP_ITEMS){
         let states=[clone(state)], returns:ApexValue[]=[];
         const outerKeys=new Set(state.values.keys());
+        const locals=declaredLoopLocals(node.body??[]);
         for(const item of iterable.items){
           if(this.exceeded)break;
           states=states.map(s=>{
@@ -512,7 +513,7 @@ export class ApexDataFlowEngine {
           // next iteration incorrectly multiplies otherwise identical paths.
           for(const frame of result.states){
             for(const key of frame.values.keys()){
-              if(!outerKeys.has(key)&&key!==node.loopVariable&&!key.includes("."))
+              if(locals.has(key)&&!outerKeys.has(key)&&key!==node.loopVariable)
                 frame.values.delete(key);
             }
           }
