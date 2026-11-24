@@ -71,7 +71,7 @@ export class ApexStaticValueIndex {
         const rest=masked.slice(semi+1);
         const escaped=field.replace(/[.*+?^$()|[\]{}\\]/g,"\\$&");
         const write=new RegExp("\\b"+escaped+
-          "\\s*(?:(?:\\+\\+|--|(?:[+\\-*\\/%&|^])?=(?!=)))","m");
+          "\\s*(?:(?:\\+\\+|--|(?:[+\\-*\\/%&|^])?=(?![=>])))","m");
         const prefixWrite=new RegExp("(?:\\+\\+|--)\\s*"+escaped+"\\b","m");
         const pre=masked.slice(classBrace+1,hit.index);
         const unsafeWrite=privateCandidate&&(
