@@ -7,7 +7,7 @@ import {
   evaluateApexExpression, addApexValues, listValue, textValue, unknown, runtimeParameter, booleanValue,
   type ApexEnvironment, type ApexValue, type ApexExpressionContext,
 } from "./ApexValueEvaluator.js";
-import {ApexLocalLiveness,declaredLoopLocals} from "./ApexLocalLiveness.js";
+import {ApexLocalLiveness,sharedApexLocalLiveness,declaredLoopLocals} from "./ApexLocalLiveness.js";
 import {apexStateIdentity} from "./ApexStateIdentity.js";
 import {ApexExecutionBudget} from "./ApexExecutionBudget.js";
 import {writeInstanceMember} from "./ApexInstanceModel.js";
@@ -29,6 +29,8 @@ export interface ApexFlowOptions {
   /** Only completely proven private-method caller contexts can narrow entry inputs. */
   resolvePrivateContexts?: (method: IndexedApexMethod) => ApexValue[][] | undefined;
   selectInvocation?:ApexInvocationSelector;
+  /** Exact-source immutable methods from the repository index. */
+  sourceMethods?:IndexedApexMethod[];
   maxPaths?: number;
   maxOperations?: number;
   maxDepth?: number;
@@ -128,8 +130,8 @@ export class ApexDataFlowEngine {
     this.budget=new ApexExecutionBudget(this.options.maxOperations,this.options.maxPaths);
     const masked=maskApexSource(source);
     this.className=/\bclass\s+([A-Za-z_]\w*)\b/i.exec(masked)?.[1];
-    this.sites=discoverApexInvocations(source,options.selectInvocation??dynamicDatabaseQuerySelector);
-    this.methods=indexApexMethods(source);
+    this.methods=options.sourceMethods??indexApexMethods(source);
+    this.sites=discoverApexInvocations(source,options.selectInvocation??dynamicDatabaseQuerySelector,this.methods);
   }
   private evaluate(expr:string, state:State, depth:number):ApexValue {
     const context:ApexExpressionContext={values:state.values,
@@ -654,10 +656,10 @@ export class ApexDataFlowEngine {
     let live:ApexLocalLiveness|undefined;
     if(owner&&nodes===owner.body){
       if(depth===0&&this.activeStopOffset!==undefined)
-        live=new ApexLocalLiveness(this.source,owner,this.activeStopOffset);
+        live=sharedApexLocalLiveness(this.source,owner,this.activeStopOffset);
       else {
         live=this.liveness.get(owner);
-        if(!live){live=new ApexLocalLiveness(this.source,owner);this.liveness.set(owner,live);}
+        if(!live){live=sharedApexLocalLiveness(this.source,owner);this.liveness.set(owner,live);}
       }
     }
     for(const node of nodes){
