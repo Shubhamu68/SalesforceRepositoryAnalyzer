@@ -61,6 +61,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
     };
     const failure=flow.failures.get(site.offset);
     if(failure){fail(failure);continue;}
+    if(flow.unreachable.has(site.offset))continue;
     const captures=flow.captures.get(site.offset)??[];
     if(!captures.length){fail("Invocation is outside a supported method or execution path. "+
       explainUncapturedApexQuery(source,site.offset,site.argument));continue;}
