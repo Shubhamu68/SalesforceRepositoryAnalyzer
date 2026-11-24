@@ -10,7 +10,7 @@ import { extractDynamicSoqlQueries, type UnresolvedDynamicSoql } from "./dynamic
 import { listValue, unknown, type ApexValue } from "../core/apex/ApexValueEvaluator.js";
 import { ApexRepositoryMethodIndex } from "../core/apex/ApexRepositoryMethodIndex.js";
 import { maskApexSource } from "../core/apex/ApexSourceModel.js";
-import { buildCustomMetadataRows } from "../core/apex/ApexCustomMetadataQueries.js";
+import { planCustomMetadataRequest, resolveCustomMetadataRows, type CustomMetadataRequest, type CustomMetadataInventory } from "../core/apex/ApexCustomMetadataQueries.js";
 import type { ApexMetadataProvider } from "../core/metadata/ApexMetadataProvider.js";
 
 import type { SoqlQuery } from "../models/SoqlQuery.js";
@@ -119,6 +119,7 @@ interface ScanMetadataReads {
   labels:Map<string,Promise<LabelResult>>;
   fieldSets:Map<string,Promise<FieldSetResult>>;
   describes:Map<string,Promise<DescribeResult>>;
+  customMetadata:Map<string,Promise<CustomMetadataInventory>>;
 }
 function memoRead<T>(cache:Map<string,Promise<T>>,key:string,read:()=>Promise<T>):Promise<T>{
   let pending=cache.get(key);
@@ -127,7 +128,7 @@ function memoRead<T>(cache:Map<string,Promise<T>>,key:string,read:()=>Promise<T>
 }
 async function scanDynamicSource(source:string,filePath:string,
   metadata?:ApexMetadataProvider,repositoryIndex?:ApexRepositoryMethodIndex,
-  reads:ScanMetadataReads={labels:new Map(),fieldSets:new Map(),describes:new Map()}) {
+  reads:ScanMetadataReads={labels:new Map(),fieldSets:new Map(),describes:new Map(),customMetadata:new Map()}) {
   // Discover the actual metadata dependencies while interpreting a query and
   // its helpers. Unlike source-local regex preloading, a caller can reach a
   // label (or known Field Set) in any indexed helper/member declaration.
@@ -137,8 +138,8 @@ async function scanDynamicSource(source:string,filePath:string,
   const requestedLabels=new Set<string>();
   const requestedFieldSets=new Map<string,[string,string]>();
   const requested=new Set<string>();
-  const metadataRows=await buildCustomMetadataRows(source,metadata,
-    expression=>repositoryIndex?.evaluateConstant(expression));
+  const metadataInventories=new Map<string,CustomMetadataInventory>();
+  const requestedMetadata=new Map<string,CustomMetadataRequest>();
   // A new resolver identity for each pass invalidates cached helper/member summaries.
   const makeResolver=()=>{
   const baseResolver=(name:string,args:ApexValue[]):ApexValue|undefined=>{
@@ -185,10 +186,15 @@ async function scanDynamicSource(source:string,filePath:string,
           (selected?.reason??"Runtime Field Set identity not proven in this scan."));
     }
     if(name==="Apex.metadataRows"){
-      if(args.length!==1||args[0].kind!=="text"||args[0].values.length!==1)
+      if(args[0]?.kind!=="text"||args[0].values.length!==1)
         return unknown("Custom Metadata SOQL iterator identity is unresolved.");
-      return metadataRows.get(args[0].values[0]) ??
-        unknown("Custom Metadata WHERE or SELECT expression is not a supported complete static query.");
+      const request=planCustomMetadataRequest(args[0].values[0],args.slice(1));
+      if("kind" in request)return request;
+      const found=metadataInventories.get(request.key);
+      if(found)return resolveCustomMetadataRows(request,found);
+      requestedMetadata.set(request.key,request);
+      return unknown("Complete Custom Metadata "+request.type+
+        (metadata?" rows have not been loaded for this filter context.":" requires a connected authoritative org."));
     }
     if(name==="Schema.describeFields"){
       const object=args[0];
@@ -211,9 +217,9 @@ async function scanDynamicSource(source:string,filePath:string,
   };
   // Bound metadata discovery by passes and distinct requests per query class.
   // Never fabricate data for failed lookups or silently use partial results.
-  const MAX_PASSES=5,MAX_LABELS=40,MAX_FIELDSETS=30,MAX_DESCRIBES=40;
+  const MAX_PASSES=5,MAX_LABELS=40,MAX_FIELDSETS=30,MAX_DESCRIBES=40,MAX_METADATA=30;
   for(let pass=0;;pass++){
-    requestedLabels.clear();requestedFieldSets.clear();requested.clear();
+    requestedLabels.clear();requestedFieldSets.clear();requested.clear();requestedMetadata.clear();
     const {baseResolver,resolver}=makeResolver();
     const analysis=extractDynamicSoqlQueries(source,filePath,resolver,repositoryIndex);
     if(!metadata||pass>=MAX_PASSES-1)
@@ -221,12 +227,14 @@ async function scanDynamicSource(source:string,filePath:string,
     const labels=[...requestedLabels].filter(k=>!labelResults.has(k));
     const sets=[...requestedFieldSets].filter(([k])=>!fieldSetValues.has(k));
     const objects=[...requested].filter(k=>!describeSnapshots.has(k));
+    const mdts=[...requestedMetadata.values()].filter(r=>!metadataInventories.has(r.key));
     const canReadLabels=!!metadata.getCustomLabelValue&&labels.length>0&&
       labelResults.size+labels.length<=MAX_LABELS;
     const canReadSets=!!metadata.getFieldSetFields&&sets.length>0&&
       fieldSetValues.size+sets.length<=MAX_FIELDSETS;
     const canReadObjects=objects.length>0&&describeSnapshots.size+objects.length<=MAX_DESCRIBES;
-    if(!canReadLabels&&!canReadSets&&!canReadObjects)
+    const canReadMetadata=mdts.length>0&&metadataInventories.size+mdts.length<=MAX_METADATA;
+    if(!canReadLabels&&!canReadSets&&!canReadObjects&&!canReadMetadata)
       return preserveDynamicFailureDiagnostics(source,filePath,analysis,baseResolver);
     await Promise.all([
       ...(canReadLabels?labels.map(async name=>labelResults.set(name,
@@ -235,6 +243,8 @@ async function scanDynamicSource(source:string,filePath:string,
         await memoRead(reads.fieldSets,key,()=>metadata.getFieldSetFields!(object,name)))):[]),
       ...(canReadObjects?objects.map(async object=>describeSnapshots.set(object,
         await memoRead(reads.describes,object,()=>metadata.getObjectFieldNames(object)))):[]),
+      ...(canReadMetadata?mdts.map(async request=>metadataInventories.set(request.key,
+        await memoRead(reads.customMetadata,request.key,()=>metadata.getCustomMetadataRecords(request.type,request.selected)))):[]),
     ]);
   }
 }
@@ -269,7 +279,7 @@ async function scanRepositoryApex(
 
   // A changed caller invalidates a callee's dynamic query analysis even if
   // the callee source is unchanged. Never retain a stale cross-class result.
-  const reads:ScanMetadataReads={labels:new Map(),fieldSets:new Map(),describes:new Map()};
+  const reads:ScanMetadataReads={labels:new Map(),fieldSets:new Map(),describes:new Map(),customMetadata:new Map()};
   const currentEntries=await timeSoqlPhase("scanner.stat_and_parse",()=>parallelMap(sources,
     async (entry:typeof sources[number]):Promise<[string,CachedApexFile]>=>{
       const existing=previous?.get(entry.filePath);
