@@ -1,5 +1,5 @@
 import type {ApexEnvironment} from "./ApexValueEvaluator.js";
-import {maskApexSource,type IndexedApexMethod} from "./ApexSourceModel.js";
+import {maskApexSource,type IndexedApexMethod,type SourceNode} from "./ApexSourceModel.js";
 
 /**
  * Conservative liveness for immutable scalar locals at method-root statement
@@ -38,4 +38,17 @@ export class ApexLocalLiveness {
       if(last!==undefined&&last<=statementEnd)values.delete(name);
     }
   }
+}
+
+/** Identify only explicit direct declarations in a loop body. Unqualified
+ * assignments to class fields or other outer symbols are not loop locals. */
+export function declaredLoopLocals(nodes:readonly SourceNode[]):Set<string>{
+  const names=new Set<string>();
+  for(const node of nodes){
+    if(node.kind!=="statement")continue;
+    const declaration=/^(?:final\s+)?[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*(?:\s*<[\w\s,.<>]+>)?(?:\[\])?\s+([A-Za-z_]\w*)\s*(?:=|;)/i
+      .exec(maskApexSource(node.text??"").trim());
+    if(declaration)names.add(declaration[1]);
+  }
+  return names;
 }
