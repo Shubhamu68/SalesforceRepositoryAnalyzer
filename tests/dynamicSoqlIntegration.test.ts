@@ -629,8 +629,8 @@ test("Stage 3: org Custom Label JSON drives Product2 and Authorized Product fiel
     ].join("\n"));
     await writeFile(path.join(dir,"AdvantageConstants.cls"),[
       "public class AdvantageConstants {",
-      " public static final String PRODUCT_APINAME = MetaObjectNames.PRODUCT;",
-      " public static final String AUTHORIZED_PRODUCT_APINAME = MetaObjectNames.AUTH;",
+      " public static String PRODUCT_APINAME = MetaObjectNames.PRODUCT;",
+      " public static String AUTHORIZED_PRODUCT_APINAME = MetaObjectNames.AUTH;",
       "}",
     ].join("\n"));
     await writeFile(path.join(dir,"ProductSelectorProof.cls"),[
@@ -959,7 +959,7 @@ test("v0.1.1 genuine cross-class static initializer chain builds complete dynami
   }finally {await rm(dir,{recursive:true,force:true});}
 });
 
-test("v0.1.1 public static mutable object name fails closed despite known literal initializer",async()=>{
+test("v0.1.1 public nonfinal object name resolves from declared initializer",async()=>{
   const dir=await mkdtemp(path.join(os.tmpdir(),"v011-constant-mutable-"));
   try{
     await writeFile(path.join(dir,"AdvantageConstants.cls"),[
@@ -975,9 +975,8 @@ test("v0.1.1 public static mutable object name fails closed despite known litera
       "}",
     ].join("\n"));
     const result=await scanApexSoqlWithUnresolved(dir);
-    assert.equal(result.queries.length,0);
-    assert.equal(result.unresolvedDynamic.length,1);
-    assert.match(result.unresolvedDynamic[0].reason,/externally mutable/i);
+    assert.equal(result.unresolvedDynamic.length,0);
+    assert.deepEqual(result.queries.map(q=>q.query),["SELECT Id FROM Product2"]);
   }finally{await rm(dir,{recursive:true,force:true});}
 });
 
@@ -998,7 +997,7 @@ test("v0.1.1 missing AdvantageConstants source yields explicit missing-class dia
   }finally{await rm(dir,{recursive:true,force:true});}
 });
 
-test("actual mutable AdvantageConstants Product Selector map key preserves rejection reason",async()=>{
+test("actual nonfinal AdvantageConstants Product Selector map key participates in query reconstruction",async()=>{
   const dir=await mkdtemp(path.join(os.tmpdir(),"v011-real-advantage-"));
   try {
     await writeFile(path.join(dir,"AdvantageConstants.cls"),[
@@ -1020,10 +1019,8 @@ test("actual mutable AdvantageConstants Product Selector map key preserves rejec
       "}",
     ].join("\n"));
     const result=await scanApexSoqlWithUnresolved(dir);
-    assert.equal(result.queries.filter(x=>x.dynamicOrigin).length,0);
-    assert.equal(result.unresolvedDynamic.length,1);
-    assert.match(result.unresolvedDynamic[0].reason,/AdvantageConstants\.PRODUCT_APINAME/i);
-    assert.match(result.unresolvedDynamic[0].reason,/externally mutable/i);
+    assert.equal(result.unresolvedDynamic.length,0);
+    assert.deepEqual(result.queries.map(q=>q.query),["SELECT Id,Name FROM Product2"]);
   }finally{await rm(dir,{recursive:true,force:true});}
 });
 
@@ -1086,5 +1083,29 @@ test("blank final member is not inferred from static initializer side effects",a
     assert.equal(result.queries.length,0);
     assert.equal(result.unresolvedDynamic.length,1);
     assert.match(result.unresolvedDynamic[0].reason,/no declaration initializer/i);
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test("declared class-member snapshot does not freeze reassigned method-local query variables",async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),"v011-local-snapshot-"));
+  try{
+    await writeFile(path.join(dir,"LocalMutation.cls"),[
+      "public class LocalMutation {",
+      " public static String FIELD = 'Name';",
+      " public String INSTANCE_FIELD = 'Phone';",
+      " public static void run(){",
+      "   String fieldName = LocalMutation.FIELD;",
+      "   fieldName = 'Id';",
+      "   Database.query('SELECT '+fieldName+' FROM Account');",
+      " }",
+      " public void runInstance(){",
+      "   Database.query('SELECT '+this.INSTANCE_FIELD+' FROM Contact');",
+      " }",
+      "}",
+    ].join("\n"));
+    const result=await scanApexSoqlWithUnresolved(dir);
+    assert.equal(result.unresolvedDynamic.length,0,JSON.stringify(result.unresolvedDynamic));
+    assert.deepEqual(result.queries.map(q=>q.query).sort(),
+      ["SELECT Id FROM Account","SELECT Phone FROM Contact"].sort());
   }finally{await rm(dir,{recursive:true,force:true});}
 });
