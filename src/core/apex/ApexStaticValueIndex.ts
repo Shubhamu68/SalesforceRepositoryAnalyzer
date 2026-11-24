@@ -147,6 +147,9 @@ export class ApexStaticValueIndex {
       while((token=candidate.exec(expressionMasked))!==null){
         if(token.index>0&&expressionMasked[token.index-1]===".")continue;
         const localName=token[0];
+        // A class-qualified reference must not create a false local alias
+        // when a field happens to share the class name (case-insensitively).
+        if(this.hasClass(localName)&&/^\s*\./.test(expressionMasked.slice(candidate.lastIndex)))continue;
         const localKey=(entry.owner+"."+localName).toLowerCase();
         if(!this.declarations.has(localKey))continue;
         values.set(localName,this.compute(localKey,active,depth+1,!entry.isStatic,metadata));
