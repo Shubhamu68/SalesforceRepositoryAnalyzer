@@ -59,11 +59,11 @@ function unescapeApex(token: string): string | null {
   return token.slice(1,-1).replace(/\\([nrt'\\])/g,(_whole: string,v: string)=>
     v==="n"?"\n":v==="r"?"\r":v==="t"?"\t":v);
 }
-function merged(values: string[]): ApexValue {
+function merged(values: string[],scalarType?:"boolean"): ApexValue {
   const unique=[...new Set(values)];
   if(unique.length>MAX_ALTERNATIVES || unique.some(x=>x.length>MAX_CHARS))
     return unknown("Query expression exceeds the bounded alternative/length limit.");
-  return {kind:"text",values:unique};
+  return {kind:"text",values:unique,...(scalarType?{scalarType}:{})};
 }
 function combinations(left: ApexValue,right: ApexValue): ApexValue {
   if(left.kind==="unknown")return left;
@@ -147,17 +147,17 @@ export function evaluateApexExpression(
   if(expr.startsWith("!") && !expr.startsWith("!=")){
     const result=evaluateApexExpression(expr.slice(1),context,depth+1);
     const simple=onlyText(result);
-    return simple==="true"?textValue("false"):simple==="false"?textValue("true"):
+    return simple==="true"?booleanValue(false):simple==="false"?booleanValue(true):
       unknown("Negated conditional depends on runtime input.");
   }
   for(const operator of ["||","&&"]){
     const terms=splitApexTopLevel(expr,operator);
     if(terms.length>1){
       const checks=terms.map(term=>onlyText(evaluateApexExpression(term,context,depth+1)));
-      if(operator==="&&"&&checks.includes("false"))return textValue("false");
-      if(operator==="||"&&checks.includes("true"))return textValue("true");
+      if(operator==="&&"&&checks.includes("false"))return booleanValue(false);
+      if(operator==="||"&&checks.includes("true"))return booleanValue(true);
       if(checks.every(c=>c==="true"||c==="false"))
-        return textValue(String(operator==="&&"?checks.every(c=>c==="true"):checks.some(c=>c==="true")));
+        return booleanValue(operator==="&&"?checks.every(c=>c==="true"):checks.some(c=>c==="true"));
       return unknown("Boolean condition depends on runtime inputs.");
     }
   }
@@ -183,7 +183,7 @@ export function evaluateApexExpression(
       const right=evaluateApexExpression(parts[1],context,depth+1);
       const a=onlyText(left),b=onlyText(right);
       if(a!==null&&b!==null)
-        return textValue(String(operator==="=="?a===b:a!==b));
+        return booleanValue(operator==="=="?a===b:a!==b);
       const cause=left.kind==="unknown"?left.reason:
         right.kind==="unknown"?right.reason:
         "Both operands must have one complete scalar value.";
@@ -332,8 +332,8 @@ export function evaluateApexExpression(
       const receiver=evaluateApexExpression(name.slice(0,-12),context,depth+1);
       const key=onlyText(args[0]);
       if(key===null)return unknown("Map.containsKey depends on runtime key.");
-      if(receiver.kind==="map")return textValue(String(receiver.entries.some(([k])=>k===key)));
-      if(receiver.kind==="collection")return textValue(String(receiver.items.includes(key)));
+      if(receiver.kind==="map")return booleanValue(receiver.entries.some(([k])=>k===key));
+      if(receiver.kind==="collection")return booleanValue(receiver.items.includes(key));
       if(receiver.kind==="unknown")return receiver;
       return unknown("Map.containsKey receiver is not proven as a map.");
     }
@@ -377,13 +377,13 @@ export function evaluateApexExpression(
     }
     if(lname==="string.isempty"&&args.length===1){
       const s=onlyText(args[0]);
-      return s!==null?textValue(String(s.length===0)):
+      return s!==null?booleanValue(s.length===0):
         unknown("String.isEmpty input depends on runtime value.");
     }
     if((lname==="string.isblank"||lname==="string.isnotblank")&&args.length===1){
       const text=onlyText(args[0]);if(text===null)return unknown("String blankness depends on runtime input.");
       const blank=text.trim().length===0;
-      return textValue(String(lname==="string.isblank"?blank:!blank));
+      return booleanValue(lname==="string.isblank"?blank:!blank);
     }
     if(lname==="string.escapesinglequotes"&&args.length===1){
       if(args[0].kind!=="text")return unknown("escapeSingleQuotes input unknown: "+
@@ -395,20 +395,20 @@ export function evaluateApexExpression(
     const operation=name.slice(dot+1).toLowerCase();
     if(dot>=0&&methods.includes(operation)){
       const receiver=evaluateApexExpression(name.slice(0,dot),context,depth+1);
-      if(operation==="isempty"&&receiver.kind==="collection")return textValue(String(receiver.items.length===0));
-      if(operation==="isempty"&&receiver.kind==="map")return textValue(String(receiver.entries.length===0));
-      if(operation==="isempty"&&receiver.kind==="records")return textValue(String(receiver.items.length===0));
+      if(operation==="isempty"&&receiver.kind==="collection")return booleanValue(receiver.items.length===0);
+      if(operation==="isempty"&&receiver.kind==="map")return booleanValue(receiver.entries.length===0);
+      if(operation==="isempty"&&receiver.kind==="records")return booleanValue(receiver.items.length===0);
       if(receiver.kind!=="text")return unknown("Receiver for "+operation+" not resolved: "+
         (receiver.kind==="unknown"?receiver.reason:"receiver is not text."));
       const argument=args.length?onlyText(args[0]):null;
       if(operation==="trim")return merged(receiver.values.map(x=>x.trim()));
       if(operation==="tolowercase")return merged(receiver.values.map(x=>x.toLowerCase()));
       if(operation==="touppercase")return merged(receiver.values.map(x=>x.toUpperCase()));
-      if(operation==="isempty")return merged(receiver.values.map(x=>String(x.length===0)));
+      if(operation==="isempty")return merged(receiver.values.map(x=>String(x.length===0)),"boolean");
       if(argument===null)return unknown("Argument for "+operation+" is not resolved.");
       if(operation==="removeend")return merged(receiver.values.map(x=>x.endsWith(argument)?x.slice(0,-argument.length):x));
-      if(operation==="equalsignorecase")return merged(receiver.values.map(x=>String(x.toLowerCase()===argument.toLowerCase())));
-      if(operation==="containsignorecase")return merged(receiver.values.map(x=>String(x.toLowerCase().includes(argument.toLowerCase()))));
+      if(operation==="equalsignorecase")return merged(receiver.values.map(x=>String(x.toLowerCase()===argument.toLowerCase())),"boolean");
+      if(operation==="containsignorecase")return merged(receiver.values.map(x=>String(x.toLowerCase().includes(argument.toLowerCase()))),"boolean");
       if(operation==="split"){
         const one=onlyText(receiver);
         return one!==null?listValue(one.split(argument)):unknown("Split has multiple possible inputs.");
