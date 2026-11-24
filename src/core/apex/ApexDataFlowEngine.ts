@@ -266,7 +266,7 @@ export class ApexDataFlowEngine {
       call.lastIndex=open+1;
     }
   }
-  private captureCalls(start:number,end:number,state:State,depth:number):void{
+  private captureCalls(start:number,end:number,state:State,depth:number,onlyOffset?:number):void{
     // Sites are sorted by source offset. Binary-search instead of walking
     // every Database call for every parsed Apex statement.
     let low=0, high=this.sites.length;
@@ -277,6 +277,7 @@ export class ApexDataFlowEngine {
     }
     for(let i=low;i<this.sites.length&&this.sites[i].offset<end;i++){
       const site=this.sites[i];
+      if(onlyOffset!==undefined&&site.offset!==onlyOffset)continue;
       if(this.activeQueryOffset!==undefined&&site.offset!==this.activeQueryOffset)continue;
       if(!invocationMayExecute(this.source.slice(start,end),site.offset-start,
         condition=>this.evaluate(condition,clone(state),depth))){
@@ -291,17 +292,16 @@ export class ApexDataFlowEngine {
       this.captures.set(site.offset,captures);
     }
   }
+  private captureArgumentProbe(start:number,end:number,state:State,depth:number,onlyOffset?:number):void{
+    const probe=this.argumentProbe;
+    if(probe&&start<=probe.offset&&probe.offset<end&&(onlyOffset===undefined||probe.offset===onlyOffset)&&
+      invocationMayExecute(this.source.slice(start,end),probe.offset-start,condition=>this.evaluate(condition,clone(state),depth)))
+      probe.results.push(probe.expressions.map(expr=>this.evaluate(expr,state,depth)));
+  }
   private statement(node:SourceNode,state:State,depth:number):ApexValue|undefined{
     const original=(node.text??"").trim().replace(/;\s*$/,"");
-    // Read arguments in the environment immediately before their invocation,
-    // not after the containing assignment or nested helper mutates the state.
-    if(this.argumentProbe && node.start<=this.argumentProbe.offset &&
-        this.argumentProbe.offset<node.end) {
-      if(invocationMayExecute(this.source.slice(node.start,node.end),this.argumentProbe.offset-node.start,
-        condition=>this.evaluate(condition,clone(state),depth)))
-        this.argumentProbe.results.push(this.argumentProbe.expressions.map(expr=>
-          this.evaluate(expr,state,depth)));
-    }
+    // Read arguments before the containing assignment or nested helper.
+    this.captureArgumentProbe(node.start,node.end,state,depth);
     this.captureCalls(node.start,node.end,state,depth);
     if(!original)return;
     if(/^throw\b/i.test(original)){
@@ -533,6 +533,22 @@ export class ApexDataFlowEngine {
     };
     if(node.kind==="block")return scoped(node.body??[]);
     if(node.kind==="if"){
+      // A direct leading call in an if condition executes before any later
+      // operand. Do not infer argument values for nested/short-circuited calls
+      // elsewhere in the header, where previous effects are not modeled.
+      const header=this.source.slice(node.start,node.end);
+      const masked=maskApexSource(header);
+      const leading=/^if\s*\(\s*(?:!\s*)?([A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)*)\s*\(/i.exec(masked);
+      if(leading){
+        const open=masked.indexOf("(",leading[0].indexOf(leading[1]));
+        const close=matchingPair(masked,open);
+        const offset=node.start+leading[0].indexOf(leading[1]);
+        if(close>=0){
+          const end=node.start+close+1;
+          this.captureArgumentProbe(offset,end,state,depth,offset);
+          this.captureCalls(offset,end,state,depth,offset);
+        }
+      }
       const condition=this.evaluate(node.condition??"",state,depth);
       const predicate=this.comparisonGuard(node);
       const prior=predicate?state.values.get(predicate):undefined;
