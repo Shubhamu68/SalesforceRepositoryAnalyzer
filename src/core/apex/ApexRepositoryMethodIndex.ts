@@ -440,7 +440,8 @@ export class ApexRepositoryMethodIndex {
       const engine=new ApexDataFlowEngine(owner.source,{maxOperations:2000,
         resolveExternal:(name,args)=>{
           if(name==="Apex.scopeField"&&args[0]?.kind==="text"&&args[0].values[0]?.toLowerCase()===owner.className.toLowerCase()&&args[1]?.kind==="text"){
-            const field=instance.entries.find(([key])=>key.toLowerCase()===args[1].values[0]?.toLowerCase());
+            const fieldName=args[1].values[0]?.toLowerCase();
+            const field=instance.entries.find(([key])=>key.toLowerCase()===fieldName);
             if(field)return field[1];
           }
           return resolveExternal?.(name,args)??this.evaluateReturn(owner.filePath,name,args,resolveExternal);
