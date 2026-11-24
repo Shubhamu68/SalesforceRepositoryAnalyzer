@@ -2,7 +2,8 @@ import path from "node:path";
 import { ApexDataFlowEngine } from "./ApexDataFlowEngine.js";
 import { indexApexMethods, maskApexSource, matchingPair, splitApexTopLevel,
   type IndexedApexMethod } from "./ApexSourceModel.js";
-import { evaluateApexExpression, unknown, type ApexValue } from "./ApexValueEvaluator.js";
+import { unknown, type ApexValue } from "./ApexValueEvaluator.js";
+import { ApexStaticValueIndex } from "./ApexStaticValueIndex.js";
 
 /** Shared repository evidence, independent of SOQL and persona permissions. */
 export interface ApexRepositorySource {
@@ -46,7 +47,7 @@ export class ApexRepositoryMethodIndex {
   private readonly classes=new Map<string,IndexedSource[]>();
   private readonly callers=new Map<string,Caller[]>();
   private readonly paths=new Map<string,IndexedSource>();
-  private readonly literalConstants=new Map<string,ApexValue>();
+  private readonly staticValues:ApexStaticValueIndex;
   private readonly callerEvidence=new Map<string,ApexCallerEvidence>();
   private readonly privateContexts=new Map<string,ApexValue[][] | null>();
   private readonly privateContextStack=new Set<string>();
@@ -56,6 +57,7 @@ export class ApexRepositoryMethodIndex {
   private nextScope=1;
 
   constructor(files:readonly ApexRepositorySource[]) {
+    this.staticValues=new ApexStaticValueIndex(files);
     const indexed:IndexedSource[]=[];
     for(const file of files) {
       const masked=maskApexSource(file.source);
@@ -66,19 +68,7 @@ export class ApexRepositoryMethodIndex {
       this.classes.set(key,[...(this.classes.get(key)??[]),owner]);
       indexed.push(owner);
       this.paths.set(path.resolve(file.filePath),owner);
-      // Only complete, literal static String constants at class scope.
-      // Runtime initializers, variables and methods are not eligible.
-      const constant=/\b(?:public|private|protected|global)?\s*(?:static\s+final|final\s+static)\s+String\s+([A-Za-z_]\w*)\s*=\s*('(?:\\.|[^'\\])*')\s*;/g;
-      let found:RegExpExecArray|null;
-      while((found=constant.exec(file.source))!==null){
-        // A comment or quoted example is not a repository constant.
-        if(/\s/.test(masked[found.index]??" ") ||
-           owner.methods.some(method=>method.start<=found!.index&&found!.index<method.end))
-          continue;
-        const evaluated=evaluateApexExpression(found[2],{values:new Map()});
-        if(evaluated.kind==="text"&&evaluated.values.length===1)
-          this.literalConstants.set((className+"."+found[1]).toLowerCase(),evaluated);
-      }
+
     }
     for(const owner of indexed) {
       const masked=maskApexSource(owner.source);
@@ -105,9 +95,11 @@ export class ApexRepositoryMethodIndex {
     }
   }
 
-  /** Source-backed constants only; never infer the values of runtime fields. */
+  /** Source-backed scalar initializers; unresolved/mutable values fail closed. */
   evaluateConstant(name:string):ApexValue|undefined {
-    return this.literalConstants.get(name.toLowerCase());
+    const cls=name.split(".")[0];
+    if(!this.staticValues.hasClass(cls) && /^[a-z]/.test(cls))return undefined;
+    return this.staticValues.resolve(name);
   }
 
   private methodKey(cls:string,name:string,arity:number):string {
