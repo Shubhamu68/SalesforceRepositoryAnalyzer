@@ -154,3 +154,15 @@ test("real OTC object mapping constants: Shipment mappings final, OS and ODGS ma
   expectText(idx,"AdvantageConstants.OTC_DRAFT_INVOICE_CREATION",
     "OTC Draft Invoice Creation");
 });
+
+test("Apex map literal key is not a static field write",()=>{
+  const idx=index(["Config.cls",[
+    "public class Config {",
+    " private static String PRODUCT = 'Product2';",
+    " public static Map<String,String> build(){",
+    "   return new Map<String,String>{ PRODUCT => 'Name' };",
+    " }",
+    "}",
+  ].join("\n")]);
+  expectText(idx,"Config.PRODUCT","Product2");
+});
