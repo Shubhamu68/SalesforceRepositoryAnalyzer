@@ -1,6 +1,22 @@
 import {maskApexSource,matchingPair} from "./ApexSourceModel.js";
 import type {ApexValue} from "./ApexValueEvaluator.js";
 
+/** Locate a top-level ternary with nested ternaries and balanced delimiters. */
+export function findApexTernary(masked:string,from=0,to=masked.length):{question:number;colon:number}|undefined{
+  let nesting=0,question=-1,inner=0;
+  for(let i=from;i<to;i++){
+    const ch=masked[i];
+    if("([{".includes(ch)){nesting++;continue;}
+    if(")]}".includes(ch)){nesting--;continue;}
+    if(nesting!==0)continue;
+    if(ch==="?"){if(question<0)question=i;else inner++;}
+    else if(ch===":"&&question>=0){
+      if(inner>0)inner--;else return {question,colon:i};
+    }
+  }
+  return undefined;
+}
+
 /** A conditional expression is not an unconditional call-site. Unknown or
  * unsupported syntax always remains possible; never invent a skipped branch.
  * Offsets are kept in the original source, including quoted Apex literals. */
@@ -30,20 +46,8 @@ export function invocationMayExecute(statement:string,offset:number,
       else if(ch===","&&argumentDepth===0)
         return offset<i?visit(from,i,depth+1):visit(i+1,to,depth+1);
     }
-    let nesting=0,question=-1,colon=-1,inner=0;
-    for(let i=from;i<to;i++){
-      const ch=masked[i];
-      if("([{".includes(ch)){nesting++;continue;}
-      if(")]}".includes(ch)){nesting--;continue;}
-      if(nesting!==0)continue;
-      if(ch==="?"){
-        if(question<0)question=i;
-        else inner++;
-      }else if(ch===":"&&question>=0){
-        if(inner>0)inner--;
-        else{colon=i;break;}
-      }
-    }
+    const ternary=findApexTernary(masked,from,to);
+    const question=ternary?.question??-1,colon=ternary?.colon??-1;
     if(question>=0&&colon>=0){
       if(offset<question)return visit(from,question,depth+1);
       const condition=statement.slice(from,question).trim();
