@@ -478,6 +478,36 @@ export class ApexDataFlowEngine {
     return proven;
   }
   private readonly guardOnlyCache=new Map<string,boolean>();
+  /** Record a repeated, pure scalar comparison as a path fact rather than
+   * inventing the runtime parameter's value. Require every lexical reference
+   * to occur in that identical comparison; writes/aliases/other reads reject it. */
+  private comparisonGuard(node:SourceNode):string|undefined{
+    const method=this.currentMethod;
+    if(!method||node.kind!=="if")return undefined;
+    const expr=(node.condition??"").trim();
+    const comparison=/^([A-Za-z_]\w*)\s*(==|!=)\s*(null|true|false|[-+]?\d+|'(?:\\.|[^'\\])*')$/i.exec(expr);
+    if(!comparison)return undefined;
+    const name=comparison[1].toLowerCase();
+    const index=method.parameters.findIndex(p=>p.toLowerCase()===name);
+    if(index<0||!/^(?:String|Boolean|Integer|Long|Decimal|Double|Id|Date|Datetime)$/i.test(method.parameterTypes?.[index]??""))return undefined;
+    const cacheKey=method.start+"|comparison|"+expr;
+    let proven=this.guardOnlyCache.get(cacheKey);
+    if(proven===undefined){
+      let guards=0;
+      const visit=(nodes:SourceNode[])=>{
+        for(const child of nodes){
+          if(child.kind==="if"&&(child.condition??"").trim()===expr)guards++;
+          visit(child.body??[]);visit(child.otherwise??[]);
+        }
+      };
+      visit(method.body);
+      const references=[...this.source.slice(method.start,method.end).matchAll(/\b[A-Za-z_]\w*\b/g)]
+        .filter(m=>m[0].toLowerCase()===name).length;
+      proven=guards>1&&references===guards;
+      this.guardOnlyCache.set(cacheKey,proven);
+    }
+    return proven?"#predicate:"+name:undefined;
+  }
   private runNode(node:SourceNode,state:State,depth:number):
     {states:State[];returns:ApexValue[]}{
     if(state.stopped)return {states:[state],returns:[]};
@@ -504,7 +534,9 @@ export class ApexDataFlowEngine {
     if(node.kind==="block")return scoped(node.body??[]);
     if(node.kind==="if"){
       const condition=this.evaluate(node.condition??"",state,depth);
-      const known=bool(condition);
+      const predicate=this.comparisonGuard(node);
+      const prior=predicate?state.values.get(predicate):undefined;
+      const known=bool(condition)??(prior?bool(prior):undefined);
       // Refine only a declared Boolean parameter in a simple, direct guard.
       // Do not assume truth of arbitrary expressions, mutable fields or calls.
       const guard=/^\s*(!\s*)?([A-Za-z_]\w*)\s*$/.exec(node.condition??"");
@@ -514,9 +546,10 @@ export class ApexDataFlowEngine {
         this.currentMethod?.parameterTypes?.[parameterIndex]?.toLowerCase()==="boolean"&&
         state.values.get(name)?.kind==="unknown"&&this.repeatedGuardOnly(name,!!guard?.[1]);
       const branch=(truth:boolean,nodes:SourceNode[]):FrameResult=>{
-        if(!refine||!name)return scoped(nodes);
+        if((!refine||!name)&&(!predicate||known!==undefined))return scoped(nodes);
         const seed=clone(state);
-        seed.values.set(name,booleanValue(guard?.[1]?!truth:truth));
+        if(refine&&name)seed.values.set(name,booleanValue(guard?.[1]?!truth:truth));
+        if(predicate&&known===undefined)seed.values.set(predicate,booleanValue(truth));
         return scoped(nodes,seed);
       };
       const paths=[...(known!==false?[branch(true,node.body??[])]:[]),
