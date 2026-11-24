@@ -89,6 +89,11 @@ export class ApexAnalysisEngine {
         return unknown("Unsupported field member access mode.");
       return repositoryIndex?.evaluateScopeField(owner,field,mode,staticMethod==="true",baseResolver);
     }
+    if(name==="Apex.construct"){
+      const type=args[0];
+      if(type?.kind!=="text"||type.values.length!==1)return unknown("Instance type is not proven.");
+      return repositoryIndex?.constructInstance(filePath,type.values[0],args.slice(1),baseResolver);
+    }
     if(name==="Apex.constant"){
       const expr=args[0];
       return expr?.kind==="text"&&expr.values.length===1
