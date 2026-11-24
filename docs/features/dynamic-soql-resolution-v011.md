@@ -267,3 +267,28 @@ The reusable evaluator now carries the exact source-backed constant-rejection re
 If these declarations are *intended* as invariants, changing their Apex modifiers to `public static final String` could make them provable, **but do not change production Apex without scanning every writer across the complete repository, impact-testing tests/integrations, and deploying it through normal change controls.** This analyzer does not automatically modify production Apex. Treat runtime mutability as a legitimate unresolved finding unless immutability is proven.
 
 The requested `Utils.cls` and a real-repository rerun are still necessary to close the remaining Field Set and helper-path cases. Keep Stage 4 on hold.
+
+## General Apex declaration and scope support
+
+The value resolver recognizes scalar String/Integer/Long/Decimal/Double/Boolean/Id member declarations at class scope from the actual source, case-insensitive primitive types, and flexible modifier order. Modifier order does not supply the security proof. public static final String, private static final String, final static String, global STATIC FINAL STRING, and default static final String qualify only when their initializer chain is completely proven. @TestVisible private static without final is treated as externally mutable.
+
+### Declarations and safe resolution
+
+| Apex declaration | Class.FIELD | Instance/same-method |
+| --- | --- | --- |
+| public static final String FIELD = 'Name'; | Proven after initializer proof | Unqualified FIELD inside the declaring class |
+| private static final String FIELD = 'Name'; | Proven from owning source class | Proven in owning class |
+| public static String FIELD = 'Name'; | UNKNOWN, externally mutable | UNKNOWN without complete path-specific proof |
+| private static String FIELD = 'Name'; | Proven only without local writes and @TestVisible exposure | Same |
+| private final String FIELD = 'Name'; | UNKNOWN: instance field, not a class constant | Can resolve this.FIELD or unqualified FIELD in instance methods |
+| public final String FIELD = 'Name'; | UNKNOWN: instance field | Can resolve in a known instance method |
+| final String FIELD = 'Name'; in a method | Not a class member | Tracked as local; shadows class member |
+| public static final String FIELD; | UNKNOWN: needs static initializer proof | UNKNOWN |
+| private final String FIELD; | UNKNOWN: instance member | UNKNOWN: constructor/initializer-block assignment may vary |
+| final List<String> FIELD = ... | Not a scalar constant | Collection contents can change despite final reference |
+
+Member lookup uses the source method's static/instance classification, the central repository index, and the same query security pipeline. Static methods cannot use this.FIELD. A method-local variable or parameter takes precedence over a class member.
+
+Recognition of a declaration does not imply its runtime value is proven. Instance-field reads through arbitrary object references, constructor-assigned final fields, static initializer blocks, properties/getters, inherited members, incomplete repositories, reflection, and mutable runtime fields remain unproven without dedicated object and control-flow analysis.
+
+Regression tests: tests/apexStaticValueIndex.test.ts (modifier matrix, scope, @TestVisible, blank fields, mutations, cycles) and tests/dynamicSoqlIntegration.test.ts (end-to-end static, final instance and shadowed local SOQL construction).
