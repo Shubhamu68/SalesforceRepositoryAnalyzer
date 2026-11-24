@@ -96,21 +96,21 @@ export class ApexRepositoryMethodIndex {
   }
 
   /** Source-backed scalar initializers; unresolved/mutable values fail closed. */
-  evaluateConstant(name:string):ApexValue|undefined {
+  evaluateConstant(name:string,metadata?: (name:string,args:ApexValue[])=>ApexValue|undefined):ApexValue|undefined {
     const cls=name.split(".")[0];
     if(!this.staticValues.hasClass(cls) && /^[a-z]/.test(cls))return undefined;
-    return this.staticValues.resolve(name);
+    return this.staticValues.resolve(name,metadata);
   }
 
   /** Resolve an unqualified static/instance member using its actual owner. */
   evaluateScopeField(owner:string,field:string,mode:"this"|"unqualified",
-    inStaticMethod:boolean):ApexValue|undefined {
+    inStaticMethod:boolean,metadata?: (name:string,args:ApexValue[])=>ApexValue|undefined):ApexValue|undefined {
     if(!this.staticValues.hasClass(owner))return undefined;
     if(mode==="this"){
       return inStaticMethod?unknown("Cannot read this."+field+" inside a static method."):
-        this.staticValues.resolveInstance(owner,field);
+        this.staticValues.resolveInstance(owner,field,metadata);
     }
-    return this.staticValues.resolveUnqualified(owner,field,inStaticMethod);
+    return this.staticValues.resolveUnqualified(owner,field,inStaticMethod,metadata);
   }
 
   private methodKey(cls:string,name:string,arity:number):string {
