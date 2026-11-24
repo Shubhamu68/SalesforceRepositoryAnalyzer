@@ -1,4 +1,5 @@
-import { ApexDataFlowEngine, type ApexCallSite } from "../core/apex/ApexDataFlowEngine.js";
+import {analyzeApexInvocations} from "../core/apex/ApexAnalysisEngine.js";
+import {dynamicDatabaseQuerySelector,type ApexCallSite} from "../core/apex/ApexInvocationModel.js";
 import {explainUncapturedApexQuery} from "../core/apex/ApexExecutionPathDiagnostics.js";
 import type { ApexRepositoryMethodIndex } from "../core/apex/ApexRepositoryMethodIndex.js";
 import type { ApexValue } from "../core/apex/ApexValueEvaluator.js";
@@ -36,14 +37,10 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
   repositoryIndex?: ApexRepositoryMethodIndex):DynamicSoqlScanResult {
   if(!/\bDatabase\s*\.\s*(?:query|countQuery|getQueryLocator)/i.test(source))
     return {queries:[],unresolved:[]};
-  const engine=new ApexDataFlowEngine(source,{
-    resolveExternal,
-    resolvePrivateContexts:owner=>repositoryIndex?.resolvePrivateContexts(filePath,owner,resolveExternal),
-  });
-  const flow=engine.analyze();
+  const flow=analyzeApexInvocations(source,filePath,dynamicDatabaseQuerySelector,resolveExternal,repositoryIndex);
   const queries:SoqlQuery[]=[];
   const unresolved:UnresolvedDynamicSoql[]=[];
-  for(const site of engine.sites){
+  for(const site of flow.sites){
     const siteId=filePath+"@"+site.offset;
     const fail=(reason:string)=>{
       let explanation=reason;
