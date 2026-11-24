@@ -144,3 +144,24 @@ test("structural mutation while iterating a custom object list retains uncertain
   const result=await new ApexAnalysisEngine(index).analyze("Consumer.cls",ctx=>extractDynamicSoqlQueries(consumer,"Consumer.cls",ctx.resolveExternal,ctx.repositoryIndex));
   assert.equal(result.unresolved.length,1);
 });
+
+
+test("direct executeBatch allocations expose bounded receiver variants without closing framework coverage",async()=>{
+  const batch="public class QueryBatch implements Database.Batchable<SObject> { private String query; public QueryBatch(String obj){query='SELECT Id FROM '+obj;} public Database.QueryLocator start(Database.BatchableContext bc){ return Database.getQueryLocator(query); } public void execute(Database.BatchableContext bc,List<SObject> scope){} public void finish(Database.BatchableContext bc){} }";
+  const caller="public class Entry { public static void run(){ Database.executeBatch(new QueryBatch('Account')); Database.executeBatch(new QueryBatch('Contact'),10); } }";
+  const index=new ApexRepositoryMethodIndex([{filePath:"QueryBatch.cls",source:batch},{filePath:"Entry.cls",source:caller}]);
+  const result=await new ApexAnalysisEngine(index).analyze("QueryBatch.cls",ctx=>extractDynamicSoqlQueries(batch,"QueryBatch.cls",ctx.resolveExternal,ctx.repositoryIndex));
+  assert.deepEqual(result.queries.map(q=>q.query).sort(),["SELECT Id FROM Account","SELECT Id FROM Contact"]);
+  assert.ok(result.queries.every(q=>q.coverage==="KNOWN_CALLER_CONTEXT"));
+  assert.equal(result.unresolved.length,1);
+  assert.equal(result.unresolved[0].knownVariants,2);
+});
+
+test("framework receiver probing does not infer state after an intervening helper effect",async()=>{
+  const batch="public class QueryBatch implements Database.Batchable<SObject> { private String query; public QueryBatch(String obj){query='SELECT Id FROM '+obj;} public Database.QueryLocator start(Database.BatchableContext bc){ mutate(); return Database.getQueryLocator(query); } private void mutate(){query='SELECT Id FROM Lead';} public void execute(Database.BatchableContext bc,List<SObject> scope){} public void finish(Database.BatchableContext bc){} }";
+  const caller="public class Entry { public static void run(){ Database.executeBatch(new QueryBatch('Account')); } }";
+  const index=new ApexRepositoryMethodIndex([{filePath:"QueryBatch.cls",source:batch},{filePath:"Entry.cls",source:caller}]);
+  const result=await new ApexAnalysisEngine(index).analyze("QueryBatch.cls",ctx=>extractDynamicSoqlQueries(batch,"QueryBatch.cls",ctx.resolveExternal,ctx.repositoryIndex));
+  assert.ok(!result.queries.some(q=>q.query==="SELECT Id FROM Account"));
+  assert.equal(result.unresolved.length,1);
+});
