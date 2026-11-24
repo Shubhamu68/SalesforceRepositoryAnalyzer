@@ -11,7 +11,28 @@ export function trackedStandaloneDeclaration(statement:string):string|undefined 
  * statements are eligible for pruning. Calls, control-flow exits and opaque
  * Apex remain live unless explicitly demonstrated irrelevant.
  */
-export function invocationDependencySlice(nodes:SourceNode[], offset:number, expression:string):Set<SourceNode> {
+type SliceEvidence={nodes:Set<SourceNode>;identifiers:Set<string>};
+const sliceCache=new WeakMap<SourceNode[],Map<string,SliceEvidence>>();
+/** Reuse immutable syntax-only slices across caller seeds and passes. */
+export function invocationDependencySlice(nodes:SourceNode[],offset:number,expression:string):Set<SourceNode>{
+  return new Set(dependencyEvidence(nodes,offset,expression).nodes);
+}
+/** A ranking hint, not proof that omitted parameters cannot affect results. */
+export function invocationRelevantIdentifiers(nodes:SourceNode[],offset:number,expression:string):ReadonlySet<string>{
+  return new Set(dependencyEvidence(nodes,offset,expression).identifiers);
+}
+function dependencyEvidence(nodes:SourceNode[],offset:number,expression:string):SliceEvidence{
+  if(!Object.isFrozen(nodes))return computeSlice(nodes,offset,expression);
+  let cache=sliceCache.get(nodes);
+  if(!cache){cache=new Map();sliceCache.set(nodes,cache);}
+  const key=offset+"|"+expression;
+  const previous=cache.get(key);
+  if(previous)return previous;
+  const computed=computeSlice(nodes,offset,expression);
+  if(cache.size>=32)cache.delete(cache.keys().next().value!);
+  cache.set(key,computed);return computed;
+}
+function computeSlice(nodes:SourceNode[], offset:number, expression:string):SliceEvidence {
   const live=new Set<SourceNode>();
   const relevant=new Set<string>();
   const identifiers=(text:string):string[]=>[...maskApexSource(text).matchAll(/\b[A-Za-z_]\w*\b/g)]
@@ -83,9 +104,9 @@ export function invocationDependencySlice(nodes:SourceNode[], offset:number, exp
   for(let pass=0;pass<8;pass++){
     const before=live.size+relevant.size;
     for(let i=nodes.length-1;i>=0;i--)mark(nodes[i]);
-    if(before===live.size+relevant.size)return live;
+    if(before===live.size+relevant.size)return {nodes:live,identifiers:relevant};
   }
   const retain=(items:SourceNode[])=>{for(const node of items){if(node.start>offset)continue;live.add(node);retain(node.body??[]);retain(node.otherwise??[]);}};
   retain(nodes);
-  return live;
+  return {nodes:live,identifiers:relevant};
 }
