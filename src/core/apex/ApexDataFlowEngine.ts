@@ -365,6 +365,8 @@ export class ApexDataFlowEngine {
       }else{
         next=unknown("Collection "+name+" was mutated without a known initial value: "+cause(existing));
       }
+      if(existing.kind==="instanceList"&&[...state.values].some(([key,value])=>key.startsWith("#iterator:")&&value===existing))
+        next=unknown("Custom Apex list structure changed during iteration.");
       if(next.kind==="collection"&&next.items.length>2000||next.kind==="map"&&next.entries.length>200||next.kind==="instanceList"&&next.items.length>100)
         next=unknown("Collection mutation exceeded the bounded inventory size.");
       if(!replaceCollectionAliases(state,existing,next))
