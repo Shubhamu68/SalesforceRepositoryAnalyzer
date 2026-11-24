@@ -3,7 +3,7 @@ import {
   type IndexedApexMethod, type SourceNode,
 } from "./ApexSourceModel.js";
 import {
-  evaluateApexExpression, listValue, textValue, unknown,
+  evaluateApexExpression, addApexValues, listValue, textValue, unknown,
   type ApexEnvironment, type ApexValue, type ApexExpressionContext,
 } from "./ApexValueEvaluator.js";
 import {ApexLocalLiveness,declaredLoopLocals} from "./ApexLocalLiveness.js";
@@ -76,7 +76,7 @@ function replaceCollectionAliases(state:State,existing:ApexValue,next:ApexValue)
   return found;
 }
 function bool(value: ApexValue): boolean | undefined {
-  if(value.kind!=="text"||value.values.length!==1)return undefined;
+  if(value.kind!=="text"||value.scalarType!=="boolean"||value.values.length!==1)return undefined;
   if(value.values[0]==="true")return true;
   if(value.values[0]==="false")return false;
   return undefined;
@@ -377,24 +377,12 @@ export class ApexDataFlowEngine {
       if(operator==="=")state.values.set(name,value);
       else {
         const former=state.values.get(name);
-        if(former?.kind==="text"&&value.kind==="text"){
-          const values:string[]=[];
-          for(const l of former.values)for(const r of value.values){
-            values.push(l+r);
-            if(values.length>this.options.maxPaths){
-              state.values.set(name,unknown("Too many += alternatives for "+name));
-              return;
-            }
-          }
-          state.values.set(name,{kind:"text",values:[...new Set(values)]});
-        }else {
-          const previousReason=former?.kind==="unknown"?former.reason:
-            former?"Previous value is not a proven String.":"No proven previous assignment.";
-          const appendedReason=value.kind==="unknown"?value.reason:
-            value.kind!=="text"?"Appended expression is not a proven String.":undefined;
-          state.values.set(name,unknown("Cannot determine += value of "+name+": "+
-            [previousReason,appendedReason].filter(Boolean).join("; ")));
-        }
+        const added=former?addApexValues(former,value):unknown("No proven previous assignment.");
+        if(added.kind==="text"&&added.values.length>this.options.maxPaths)
+          state.values.set(name,unknown("Too many += alternatives for "+name));
+        else if(added.kind==="unknown")
+          state.values.set(name,unknown("Cannot determine += value of "+name+": "+added.reason));
+        else state.values.set(name,added);
       }
       this.taintCollectionsPassedToUnknownCalls(rhs,state);
       return;
