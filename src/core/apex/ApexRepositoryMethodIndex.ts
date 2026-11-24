@@ -5,6 +5,7 @@ import { indexApexMethods, maskApexSource, matchingPair, splitApexTopLevel,
 import { unknown, type ApexValue } from "./ApexValueEvaluator.js";
 import {ApexInstanceIndex} from "./ApexInstanceModel.js";
 import { ApexStaticValueIndex } from "./ApexStaticValueIndex.js";
+import {discoverApexInvocations} from "./ApexInvocationModel.js";
 
 /** Shared repository evidence, independent of SOQL and persona permissions. */
 export interface ApexRepositorySource {
@@ -56,6 +57,7 @@ const MAX_CACHED_SUMMARIES = 1024;
 export class ApexRepositoryMethodIndex {
   private readonly classes=new Map<string,IndexedSource[]>();
   private readonly callers=new Map<string,Caller[]>();
+  private readonly batchAllocations=new Map<string,Caller[]>();
   private readonly paths=new Map<string,IndexedSource>();
   private readonly staticValues:ApexStaticValueIndex;
   private readonly instances:ApexInstanceIndex;
@@ -85,6 +87,23 @@ export class ApexRepositoryMethodIndex {
     }
     for(const owner of indexed) {
       const masked=maskApexSource(owner.source);
+      // Only direct framework dispatch of a newly allocated receiver. Calls
+      // through a local alias, scheduler, platform or unknown receiver remain open.
+      if(!this.classes.has("database")&&!/\b[A-Za-z_]\w*\s+Database\s*(?:[=;,)])/i.test(masked)){
+        const calls=discoverApexInvocations(owner.source,(name,args)=>
+          /^Database\.executeBatch$/i.test(name)&&args.length>=1&&args.length<=2?{method:name,argumentIndices:[0]}:undefined);
+        for(const site of calls){
+          const allocation=/^\s*new\s+([A-Za-z_]\w*)\s*\(/i.exec(site.argument);
+          if(!allocation)continue;
+          const method=owner.methods.filter(m=>m.start<=site.offset&&site.offset<m.end)
+            .sort((a,b)=>(a.end-a.start)-(b.end-b.start))[0];
+          if(!method)continue;
+          const key=allocation[1].toLowerCase();
+          const candidates=this.batchAllocations.get(key)??[];
+          if(candidates.length<=MAX_CALL_CONTEXTS)candidates.push({caller:owner,method,offset:site.offset,expressions:[site.argument]});
+          this.batchAllocations.set(key,candidates);
+        }
+      }
       const expression=/\b([A-Za-z_]\w*)(?:\s*\.\s*([A-Za-z_]\w*))?\s*\(/g;
       let match:RegExpExecArray|null;
       while((match=expression.exec(masked))!==null) {
@@ -381,11 +400,64 @@ export class ApexRepositoryMethodIndex {
     return result;
   }
 
+  /**
+   * Partial receiver evidence for direct Database.executeBatch(new T(...)).
+   * Only a first-statement direct invocation in the framework start method
+   * is supported: no intervening writes, helper effects or heap transfer.
+   */
+  private probeBatchReceivers(owner:IndexedSource,method:IndexedApexMethod,offset:number,expressions:readonly string[],
+    resolveExternal?: (name:string,args:ApexValue[])=>ApexValue|undefined):
+    {count:number;arguments:ApexValue[][];bounded:boolean}{
+    const empty={count:0,arguments:[] as ApexValue[][],bounded:false};
+    if(method.isStatic||method.name.toLowerCase()!=="start"||method.parameters.length!==1)return empty;
+    const masked=maskApexSource(owner.source);
+    const declaration=/\bclass\s+([A-Za-z_]\w*)\s+implements\s+Database\s*\.\s*Batchable\s*<\s*[A-Za-z_]\w*\s*>\s*\{/i.exec(masked);
+    if(!declaration||declaration[1].toLowerCase()!==owner.className.toLowerCase()||
+       !/\bstart\s*\(\s*Database\s*\.\s*BatchableContext\s+[A-Za-z_]\w*\s*\)\s*\{\s*$/i.test(masked.slice(Math.max(0,method.start-250),method.start)))return empty;
+    const first=method.body[0];
+    if(first?.kind!=="statement"||offset<first.start||offset>=first.end||
+      !/^\s*(?:return\s*)?$/.test(masked.slice(first.start,offset)))return empty;
+    const calls=this.batchAllocations.get(owner.className.toLowerCase())??[];
+    const receivers=new Map<string,Extract<ApexValue,{kind:"instance"}>>();
+    let bounded=calls.length>8;
+    for(const call of calls.slice(0,8)){
+      const engine=new ApexDataFlowEngine(call.caller.source,{maxOperations:2000,
+        resolveExternal:(name,args)=>{
+          if(name==="Apex.construct"&&args[0]?.kind==="text"&&args[0].values.length===1)
+            return this.constructInstance(call.caller.filePath,args[0].values[0],args.slice(1),resolveExternal);
+          return resolveExternal?.(name,args)??this.evaluateReturn(call.caller.filePath,name,args,resolveExternal);
+        }});
+      for(const args of engine.evaluateArgumentsAt(call.method,call.offset,call.expressions)){
+        const instance=args[0];
+        if(instance?.kind==="instance"&&instance.className.toLowerCase()===owner.className.toLowerCase())
+          receivers.set(JSON.stringify(instance),instance);
+        if(receivers.size>=8){bounded=true;break;}
+      }
+      if(receivers.size>=8)break;
+    }
+    const argumentsByValue=new Map<string,ApexValue[]>();
+    for(const instance of receivers.values()){
+      const engine=new ApexDataFlowEngine(owner.source,{maxOperations:2000,
+        resolveExternal:(name,args)=>{
+          if(name==="Apex.scopeField"&&args[0]?.kind==="text"&&args[0].values[0]?.toLowerCase()===owner.className.toLowerCase()&&args[1]?.kind==="text"){
+            const field=instance.entries.find(([key])=>key.toLowerCase()===args[1].values[0]?.toLowerCase());
+            if(field)return field[1];
+          }
+          return resolveExternal?.(name,args)??this.evaluateReturn(owner.filePath,name,args,resolveExternal);
+        }});
+      for(const args of engine.evaluateArgumentsAt(method,offset,expressions)){
+        if(args.some(v=>v.kind==="unknown"))continue;
+        argumentsByValue.set(JSON.stringify(args),args);
+      }
+    }
+    return {count:receivers.size,arguments:[...argumentsByValue.values()],bounded};
+  }
+
   /** Evaluate selected invocation arguments in proven incoming contexts.
    * Evidence is kept separate from the all-path verdict and from permissions. */
   probeInvocationContexts(filePath:string,offset:number,expressions:readonly string[],
     resolveExternal?: (name:string,args:ApexValue[])=>ApexValue|undefined):{
-      contexts:ApexCallerContexts;arguments:ApexValue[][];bounded:boolean
+      contexts:ApexCallerContexts;arguments:ApexValue[][];bounded:boolean;receiverContexts?:number
     }|undefined {
     const owner=this.paths.get(path.resolve(filePath));
     const method=owner?.methods.filter(m=>m.start<=offset&&offset<m.end)
@@ -405,7 +477,9 @@ export class ApexRepositoryMethodIndex {
         argumentsByValue.set(JSON.stringify(args),args);
       }
     }
-    return {contexts,arguments:[...argumentsByValue.values()],bounded};
+    const batch=this.probeBatchReceivers(owner,method,offset,expressions,resolveExternal);
+    for(const args of batch.arguments)argumentsByValue.set(JSON.stringify(args),args);
+    return {contexts,arguments:[...argumentsByValue.values()],bounded:bounded||batch.bounded,receiverContexts:batch.count};
   }
 
   /**
