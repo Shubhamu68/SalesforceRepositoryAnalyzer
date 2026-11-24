@@ -212,7 +212,8 @@ export class ApexRepositoryMethodIndex {
       this.scopeId(resolveExternal);
     if(this.active.has(id))return unknown("Recursive repository helper call: "+name);
     if(this.active.size>=MAX_METHOD_DEPTH)return unknown("Cross-class helper depth exceeded: "+name);
-    const cached=this.summaries.get(id);
+    const cacheable=args.every(v=>v.kind==="text"||v.kind==="number"||v.kind==="null"||v.kind==="unknown");
+    const cached=cacheable?this.summaries.get(id):undefined;
     if(cached)return cached;
     this.active.add(id);
     let result:ApexValue;
@@ -225,7 +226,7 @@ export class ApexRepositoryMethodIndex {
       if(result.kind==="instance"||result.kind==="instanceList")result=unknown("Instance-return alias transfer is not yet proven.");
     }finally{this.active.delete(id);}
     if(this.summaries.size>=MAX_CACHED_SUMMARIES)this.summaries.clear();
-    this.summaries.set(id,result);
+    if(cacheable&&(result.kind==="text"||result.kind==="number"||result.kind==="null"||result.kind==="unknown"))this.summaries.set(id,result);
     return result;
   }
 
