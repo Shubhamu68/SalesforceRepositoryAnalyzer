@@ -6,6 +6,9 @@ import {
   evaluateApexExpression, listValue, textValue, unknown,
   type ApexEnvironment, type ApexValue, type ApexExpressionContext,
 } from "./ApexValueEvaluator.js";
+import {ApexLocalLiveness} from "./ApexLocalLiveness.js";
+import {apexStateIdentity} from "./ApexStateIdentity.js";
+import {ApexExecutionBudget} from "./ApexExecutionBudget.js";
 
 /** Capture is by source offset, not file+line, so alternatives never collide. */
 export interface ApexCallSite {
@@ -40,10 +43,10 @@ function trackedStandaloneDeclaration(statement:string):string|undefined {
 
 /** Identical symbolic states do not represent additional structural query variants. */
 function mergeEquivalentStates(states:State[]):State[] {
+  if(states.length<2)return states;
   const distinct=new Map<string,State>();
   for(const state of states) {
-    const variables=[...state.values.entries()].sort(([a],[b])=>a.localeCompare(b));
-    const key=JSON.stringify([state.stopped===true,variables]);
+    const key=apexStateIdentity(state.values,state.stopped===true);
     if(!distinct.has(key))distinct.set(key,state);
   }
   return [...distinct.values()];
@@ -187,8 +190,9 @@ export class ApexDataFlowEngine {
   private readonly options: Required<Pick<ApexFlowOptions,"maxPaths"|"maxOperations"|"maxDepth">> & ApexFlowOptions;
   private readonly summaries = new Map<string,ApexValue>();
   private readonly activeCalls = new Set<string>();
-  private operationCount = 0;
-  private exceeded = false;
+  private readonly budget:ApexExecutionBudget;
+  private get exceeded():boolean{return this.budget.exceeded;}
+  private readonly liveness=new Map<IndexedApexMethod,ApexLocalLiveness>();
   /** Per-site failure attribution: a large unrelated method never taints other sites. */
   private readonly failures=new Map<number,string>();
   private activeStopOffset:number|undefined;
@@ -202,6 +206,7 @@ export class ApexDataFlowEngine {
     this.options={maxPaths:options.maxPaths??DEFAULT_PATHS,
       maxOperations:options.maxOperations??DEFAULT_OPERATIONS,
       maxDepth:options.maxDepth??DEFAULT_DEPTH,...options};
+    this.budget=new ApexExecutionBudget(this.options.maxOperations,this.options.maxPaths);
     const masked=maskApexSource(source);
     this.className=/\bclass\s+([A-Za-z_]\w*)\b/i.exec(masked)?.[1];
     this.sites=findCalls(source,masked);
@@ -456,8 +461,7 @@ export class ApexDataFlowEngine {
     {states:State[];returns:ApexValue[]}{
     if(state.stopped)return {states:[state],returns:[]};
     if(depth===0&&this.activeSlice&&!this.activeSlice.has(node))return {states:[state],returns:[]};
-    if(++this.operationCount>this.options.maxOperations){
-      this.exceeded=true;
+    if(!this.budget.visit(node.start,this.currentMethod?.name??"(unknown method)")){
       return {states:[{values:new Map([...state.values.keys()].map((k):[string,ApexValue]=>
         [k,unknown("Apex operation budget exceeded.")]))}],returns:[]};
     }
@@ -492,8 +496,11 @@ export class ApexDataFlowEngine {
       if((iterable.kind==="collection"||iterable.kind==="records")&&
          node.loopVariable&&iterable.items.length<=MAX_LOOP_ITEMS){
         let states=[clone(state)], returns:ApexValue[]=[];
+        const outerKeys=new Set(state.values.keys());
         for(const item of iterable.items){
+          if(this.exceeded)break;
           states=states.map(s=>{
+            if(s.stopped)return s;
             const child=clone(s);
             child.values.set(node.loopVariable!,iterable.kind==="records"
               ?{kind:"record",entries:item as Array<[string,ApexValue]>}
@@ -501,7 +508,15 @@ export class ApexDataFlowEngine {
             return child;
           });
           const result=this.execute(node.body??[],states,depth);
-          states=result.states; returns.push(...result.returns);
+          // Each iteration has its own lexical locals. Keeping these in the
+          // next iteration incorrectly multiplies otherwise identical paths.
+          for(const frame of result.states){
+            for(const key of frame.values.keys()){
+              if(!outerKeys.has(key)&&key!==node.loopVariable&&!key.includes("."))
+                frame.values.delete(key);
+            }
+          }
+          states=mergeEquivalentStates(result.states); returns.push(...result.returns);
         }
         for(const frame of states){
           if(!state.values.has(node.loopVariable!))frame.values.delete(node.loopVariable!);
@@ -547,6 +562,12 @@ export class ApexDataFlowEngine {
   }
   private execute(nodes:SourceNode[],initial:State[],depth:number):FrameResult{
     let states=initial,returns:ApexValue[]=[];
+    const owner=this.currentMethod;
+    let live:ApexLocalLiveness|undefined;
+    if(owner&&nodes===owner.body){
+      live=this.liveness.get(owner);
+      if(!live){live=new ApexLocalLiveness(this.source,owner);this.liveness.set(owner,live);}
+    }
     for(const node of nodes){
       // Only the source prefix leading to this execution site can contribute
       // to its query value. Helpers (depth>0) must evaluate their full body.
@@ -554,12 +575,16 @@ export class ApexDataFlowEngine {
       if(this.exceeded)break;
       const next:State[]=[];
       for(const state of states){
+        if(this.exceeded)break;
         const result=this.runNode(node,state,depth);
         next.push(...result.states);returns.push(...result.returns);
       }
+      if(this.exceeded)break;
+      // Drop only proven dead root-local scalar bindings, not mutable aliases,
+      // fields, loop-carried values or parameters, before state deduplication.
+      if(live)for(const frame of next)live.discardDeadScalars(frame.values,node.end);
       const distinct=mergeEquivalentStates(next);
-      if(distinct.length>this.options.maxPaths){
-        this.exceeded=true;
+      if(!this.budget.checkPaths(distinct.length,node.start,owner?.name??"(unknown method)")){
         states=[{values:new Map([...distinct[0].values.keys()].map((k):[string,ApexValue]=>[k,
           unknown("Query path enumeration budget exceeded.")]))}];
       }else states=distinct;
@@ -574,8 +599,7 @@ export class ApexDataFlowEngine {
   summarizeMethodReturn(method:IndexedApexMethod,args:readonly ApexValue[]):ApexValue {
     if(method.parameters.length!==args.length)
       return unknown("Apex helper argument count does not match the declaration.");
-    this.operationCount=0;
-    this.exceeded=false;
+    this.budget.reset();
     this.activeSlice=undefined;
     this.activeQueryOffset=undefined;
     this.activeStopOffset=undefined;
@@ -586,7 +610,7 @@ export class ApexDataFlowEngine {
     let result:FrameResult;
     try{result=this.execute(method.body,[{values}],1);}
     finally{this.currentMethod=previousMethod;}
-    if(this.exceeded)return unknown("Apex helper exceeds bounded analysis budget.");
+    if(this.exceeded)return unknown("Apex helper exceeds bounded analysis budget: "+this.budget.reason);
     if(!result.returns.length || result.states.some(state=>!state.stopped))
       return unknown("Apex helper has an execution path without a proven return.");
     if(result.returns.some(value=>value.kind==="unknown"))
@@ -610,8 +634,7 @@ export class ApexDataFlowEngine {
    */
   evaluateArgumentsAt(method:IndexedApexMethod,offset:number,
     expressions:readonly string[],callerArgs?:readonly ApexValue[]):ApexValue[][] {
-    this.operationCount=0;
-    this.exceeded=false;
+    this.budget.reset();
     this.activeQueryOffset=undefined;
     this.activeStopOffset=offset;
     this.activeCalls.clear();
@@ -622,14 +645,17 @@ export class ApexDataFlowEngine {
     method.parameters.forEach((name,index)=>env.set(name,
       callerArgs?.length===method.parameters.length
         ?callerArgs[index] : unknown("Runtime caller parameter: "+name)));
-    this.execute(method.body,[{values:env}],0);
+    const previousMethod=this.currentMethod;
+    this.currentMethod=method;
+    try{this.execute(method.body,[{values:env}],0);}
+    finally{this.currentMethod=previousMethod;}
     const result=this.argumentProbe.results;
     this.argumentProbe=undefined;
     this.activeSlice=undefined;
     this.activeStopOffset=undefined;
     if(this.exceeded || !result.length)
       return [expressions.map(()=>unknown(this.exceeded
-        ?"Caller argument path exceeds bounded analysis budget."
+        ?"Caller argument path exceeds bounded analysis budget: "+this.budget.reason
         :"Caller invocation has no proven execution context."))];
     return result;
   }
@@ -667,8 +693,7 @@ export class ApexDataFlowEngine {
   } {
     let anyExceeded=false;
     for(const site of this.sites){
-      this.operationCount=0;
-      this.exceeded=false;
+      this.budget.reset();
       this.activeQueryOffset=site.offset;
       this.activeStopOffset=site.offset;
       this.activeCalls.clear();
@@ -743,7 +768,7 @@ export class ApexDataFlowEngine {
         // A sliced method may omit a side-effecting control-flow dependency.
         // Retry without slicing rather than misreporting a recognized query
         // as an invocation outside a method. Unproven values remain unknown.
-        this.operationCount=0;
+        this.budget.reset();
         this.activeSlice=undefined;
         this.activeStopOffset=site.offset;
         const env=new Map<string,ApexValue>();
@@ -752,7 +777,7 @@ export class ApexDataFlowEngine {
       }
       if(this.exceeded){
         this.failures.set(site.offset,
-          "This execution site's dependency path exceeded its bounded analysis budget.");
+          "This execution site's dependency path exceeded its bounded analysis budget: "+this.budget.reason);
         anyExceeded=true;
         // A bounded helper summary should not be reused for another site.
         this.summaries.clear();
