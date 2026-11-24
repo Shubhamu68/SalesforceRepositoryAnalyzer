@@ -162,6 +162,16 @@ async function scanDynamicSource(source:string,filePath:string,
         :unknown("Custom Label "+label+" unavailable or incomplete in connected org: "+
           (result?.reason??"No authoritative Tooling API value."));
     }
+    if(name==="Apex.scopeField"){
+      if(args.length!==4||args.some(item=>
+        item.kind!=="text"||item.values.length!==1))
+        return unknown("Member field source/owner is not proven.");
+      const [owner,field,mode,staticMethod]=args.map(item=>
+        item.kind==="text"?item.values[0]:"");
+      if(mode!=="this"&&mode!=="unqualified")
+        return unknown("Unsupported field member access mode.");
+      return repositoryIndex?.evaluateScopeField(owner,field,mode,staticMethod==="true");
+    }
     if(name==="Apex.constant"){
       const expr=args[0];
       return expr?.kind==="text"&&expr.values.length===1
