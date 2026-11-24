@@ -258,7 +258,7 @@ test("Stage 3 final: unsupported collection mutation cannot preserve stale field
     "public class UnsafeList {",
     " public static void run(){",
     "   List<String> fields=new List<String>{'Id','Name'};",
-    "   fields.remove(0);",
+    "   fields.remove(indexFromRuntime);",
     "   Database.query('SELECT '+String.join(fields, ',')+' FROM Account');",
     " }",
     "}",
