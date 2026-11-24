@@ -925,3 +925,69 @@ test("Stage 2 hardening: multiline SOQL concatenation ignores Apex source commen
   assert.equal(result.queries[0].query,
     "SELECT Id, Name FROM Account WHERE IsDeleted = false");
 });
+
+test("v0.1.1 genuine cross-class static initializer chain builds complete dynamic SOQL",async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),"v011-constant-chain-"));
+  try {
+    await writeFile(path.join(dir,"StaticObjects.cls"),[
+      "public class StaticObjects {",
+      " public static final String PRODUCT2 = 'Product2';",
+      "}",
+    ].join("\n"));
+    await writeFile(path.join(dir,"AdvantageConstants.cls"),[
+      "public class AdvantageConstants {",
+      " public static final String PRODUCT_APINAME = StaticObjects.PRODUCT2;",
+      "}",
+    ].join("\n"));
+    await writeFile(path.join(dir,"ProductQuery.cls"),[
+      "public class ProductQuery {",
+      " public static void run(){",
+      "   String q = 'SELECT Id FROM '+AdvantageConstants.PRODUCT_APINAME;",
+      "   Database.query(q);",
+      " }",
+      "}",
+    ].join("\n"));
+    const result=await scanApexSoqlWithUnresolved(dir);
+    assert.deepEqual(result.queries.map(x=>x.query),["SELECT Id FROM Product2"]);
+    assert.equal(result.unresolvedDynamic.length,0);
+  }finally {await rm(dir,{recursive:true,force:true});}
+});
+
+test("v0.1.1 public static mutable object name fails closed despite known literal initializer",async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),"v011-constant-mutable-"));
+  try{
+    await writeFile(path.join(dir,"AdvantageConstants.cls"),[
+      "public class AdvantageConstants {",
+      " public static String PRODUCT_APINAME = 'Product2';",
+      "}",
+    ].join("\n"));
+    await writeFile(path.join(dir,"ProductQuery.cls"),[
+      "public class ProductQuery {",
+      " public static void run(){",
+      "   Database.query('SELECT Id FROM '+AdvantageConstants.PRODUCT_APINAME);",
+      " }",
+      "}",
+    ].join("\n"));
+    const result=await scanApexSoqlWithUnresolved(dir);
+    assert.equal(result.queries.length,0);
+    assert.equal(result.unresolvedDynamic.length,1);
+    assert.match(result.unresolvedDynamic[0].reason,/externally mutable/i);
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test("v0.1.1 missing AdvantageConstants source yields explicit missing-class diagnostic",async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),"v011-constant-missing-"));
+  try{
+    await writeFile(path.join(dir,"ProductQuery.cls"),[
+      "public class ProductQuery {",
+      " public static void run(){",
+      "   Database.query('SELECT Id FROM '+AdvantageConstants.PRODUCT_APINAME);",
+      " }",
+      "}",
+    ].join("\n"));
+    const result=await scanApexSoqlWithUnresolved(dir);
+    assert.equal(result.queries.length,0);
+    assert.equal(result.unresolvedDynamic.length,1);
+    assert.match(result.unresolvedDynamic[0].reason,/AdvantageConstants.*missing/i);
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
