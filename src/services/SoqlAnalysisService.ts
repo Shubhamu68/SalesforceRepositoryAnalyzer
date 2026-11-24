@@ -63,7 +63,7 @@ function unresolvedDynamicFindings(sites: readonly UnresolvedDynamicSoql[]): Soq
     declaredMode: "UNSPECIFIED",
     effectiveMode: "UNKNOWN",
     runtimeImpact: "Not assessed",
-    reason: `Dynamic SOQL could not be parsed and verified because ${site.reason} OLS/FLS analysis was not performed for this query.`,
+    reason: site.knownVariants ? `Dynamic SOQL execution coverage is incomplete: ${site.reason} OLS/FLS findings for known caller variants apply only to those variants; unproven paths were not assessed.` : `Dynamic SOQL could not be parsed and verified because ${site.reason} OLS/FLS analysis was not performed for this query.`,
   }));
 }
 
