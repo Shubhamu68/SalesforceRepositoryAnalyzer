@@ -46,12 +46,28 @@ export function timeSoqlSync<T>(name: string, work: () => T): T {
 
 // Salesforce query category is determined from a fixed allowlist of table
 // names. The original SOQL string and WHERE filters are never logged.
-function categoryOf(soql: string): string {
-  const table = /\bFROM\s+(UserEntityAccess|UserFieldAccess|EntityParticle|Profile|PermissionSetGroup|PermissionSetAssignment|PermissionSet|User)\b/i.exec(soql)?.[1]?.toLowerCase();
-  if (table === "userentityaccess" || table === "userfieldaccess") return "org.access";
-  if (table === "entityparticle") return "org.field_metadata";
-  if (table) return "org.persona_inventory";
+export function categoryOf(soql:string):string{
+  // Our internal read requests use ordinary SELECT projections. Mask quoted
+  // values so a literal containing FROM cannot impersonate a table name.
+  const masked=soql.replace(/'(?:\\.|[^'\\])*'/g,"''");
+  const table=/\bFROM\s+([A-Za-z_]\w*)\b/i.exec(masked)?.[1]?.toLowerCase();
+  if(table==="userentityaccess"||table==="userfieldaccess")return "org.access";
+  if(table==="entityparticle")return "org.field_metadata";
+  if(table&&["profile","permissionsetgroup","permissionsetassignment","permissionset","user","userlogin"].includes(table))return "org.persona_inventory";
+  if(table==="externalstring"||table==="customlabel")return "org.custom_label";
+  if(table==="fieldset")return "org.field_set";
+  if(table?.endsWith("__mdt"))return "org.custom_metadata";
+  if(table==="entitydefinition"||table==="fielddefinition"||table==="relationshipdomain")return "org.schema_metadata";
+  if(table&&["objectpermissions","fieldpermissions","permissionsetgroupcomponent","mutingpermissionset"].includes(table))return "org.permission_metadata";
   return "org.other";
+}
+const allowedSalesforceCodes=new Set(["INVALID_TYPE","INVALID_FIELD","MALFORMED_QUERY","INVALID_QUERY_FILTER_OPERATOR",
+  "QUERY_TOO_COMPLICATED","INVALID_QUERY_LOCATOR","INVALID_SESSION_ID","INSUFFICIENT_ACCESS",
+  "INSUFFICIENT_ACCESS_OR_READONLY","REQUEST_LIMIT_EXCEEDED","EXCEEDED_ID_LIMIT","FUNCTIONALITY_NOT_ENABLED",
+  "INVALID_CROSS_REFERENCE_KEY","INVALID_OPERATION","UNKNOWN_EXCEPTION","NOT_FOUND"]);
+/** Accept only a fixed allowlist; never emit arbitrary server payload strings. */
+export function safeSalesforceErrorCode(code:unknown):string{
+  return typeof code==="string"&&allowedSalesforceCodes.has(code)?code:"OTHER";
 }
 
 /** One invocation of queryAll, which can internally fetch multiple pages. */
@@ -73,6 +89,12 @@ export async function timeSoqlOrgQuery<T>(soql: string, work: () => Promise<T>):
       ?"http_"+status:"transport_or_other";
     recordSoqlCount("org.queryAll.failure."+type);
     recordSoqlCount(category+".failure."+type);
+    const code=(error as {salesforceErrorCode?:unknown}|null)?.salesforceErrorCode;
+    if(code!==undefined){
+      const safe=safeSalesforceErrorCode(code);
+      recordSoqlCount("org.queryAll.error_code."+safe);
+      recordSoqlCount(category+".error_code."+safe);
+    }
     throw error;
   } finally {
     const ms = elapsedMs(started);
