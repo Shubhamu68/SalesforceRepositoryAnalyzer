@@ -150,3 +150,20 @@ test("guard refinement is not reused when a parameter is reassigned",()=>{
   assert.equal(result.kind,"text");
   if(result.kind==="text")assert.deepEqual(result.values.sort(),["SELECT Id FROM Account","SELECT Name FROM Account"]);
 });
+
+
+test("unsupported compound writes cannot retain a stale query-relevant numeric value",()=>{
+  const code="public class Builder { public static void run(){ Integer pageSize=10; pageSize*=2; Database.query('SELECT Id FROM Account LIMIT '+pageSize); } }";
+  const result=extractDynamicSoqlQueries(code,"Builder.cls");
+  assert.equal(result.queries.length,0);
+  assert.equal(result.unresolved.length,1);
+  assert.match(result.unresolved[0].reason,/Unsupported Apex write/);
+});
+
+test("unknown base query followed by security suffix remains an unresolved partial expression",()=>{
+  const code="public class Builder { public static void run(String base){ String q=base; q+=' WITH SECURITY_ENFORCED'; Database.query(q); } }";
+  const result=extractDynamicSoqlQueries(code,"Builder.cls");
+  assert.equal(result.queries.length,0);
+  assert.equal(result.unresolved.length,1);
+  assert.match(result.unresolved[0].reason,/Partial expression evidence/);
+});
