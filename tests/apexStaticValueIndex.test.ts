@@ -31,7 +31,7 @@ test("v0.1.1 constant chain: static final aliases, cross-class members, derived 
   expectText(idx,"AdvantageConstants.AUTHORIZED_PRODUCT_APINAME","Authorized_Product__c");
   expectText(idx,"AdvantageConstants.QUERY_OBJECT","Product2");
   expectText(idx,"AdvantageConstants.EXTRA","Product2 WHERE IsActive = true");
-  expectText(idx,"AdvantageConstants.ACTIVE","true");
+  assert.deepEqual(idx.resolve("AdvantageConstants.ACTIVE"),{kind:"text",values:["true"],scalarType:"boolean"});
   assert.deepEqual(idx.resolve("Objects.LIMIT"),{kind:"number",value:12});
 });
 
