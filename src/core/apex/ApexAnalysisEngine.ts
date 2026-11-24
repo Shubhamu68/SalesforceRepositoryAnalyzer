@@ -1,3 +1,5 @@
+import {ApexDataFlowEngine,type ApexFlowOptions} from "./ApexDataFlowEngine.js";
+import type {ApexInvocationSelector} from "./ApexInvocationModel.js";
 import {listValue,unknown,type ApexValue} from "./ApexValueEvaluator.js";
 import type {ApexRepositoryMethodIndex} from "./ApexRepositoryMethodIndex.js";
 import {planCustomMetadataRequest,resolveCustomMetadataRows,type CustomMetadataRequest,type CustomMetadataInventory} from "./ApexCustomMetadataQueries.js";
@@ -21,6 +23,15 @@ function memoRead<T>(cache:Map<string,Promise<T>>,key:string,read:()=>Promise<T>
   return pending;
 }
 export type ApexExternalResolver=(name:string,args:ApexValue[])=>ApexValue|undefined;
+export type ApexInvocationAnalysis=ReturnType<ApexDataFlowEngine["analyze"]>&{sites:ApexDataFlowEngine["sites"]};
+/** Feature-independent synchronous invocation analysis using a supplied resolver. */
+export function analyzeApexInvocations(source:string,filePath:string,select:ApexInvocationSelector,
+  resolveExternal?:ApexExternalResolver,repositoryIndex?:ApexRepositoryMethodIndex,
+  limits?:Pick<ApexFlowOptions,"maxOperations"|"maxPaths"|"maxDepth">):ApexInvocationAnalysis{
+  const engine=new ApexDataFlowEngine(source,{...limits,selectInvocation:select,resolveExternal,
+    resolvePrivateContexts:owner=>repositoryIndex?.resolvePrivateContexts(filePath,owner,resolveExternal)});
+  return {...engine.analyze(),sites:engine.sites};
+}
 export interface ApexAnalysisContext {
   readonly repositoryIndex?:ApexRepositoryMethodIndex;
   readonly resolveExternal:ApexExternalResolver;
@@ -36,6 +47,11 @@ export class ApexAnalysisEngine {
   };
   constructor(readonly repositoryIndex?:ApexRepositoryMethodIndex,
     private readonly metadata?:ApexMetadataProvider){}
+  /** Resolve metadata on demand, then return generic selected call arguments. */
+  analyzeInvocations(source:string,filePath:string,select:ApexInvocationSelector):Promise<ApexInvocationAnalysis>{
+    return this.analyze(filePath,context=>analyzeApexInvocations(source,filePath,select,
+      context.resolveExternal,context.repositoryIndex));
+  }
   async analyze<T>(filePath:string,consumer:(context:ApexAnalysisContext)=>T):Promise<T>{
   const {repositoryIndex,metadata,reads}=this;
   // Discover the actual metadata dependencies while interpreting a query and
