@@ -104,6 +104,10 @@ export class ApexAnalysisEngine {
       if(type?.kind!=="text"||type.values.length!==1)return unknown("Instance type is not proven.");
       return repositoryIndex?.constructInstance(filePath,type.values[0],args.slice(1),baseResolver);
     }
+    if(name==="Apex.lazyGetter"){
+      if(args.length!==2||args[0].kind!=="text"||args[1].kind!=="text"||args[0].values.length!==1||args[1].values.length!==1)return undefined;
+      return repositoryIndex?.evaluateLazyGetter(args[0].values[0],args[1].values[0]);
+    }
     if(name==="Apex.constant"){
       const expr=args[0];
       return expr?.kind==="text"&&expr.values.length===1
