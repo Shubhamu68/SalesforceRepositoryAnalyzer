@@ -353,6 +353,13 @@ export class SoqlSecurityAnalyzer {
         reason: mode.description,
       });
     });
+    // Tag every finding from a partial caller variant (including relationship
+    // and parser diagnostics). The distinct site-level REVIEW remains.
+    for(const finding of findings){
+      const variant=finding.queryVariantId;
+      if(variant&&queryByLocation.get(variant)?.query.coverage==="KNOWN_CALLER_CONTEXT")
+        finding.reason += " Coverage: known repository caller variant only; other execution contexts remain unverified.";
+    }
     return findings;
   }
 }
