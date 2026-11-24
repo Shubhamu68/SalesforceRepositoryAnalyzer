@@ -1,3 +1,5 @@
+import {countApex,timeApex} from "./ApexPerformance.js";
+
 /**
  * Reusable, offset-preserving Apex source structure for code analysis.
  * This deliberately does not interpret Apex: unknown syntax stays opaque.
@@ -259,8 +261,9 @@ export function parseApexStatements(
 /** Reusable method index; no dependency on SOQL scanning or persona policies. */
 export function indexApexMethods(source:string):IndexedApexMethod[]{
   const entry=syntaxEntry(source);
-  if(entry?.methods)return entry.methods;
-  const methods=indexMethodsUncached(source);
+  if(entry?.methods){countApex("syntax.method_cache_hit");return entry.methods;}
+  countApex("syntax.method_cache_miss");
+  const methods=timeApex("syntax.parse_ms",()=>indexMethodsUncached(source));
   if(entry){
     // Source nodes are shared read-only syntax. Freeze recursively to prevent
     // a consumer from contaminating another request's parsed representation.
