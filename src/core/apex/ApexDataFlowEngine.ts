@@ -194,11 +194,34 @@ export class ApexDataFlowEngine {
           const mode=name==="Apex.thisField"?"this":"unqualified";
           if(mode==="this"&&this.currentMethod.isStatic)
             return unknown("Instance field cannot be accessed via this in a static method.");
-          return this.options.resolveExternal?.("Apex.scopeField",[
+          const qualified=(this.className+"."+field.values[0]).toLowerCase();
+          const instance=("this."+field.values[0]).toLowerCase();
+          const override=mode==="this"?state.values.get(instance):
+            state.values.get(qualified)??(!this.currentMethod.isStatic?state.values.get(instance):undefined);
+          if(override!==undefined)return override;
+          const resolve=this.options.resolveExternal;
+          const value=resolve?.("Apex.scopeField",[
             textValue(this.className),field,textValue(mode),
             textValue(String(this.currentMethod.isStatic===true)),
           ]) ?? unknown("Field "+this.className+"."+field.values[0]+
             " cannot be proven in the current method scope.");
+          // Keep collection references in the method frame so explicit
+          // mutations of class/instance members never mutate the global cache.
+          if(value.kind==="collection"||value.kind==="map"){
+            const staticValue=mode==="unqualified"?resolve?.("Apex.scopeField",[
+              textValue(this.className),field,textValue("unqualified"),textValue("true"),
+            ]):undefined;
+            state.values.set(mode==="this"||staticValue!==value?instance:qualified,value);
+          }
+          return value;
+        }
+        if(name==="Apex.constant"&&args[0]?.kind==="text"&&args[0].values.length===1){
+          const key=args[0].values[0].toLowerCase();
+          const previous=state.values.get(key);
+          if(previous!==undefined)return previous;
+          const value=this.options.resolveExternal?.(name,args);
+          if(value?.kind==="collection"||value?.kind==="map")state.values.set(key,value);
+          if(value!==undefined)return value;
         }
         const external=this.options.resolveExternal?.(name,args);
         if(external!==undefined)return external;
@@ -316,62 +339,67 @@ export class ApexDataFlowEngine {
       state.stopped=true;
       return this.evaluate(original.replace(/^return\s+/,""),state,depth);
     }
-    // A tracked collection mutation preserves the source order of added values.
-    const mutate=/^([A-Za-z_]\w*)\s*\.\s*(add|addAll|clear)\s*\(([\s\S]*)\)$/i.exec(original);
+    // Abstract collections are immutable snapshots; updates affect only the
+    // current frame and direct aliases, never another query or repository scan.
+    const mutate=/^((?:[A-Za-z_]\w*\.)?[A-Za-z_]\w*)\s*\.\s*(add|addAll|clear|remove|put|putAll|removeAll|retainAll|set|sort|reverse)\s*\(([\s\S]*)\)$/i.exec(original);
     if(mutate){
-      const [,name,action,expr]=mutate;
-      const existing=state.values.get(name);
-      if(!existing||existing.kind!=="collection"){
-        state.values.set(name,unknown("Collection "+name+" was mutated without a known initial value."));
-        return;
+      const [,name,operation,expr]=mutate;
+      const action=operation.toLowerCase();
+      const existing=this.evaluate(name,state,depth);
+      const cause=(value:ApexValue)=>value.kind==="unknown"?value.reason:"unsupported value shape";
+      let next:ApexValue;
+      const args=expr.trim()?splitApexTopLevel(expr,",").map(item=>this.evaluate(item,state,depth)):[];
+      const arg=args[0];
+      if(existing.kind==="collection"){
+        const item=arg?asText(arg):undefined;
+        if(action==="clear"&&args.length===0)next=listValue([],existing.unique);
+        else if(action==="add"&&args.length===1&&item!==undefined)
+          next=listValue([...existing.items,item],existing.unique);
+        else if(action==="addall"&&args.length===1&&arg?.kind==="collection")
+          next=listValue([...existing.items,...arg.items],existing.unique);
+        else if(action==="remove"&&args.length===1&&existing.unique&&item!==undefined)
+          next=listValue(existing.items.filter(v=>v!==item),true);
+        else if(action==="remove"&&args.length===1&&!existing.unique&&arg?.kind==="number"&&
+          Number.isInteger(arg.value)&&arg.value>=0&&arg.value<existing.items.length)
+          next=listValue(existing.items.filter((_,i)=>i!==arg.value),false);
+        else if(action==="add"||action==="addall")
+          next=unknown("Collection "+operation+" argument "+expr+" is unknown: "+(arg?cause(arg):"missing argument"));
+        else next=unknown("Unsupported mutation "+operation+" may change the complete query field inventory.");
+      }else if(existing.kind==="map"){
+        const key=arg?asText(arg):undefined;
+        if(action==="clear"&&args.length===0)next={kind:"map",entries:[]};
+        else if(action==="put"&&args.length===2&&key!==undefined&&args[1].kind!=="unknown")
+          next={kind:"map",entries:[...existing.entries.filter(([k])=>k!==key),[key,args[1]]]};
+        else if(action==="remove"&&args.length===1&&key!==undefined)
+          next={kind:"map",entries:existing.entries.filter(([k])=>k!==key)};
+        else if(action==="putall"&&args.length===1&&arg?.kind==="map")
+          next={kind:"map",entries:[...existing.entries.filter(([k])=>!arg.entries.some(([other])=>other===k)),...arg.entries]};
+        else next=unknown("Map."+operation+" has an unproven key/value or unsupported mutation: "+
+          (args.find(v=>v.kind==="unknown")?.kind==="unknown"?cause(args.find(v=>v.kind==="unknown")!):expr));
+      }else{
+        next=unknown("Collection "+name+" was mutated without a known initial value: "+cause(existing));
       }
-      if(action.toLowerCase()==="clear"){state.values.set(name,listValue([],existing.unique));return;}
-      const value=this.evaluate(expr,state,depth);
-      if(action.toLowerCase()==="add"){
-        const item=asText(value);
-        state.values.set(name,item===undefined?unknown("Collection item "+expr+" is unknown.")
-          :listValue([...existing.items,item],existing.unique));
-      }else state.values.set(name,value.kind==="collection"?
-        listValue([...existing.items,...value.items],existing.unique):
-        unknown("Collection addAll argument "+expr+" is unknown."));
+      if(next.kind==="collection"&&next.items.length>2000||next.kind==="map"&&next.entries.length>200)
+        next=unknown("Collection mutation exceeded the bounded inventory size.");
+      let replaced=false;
+      if(existing.kind==="collection"||existing.kind==="map"){
+        // Propagate changes to direct aliases, including class-level aliases
+        // already read into this frame. Nested alias/escape handling is bounded.
+        const replace=(value:ApexValue,depth=0):ApexValue=>{
+          if(value===existing)return next;
+          if(value.kind==="map"&&depth<12){
+            const entries=value.entries.map(([k,v]):[string,ApexValue]=>[k,replace(v,depth+1)]);
+            if(entries.some(([,v],i)=>v!==value.entries[i][1]))return {kind:"map",entries};
+          }
+          return value;
+        };
+        for(const [key,value] of state.values){
+          const changed=replace(value);
+          if(changed!==value){state.values.set(key,changed);if(value===existing)replaced=true;}
+        }
+      }
+      if(!replaced)state.values.set(name.includes(".")?name.toLowerCase():name,next);
       return;
-    }
-    // Metadata loops construct query-field sets using ordinary Apex Map.put().
-    // Keep only complete scalar key/value pairs and immutable abstract maps.
-    const mapPut=/^([A-Za-z_]\w*)\s*\.\s*put\s*\(([\s\S]*)\)$/i.exec(original);
-    if(mapPut){
-      const receiver=state.values.get(mapPut[1]);
-      const pair=splitApexTopLevel(mapPut[2],",");
-      if(receiver?.kind!=="map"||pair.length!==2){
-        state.values.set(mapPut[1],unknown("Map.put receiver or arguments are unresolved."));
-        return;
-      }
-      const key=this.evaluate(pair[0],state,depth);
-      const value=this.evaluate(pair[1],state,depth);
-      const name=asText(key);
-      if(name===undefined||value.kind==="unknown"){
-        state.values.set(mapPut[1],unknown("Map.put has an unproven key or value."));
-        return;
-      }
-      const entries=receiver.entries.filter(([existing])=>existing!==name);
-      entries.push([name,value]);
-      if(entries.length>200){
-        state.values.set(mapPut[1],unknown("Metadata map entry budget exceeded."));
-        return;
-      }
-      state.values.set(mapPut[1],{kind:"map",entries});
-      return;
-    }
-    // Unsupported mutators cannot leave an earlier field inventory "known".
-    // Map.put and collection add/addAll/clear are modeled above.
-    const opaqueMutation=/^([A-Za-z_]\w*)\s*\.\s*(remove|removeAll|retainAll|putAll|set|sort|reverse)\s*\(/i.exec(original);
-    if(opaqueMutation){
-      const existing=state.values.get(opaqueMutation[1]);
-      if(existing?.kind==="collection"||existing?.kind==="map"){
-        state.values.set(opaqueMutation[1],unknown(
-          "Unsupported mutation "+opaqueMutation[2]+" may change the complete query field inventory."));
-        return;
-      }
     }
     // Declarations, reassignment and += are independently versioned by state.
     const assignment=/\b([A-Za-z_]\w*)\s*(\+?=)\s*([\s\S]+)$/.exec(original);
@@ -434,7 +462,7 @@ export class ApexDataFlowEngine {
         // Locals introduced by a nested branch/block must not escape scope.
         // Assignments to existing symbols remain visible after the block.
         for(const key of frame.values.keys())
-          if(!before.has(key))frame.values.delete(key);
+          if(!before.has(key)&&!key.includes("."))frame.values.delete(key);
       }
       return result;
     };
@@ -477,7 +505,7 @@ export class ApexDataFlowEngine {
       const walk=(nodes:SourceNode[])=>{
         for(const n of nodes){
           const text=n.text??"";
-          const match=/\b([A-Za-z_]\w*)\s*(?:\+?=|\.\s*(?:add|addAll|clear)\s*\()/g;
+          const match=/\b((?:[A-Za-z_]\w*\.)?[A-Za-z_]\w*)\s*(?:\+?=(?![=>])|\.\s*(?:add|addAll|clear|remove|put|putAll|removeAll|retainAll|set|sort|reverse)\s*\()/gi;
           for(const entry of text.matchAll(match))mentioned.add(entry[1]);
           if(n.body)walk(n.body);
           if(n.otherwise)walk(n.otherwise);
@@ -485,7 +513,12 @@ export class ApexDataFlowEngine {
       };
       walk(node.body??[]);
       const changed=clone(state);
-      for(const variable of mentioned)changed.values.set(variable,unknown("Loop may change "+variable+" using runtime values."));
+      for(const variable of mentioned){
+        const target=variable.includes(".")?variable.toLowerCase():variable;
+        changed.values.set(target,unknown("Loop may change "+variable+" using runtime values. Iterable "+
+          (node.iterable??"(unsupported header)")+": "+(iterable.kind==="unknown"?iterable.reason:
+            "iteration count or value shape exceeds supported bounds.")));
+      }
       // If query occurs inside the body, capture an explicitly unknown version.
       for(const site of this.sites){
         if(site.offset<node.start||site.offset>=node.end)continue;
