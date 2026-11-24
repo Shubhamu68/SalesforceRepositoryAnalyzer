@@ -112,6 +112,18 @@ export class ApexStaticValueIndex {
    * declaration initializer. Constructor-assigned/blank/mutable fields
    * remain unknown and require object-flow analysis.
    */
+  resolveUnqualified(owner:string,field:string,insideStaticMethod:boolean):ApexValue|undefined {
+    const entry=this.declarations.get((owner+"."+field).toLowerCase());
+    if(!entry?.length)return undefined;
+    if(entry.length!==1)
+      return unknown("Apex member "+owner+"."+field+" has ambiguous declarations.");
+    if(entry[0].isStatic)return this.resolve(owner+"."+field);
+    if(insideStaticMethod)
+      return unknown("Instance member "+owner+"."+field+
+        " cannot be referenced as a static field.");
+    return this.resolveInstance(owner,field);
+  }
+
   resolveInstance(owner:string,field:string):ApexValue {
     const key=(owner+"."+field).toLowerCase();
     if(this.classOwners.get(owner.toLowerCase())?.size!==1)
