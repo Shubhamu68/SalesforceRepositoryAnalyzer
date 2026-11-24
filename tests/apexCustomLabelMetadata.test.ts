@@ -19,21 +19,22 @@ function connectionWithLabels(rows:()=>Array<Record<string,unknown>>,
 }
 const id="101000000000001AAA";
 
-test("Custom Label metadata uses Tooling API and rejects locale-dependent values",async()=>{
-  let translationValue="Name,Phone";
+test("Custom Label uses ExternalString master value only, even when translation API is unsupported",async()=>{
+  let masterValue="Id,Name";
   const {connection,calls}=connectionWithLabels(
-    ()=>[{Id:id,Name:"My_Columns",Value:"Id,Name",NamespacePrefix:null}],
-    ()=>[{Value:translationValue}]);
+    ()=>[{Id:id,Name:"My_Columns",Value:masterValue,NamespacePrefix:null}],
+    ()=>{throw Error("INVALID_TYPE: ExternalStringLocalization is not supported");});
   const provider=new SalesforceApexMetadataProvider(connection);
-  const uncertain=await provider.getCustomLabelValue("My_Columns");
-  assert.equal(uncertain.complete,false);
-  assert.match(uncertain.reason??"",/locale-dependent/i);
-  translationValue="Id,Name";
-  const verified=await provider.getCustomLabelValue("My_Columns");
-  assert.equal(verified.complete,true);
-  assert.equal(verified.value,"Id,Name");
-  assert.equal(calls.length,4,"Values must be refreshed on each analysis.");
-  assert.ok(calls.every(call=>call.startsWith("tooling|SELECT ")));
+  const first=await provider.getCustomLabelValue("My_Columns");
+  assert.equal(first.complete,true);
+  assert.equal(first.value,"Id,Name");
+  masterValue="Name,Phone";
+  const second=await provider.getCustomLabelValue("My_Columns");
+  assert.equal(second.complete,true);
+  assert.equal(second.value,"Name,Phone");
+  assert.equal(calls.length,2,"one master-value lookup each time");
+  assert.ok(calls.every(call=>call.startsWith("tooling|SELECT ")&&
+    call.includes("FROM ExternalString WHERE")&&!call.includes("ExternalStringLocalization")));
 });
 
 test("Custom Label provider rejects duplicate or missing org label values",async()=>{
@@ -138,4 +139,18 @@ test("Stage 3 final: denied Metadata API fallback is not silently accepted",asyn
     .getFieldSetFields("Account","Export_Fields");
   assert.equal(result.complete,false);
   assert.match(result.reason??"",/INSUFFICIENT_ACCESS_OR_READONLY/);
+});
+
+test("Custom Metadata provider handles canonical Salesforce field casing in Apex queries",async()=>{
+  const connection={
+    status:{organizationId:"00Dmock",userId:"005mock",instanceUrl:"https://example.my.salesforce.com",connectedAt:"connection-1"},
+    queryAll:async(soql:string,api:string)=>{
+      assert.equal(api,"data");assert.match(soql,/FROM Field_Mapping__mdt/i);
+      return [{DeveloperName:"Mapping",Type__c:"Draft",Source_Field__c:"Name",Active__c:true}];
+    },
+  } as unknown as SalesforceOrgConnection;
+  const result=await new SalesforceApexMetadataProvider(connection).getCustomMetadataRecords(
+    "Field_Mapping__mdt",["type__c","Source_Field__c","Active__c"]);
+  assert.equal(result.complete,true,JSON.stringify(result));
+  assert.equal(result.value?.[0].type__c,"Draft");
 });
