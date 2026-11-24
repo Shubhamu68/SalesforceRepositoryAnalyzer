@@ -130,3 +130,27 @@ test("real AdvantageConstants declarations: public mutable product names stay un
   expectText(idx,"AdvantageConstants.TRX_SET_945","945");
   expectText(idx,"AdvantageConstants.OTC_DRAFT_INVOICE_CREATION","OTC Draft Invoice Creation");
 });
+
+test("real OTC object mapping constants: Shipment mappings final, OS and ODGS mappings mutable",()=>{
+  const idx=index(["AdvantageConstants.cls",[
+    "public class AdvantageConstants {",
+    " public static String ORDER_SUMMARY = 'OrderSummary';",
+    " public static String ORDER_DELIVERY_GROUP_SUMMARY ='OrderDeliveryGroupSummary';",
+    " public static final String SHIPMENT = 'Shipment__c';",
+    " public static final String SHIPMENT_LINE = 'ShipmentLine__c';",
+    " public static final String INVOICE = 'Invoice__c';",
+    " public static final String INVOICELINE = 'InvoiceLine__c';",
+    " public static final String TRX_SET_945 = '945';",
+    " public static final String OTC_DRAFT_INVOICE_CREATION = 'OTC Draft Invoice Creation';",
+    "}",
+  ].join("\n")]);
+  for(const field of ["ORDER_SUMMARY","ORDER_DELIVERY_GROUP_SUMMARY"])
+    expectUnknown(idx,"AdvantageConstants."+field,/externally mutable/i);
+  expectText(idx,"AdvantageConstants.SHIPMENT","Shipment__c");
+  expectText(idx,"AdvantageConstants.SHIPMENT_LINE","ShipmentLine__c");
+  expectText(idx,"AdvantageConstants.INVOICE","Invoice__c");
+  expectText(idx,"AdvantageConstants.INVOICELINE","InvoiceLine__c");
+  expectText(idx,"AdvantageConstants.TRX_SET_945","945");
+  expectText(idx,"AdvantageConstants.OTC_DRAFT_INVOICE_CREATION",
+    "OTC Draft Invoice Creation");
+});
