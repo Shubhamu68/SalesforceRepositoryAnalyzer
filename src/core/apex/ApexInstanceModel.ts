@@ -1,5 +1,6 @@
-import {maskApexSource,matchingPair,splitApexTopLevel,parseApexStatements,type SourceNode} from "./ApexSourceModel.js";
-import {evaluateApexExpression,unknown,type ApexValue} from "./ApexValueEvaluator.js";
+import {maskApexSource,matchingPair,splitApexTopLevel,parseApexStatements,stripApexComments,type SourceNode} from "./ApexSourceModel.js";
+import {evaluateApexExpression,addApexValues,unknown,type ApexValue} from "./ApexValueEvaluator.js";
+import {knownBoolean} from "./ApexScalarOperators.js";
 
 type Instance=Extract<ApexValue,{kind:"instance"}>;
 type Resolver=(name:string,args:ApexValue[])=>ApexValue|undefined;
@@ -14,7 +15,7 @@ interface ClassShape {
 const scalar=/^(?:(?:public|private|protected|global|final|transient)\s+)*(?:String|Boolean|Integer|Long|Decimal|Double|Id)\s+([A-Za-z_]\w*)\s*(?:=\s*([\s\S]+))?$/i;
 
 /** Small, explicit object domain: allocation identity is reference identity.
- * Only source-backed scalar fields and straight-line initialization are
+ * Only source-backed scalar fields and bounded, known-branch initialization are
  * modeled. No guessed inheritance, properties, dynamic dispatch or effects. */
 export class ApexInstanceIndex {
   private readonly shapes=new Map<string,ClassShape[]>();
@@ -107,16 +108,45 @@ export class ApexInstanceIndex {
       return evaluateApexExpression(expr,{values:env,resolveCall:resolve});
     };
     for(const field of shape.fields)fields.set(field.name,unknown("Instance field has no proven assignment."));
-    const execute=(nodes:SourceNode[],parameters:Map<string,ApexValue>):boolean=>{
+    let operations=0;
+    const execute=(nodes:SourceNode[],parameters:Map<string,ApexValue>,depth=0):boolean=>{
+      if(depth>12)return false;
+      const scoped=(body:SourceNode[]):boolean=>{
+        const local=new Map(parameters);
+        if(!execute(body,local,depth+1))return false;
+        for(const key of parameters.keys())parameters.set(key,local.get(key)!);
+        return true;
+      };
       for(const node of nodes){
+        if(++operations>500)return false;
+        if(node.kind==="block"){if(!scoped(node.body??[]))return false;continue;}
+        if(node.kind==="if"){
+          const condition=knownBoolean(evaluate(node.condition??"",parameters));
+          if(condition===undefined)return false;
+          if(!scoped(condition?node.body??[]:node.otherwise??[]))return false;
+          continue;
+        }
         if(node.kind!=="statement")return false;
-        const assignment=/^\s*(?:(this)\s*\.\s*)?([A-Za-z_]\w*)\s*=(?!=)\s*([\s\S]+?)\s*;?\s*$/i.exec(node.text??"");
+        const statement=stripApexComments(node.text??"").trim().replace(/;\s*$/,"");
+        const local=/^(?:final\s+)?(?:String|Boolean|Integer|Long|Decimal|Double|Id)\s+([A-Za-z_]\w*)\s*(?:=\s*([\s\S]+))?$/i.exec(statement);
+        if(local){
+          // Shadowing an existing parameter/local requires a separate lexical
+          // binding model. Reject rather than silently changing the outer slot.
+          if([...parameters.keys()].some(k=>k.toLowerCase()===local[1].toLowerCase()))return false;
+          parameters.set(local[1],local[2]?evaluate(local[2],parameters):unknown("Constructor local is not assigned."));
+          continue;
+        }
+        const assignment=/^(?:(this)\s*\.\s*)?([A-Za-z_]\w*)\s*(\+?=)(?!=|>)\s*([\s\S]+)$/i.exec(statement);
         if(!assignment)return false;
-        const [,explicit,key,rhs]=assignment;
+        const [,explicit,key,operator,rhs]=assignment;
+        const localKey=!explicit?[...parameters.keys()].find(k=>k.toLowerCase()===key.toLowerCase()):undefined;
         const field=fieldNames.get(key.toLowerCase());
-        if(!explicit&&parameters.has(key)){parameters.set(key,evaluate(rhs,parameters));continue;}
+        const previous=localKey?parameters.get(localKey):field?fields.get(field):undefined;
+        let next=evaluate(rhs,parameters);
+        if(operator==="+=")next=previous?addApexValues(previous,next):unknown("Constructor assignment has no proven previous value.");
+        if(localKey){parameters.set(localKey,next);continue;}
         if(!field)return false;
-        fields.set(field,evaluate(rhs,parameters));
+        fields.set(field,next);
       }
       return true;
     };
