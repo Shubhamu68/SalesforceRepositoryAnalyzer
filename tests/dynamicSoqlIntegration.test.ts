@@ -1371,3 +1371,30 @@ test("Custom Metadata query parser does not split quoted AND or silently allow u
     assert.match(result.unresolvedDynamic[0].reason,/unsupported/i);
   }finally{await rm(dir,{recursive:true,force:true});}
 });
+
+
+test("static-block scalar values flow through the shared index into dynamic SOQL",async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),"v011-static-block-"));
+  try{
+    await writeFile(path.join(dir,"BlockConfig.cls"),[
+      "public class BlockConfig {",
+      " public static String OBJECT_NAME;",
+      " public static String UNSTABLE;",
+      " static { OBJECT_NAME = 'Account'; UNSTABLE = 'Contact'; }",
+      " public static void change(){UNSTABLE = 'Lead';}",
+      "}",
+    ].join("\n"));
+    await writeFile(path.join(dir,"BlockConsumer.cls"),[
+      "public class BlockConsumer {",
+      " public static void run(){",
+      "   Database.query('SELECT Id FROM '+BlockConfig.OBJECT_NAME);",
+      "   Database.query('SELECT Id FROM '+BlockConfig.UNSTABLE);",
+      " }",
+      "}",
+    ].join("\n"));
+    const result=await scanApexSoqlWithUnresolved(dir);
+    assert.deepEqual(result.queries.map(q=>q.query),["SELECT Id FROM Account"]);
+    assert.equal(result.unresolvedDynamic.length,1);
+    assert.match(result.unresolvedDynamic[0].reason,/additional repository-visible writes/i);
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
