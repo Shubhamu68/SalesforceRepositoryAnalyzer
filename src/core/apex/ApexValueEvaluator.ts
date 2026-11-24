@@ -115,13 +115,17 @@ export function evaluateApexExpression(
   if(/^-?\d+(?:\.\d+)?$/.test(expr))return {kind:"number",value:Number(expr)};
   if(/^(true|false)$/i.test(expr))return textValue(expr.toLowerCase());
   if(expr==="null")return textValue("null");
+  // Qualified member overrides are method-local abstract state, not changes
+  // to the repository snapshot.
+  const tracked=context.values.get(expr);
+  if(tracked!==undefined)return tracked;
   if(/^[A-Za-z_]\w*$/.test(expr))return context.values.get(expr) ??
     context.resolveCall?.("Apex.unqualifiedField",[textValue(expr)]) ??
     unknown("Apex symbol "+expr+" has no proven value.");
   const thisField=/^this\.([A-Za-z_]\w*)$/i.exec(expr);
   if(thisField)return context.resolveCall?.("Apex.thisField",[textValue(thisField[1])]) ??
     unknown("Instance field "+thisField[1]+" has no proven object-specific value.");
-  const label=/^System\.Label\.([A-Za-z_]\w*)$/i.exec(expr);
+  const label=/^(?:System\.)?Label\.([A-Za-z_]\w*)$/i.exec(expr);
   if(label)return context.resolveCall?.("System.Label",[textValue(label[1])]) ??
     unknown("Custom Label "+label[1]+" is not available from complete org metadata.");
   const instanceMember=/^([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/.exec(expr);
@@ -132,6 +136,8 @@ export function evaluateApexExpression(
         unknown("Metadata row field "+instanceMember[2]+" was not completely retrieved.");
   }
   const constant=/^([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/.exec(expr);
+  if(constant&&context.values.has(constant[1]))
+    return unknown("Instance member expression "+expr+" depends on runtime object state.");
   if(constant)return context.resolveCall?.("Apex.constant",[textValue(expr)]) ??
     unknown(/^[a-z]/.test(constant[1])
       ?"Instance member expression "+expr+" depends on runtime object state."
@@ -187,7 +193,7 @@ export function evaluateApexExpression(
     const parts=plus.map(item=>evaluateApexExpression(item,context,depth+1));
     return parts.slice(1).reduce<ApexValue>((a,b)=>combinations(a,b),parts[0]);
   }
-  const create=/^new\s+(List|Set)<[\w\s,.<>]+>\s*(?:\(([\s\S]*)\)|\{([\s\S]*)\})$/i.exec(expr);
+  const create=/^new\s+(List|Set)\s*<[\w\s,.<>]+>\s*(?:\(([\s\S]*)\)|\{([\s\S]*)\})$/i.exec(expr);
   if(create){
     const unique=create[1].toLowerCase()==="set";
     if(create[3]!==undefined){
@@ -197,7 +203,8 @@ export function evaluateApexExpression(
         if(!item.trim())continue;
         const result=evaluateApexExpression(item,context,depth+1);
         const s=onlyText(result);
-        if(s===null)return unknown("Collection initializer contains a runtime value.");
+        if(s===null)return unknown("Collection initializer contains a runtime value: "+
+          (result.kind==="unknown"?result.reason:item));
         values.push(s);
       }
       return listValue(values,unique);
@@ -205,7 +212,8 @@ export function evaluateApexExpression(
     if(!create[2]?.trim())return listValue([],unique);
     const argument=evaluateApexExpression(create[2],context,depth+1);
     return argument.kind==="collection"?listValue(argument.items,unique)
-      :unknown("Collection constructor input is not resolved.");
+      :unknown("Collection constructor input is not resolved: "+
+        (argument.kind==="unknown"?argument.reason:"input is not a collection."));
   }
   const fieldSet=/^([A-Za-z_]\w*)\.SObjectType\.getDescribe\(\)\.fieldSets\.getMap\(\)\.get\(([^()]*)\)$/i.exec(expr);
   if(fieldSet){
@@ -293,14 +301,15 @@ export function evaluateApexExpression(
         return unknown("JSON.deserialize target type is not a supported collection map.");
       const input=evaluateApexExpression(pieces[0],context,depth+1);
       if(input.kind!=="text"||input.values.length!==1)
-        return unknown("JSON.deserialize input must be a single proven label value.");
+        return unknown("JSON.deserialize input must be a single proven label value: "+
+          (input.kind==="unknown"?input.reason:"input is not a single text value."));
       return parseKnownJsonMap(input.values[0]);
     }
     if(lname.endsWith(".keyset")&&args.length===0){
       const receiver=evaluateApexExpression(name.slice(0,-7),context,depth+1);
       return receiver.kind==="map"?listValue(receiver.entries.map(([key])=>key),true):
-        receiver.kind==="collection"?listValue(receiver.items,true):
-        unknown("Map keySet() depends on unresolved metadata.");
+        unknown("Map keySet() receiver is unresolved: "+
+          (receiver.kind==="unknown"?receiver.reason:"receiver is not a map."));
     }
     if(lname.endsWith(".containskey")&&args.length===1){
       const receiver=evaluateApexExpression(name.slice(0,-12),context,depth+1);
@@ -318,7 +327,8 @@ export function evaluateApexExpression(
       if(receiver.kind==="unknown")return receiver;
       if(receiver.kind==="map"){
         const key=onlyText(args[0]);
-        if(key===null)return unknown("Map.get key depends on runtime input.");
+        if(key===null)return unknown("Map.get key depends on runtime input: "+
+          (args[0].kind==="unknown"?args[0].reason:"key is not a single scalar."));
         return receiver.entries.find(([item])=>item===key)?.[1] ??
           unknown("Map.get key "+key+" absent from proven configuration.");
       }
