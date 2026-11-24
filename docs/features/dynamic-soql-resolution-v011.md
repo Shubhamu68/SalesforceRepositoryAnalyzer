@@ -243,3 +243,27 @@ The next planned engineering stage is **Stage 4: remaining provable runtime/call
 - `ApexExecutionPathDiagnostics` explains database calls recognized in source but not captured by bounded symbolic execution. Earlier loops that may change query symbols are noted when syntactically observable. This is **diagnostic-only**: it does not promote uncaptured queries into permission findings.
 - **Critical validation limitation:** the four-class uploaded Apex archive does not include `AdvantageConstants.cls`. The real modifiers/initializers of `PRODUCT_APINAME`, `AUTHORIZED_PRODUCT_APINAME`, `TRX_SET_945` and `OTC_DRAFT_INVOICE_CREATION` therefore remain unverified in this development context. For real-repository acceptance, compare the next Excel against the 522-analyzed / 76-unverifiable / 7-High report, and inspect those constants' exact new provenance messages. A live mutable static field must not become a verified query simply to reduce the count.
 - Stage 4 is **on hold** until the end-to-end repository report validates this correction, no prior High finding disappears, and the six previously degraded reconciliation explanations are checked against source. PR #55 remains Draft.
+
+## Source verification from uploaded AdvantageConstants.cls (November 24, 2026)
+
+The actual class was inspected, not inferred from sample JSON. Its declarations establish:
+
+| Field | Apex declaration | Initializer | Static analysis |
+| --- | --- | --- | --- |
+| PRODUCT_APINAME (line 505) | `public static String` | `Product2` | **Unverified runtime value:** publicly writable |
+| AUTHORIZED_PRODUCT_APINAME (line 504) | `public static String` | `Authorized_Product__c` | **Unverified runtime value:** publicly writable |
+| BILL_ONLY (line 322) | `public static String` | `Bill Only` | **Unverified runtime value:** publicly writable |
+| ORDER_SUMMARY (line 346) | `public static String` | `OrderSummary` | **Unverified runtime value:** publicly writable |
+| ORDER_DELIVERY_GROUP_SUMMARY (line 349) | `public static String` | `OrderDeliveryGroupSummary` | **Unverified runtime value:** publicly writable |
+| TRX_SET_945 (line 664) | `public static final String` | `945` | Proven scalar |
+| OTC_DRAFT_INVOICE_CREATION (line 665) | `public static final String` | `OTC Draft Invoice Creation` | Proven scalar |
+| SHIPMENT (line 695), SHIPMENT_LINE (line 694) | `public static final String` | Object API names | Proven scalars |
+| INVOICE (line 666), INVOICELINE (line 667) | `public static final String` | Object API names | Proven scalars |
+
+This **explains** the ProductSelectorController map-key errors: the metadata label itself might be entirely readable, while its field map still uses publicly mutable static keys. The analyzer must not silently replace those keys with initializer values and mark query structure proven. The 4 OTCInvoiceController query expressions also depend on a separate private-helper caller-context problem; resolving final 945/type filters alone cannot fix that. Two OTC source-object branches use mutable ORDER_SUMMARY/ORDER_DELIVERY_GROUP_SUMMARY constants, unlike the Shipment/ShipmentLine branches.
+
+The reusable evaluator now carries the exact source-backed constant-rejection reason through Map initializer keys and condition comparisons, rather than emitting only "unproven key." Regression fixtures use the **exact relevant declarations** from the uploaded class.
+
+If these declarations are *intended* as invariants, changing their Apex modifiers to `public static final String` could make them provable, **but do not change production Apex without scanning every writer across the complete repository, impact-testing tests/integrations, and deploying it through normal change controls.** This analyzer does not automatically modify production Apex. Treat runtime mutability as a legitimate unresolved finding unless immutability is proven.
+
+The requested `Utils.cls` and a real-repository rerun are still necessary to close the remaining Field Set and helper-path cases. Keep Stage 4 on hold.
