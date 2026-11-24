@@ -89,3 +89,22 @@ test("target-prefix scalar liveness removes paths used only after the invocation
   assert.equal(flow.exceeded,false);
   assert.deepEqual(flow.captures.get(engine.sites[0].offset)?.map(x=>x.query),[textValue("SELECT Id FROM Account")]);
 });
+
+
+test("constructor local calculations, known guards and compound assignments feed shared instance values",()=>{
+  const source="public class Config { public String field; public Config(Boolean full){ String prefix='Id'; if(full){prefix+=', Name';} else {prefix+=', Email';} this.field=prefix; } }";
+  const index=new ApexRepositoryMethodIndex([{filePath:"Config.cls",source}]);
+  const yes=index.constructInstance("Config.cls","Config",[{kind:"text",values:["true"],scalarType:"boolean"}]);
+  const no=index.constructInstance("Config.cls","Config",[{kind:"text",values:["false"],scalarType:"boolean"}]);
+  assert.deepEqual(yes,{kind:"instance",className:"Config",entries:[["field",textValue("Id, Name")]]});
+  assert.deepEqual(no,{kind:"instance",className:"Config",entries:[["field",textValue("Id, Email")]]});
+  assert.equal(index.constructInstance("Config.cls","Config",[{kind:"unknown",reason:"runtime"}])?.kind,"unknown");
+});
+
+test("constructor delegation preserves initializer order and rejects cycles and ambiguous overloads",()=>{
+  const source="public class Config { public String field='Id'; public Config(){this('Name'); field+=', Phone';} public Config(String input){field+=', '+input;} }";
+  const cycle="public class Cycle { public String field; public Cycle(){this('Name');} public Cycle(String input){this();} }";
+  const index=new ApexRepositoryMethodIndex([{filePath:"Config.cls",source},{filePath:"Cycle.cls",source:cycle}]);
+  assert.deepEqual(index.constructInstance("Config.cls","Config",[]),{kind:"instance",className:"Config",entries:[["field",textValue("Id, Name, Phone")]]});
+  assert.equal(index.constructInstance("Cycle.cls","Cycle",[])?.kind,"unknown");
+});
