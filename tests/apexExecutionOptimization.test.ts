@@ -202,3 +202,27 @@ test("bounded caller sampling prioritizes diverse relevant inputs, preserving co
   assert.ok(selected.every(seed=>seeds.includes(seed)));
   assert.equal(selectApexCallerSeeds(seeds,["objectName","recordId"],new Set(["objectname"]),8).length,8);
 });
+
+
+test("dead correlated Boolean parameter alternatives merge before independent later guards",()=>{
+  const source="public class QueryBuilder { public static String build(Boolean a, Boolean b){ String x='Id'; if(a){x='Name';} if(a){x='Id';} String y='Id'; if(b){y='Name';} if(b){y='Id';} return 'SELECT '+y+' FROM Account'; } }";
+  const method=indexApexMethods(source)[0];
+  const engine=new ApexDataFlowEngine(source,{maxPaths:2});
+  assert.deepEqual(engine.summarizeMethodReturn(method,[unknown("a"),unknown("b")]),textValue("SELECT Id FROM Account"));
+});
+
+test("request-scoped shared engine metrics record reuse without exposing source",async()=>{
+  const {withApexPerformance}=await import("../src/core/apex/ApexPerformance.js");
+  const counts=new Map<string,number>();
+  const times:string[]=[];
+  const source="/*"+"profiling fixture ".repeat(80)+"*/ public class MetricFixture { public static void run(){Database.query('SELECT Id FROM Account');} }";
+  withApexPerformance({count:(name,n)=>counts.set(name,(counts.get(name)??0)+n),duration:name=>times.push(name)},()=>{
+    indexApexMethods(source);indexApexMethods(source);
+    new ApexDataFlowEngine(source).analyze();
+  });
+  assert.ok((counts.get("syntax.method_cache_hit")??0)>=1);
+  assert.equal(counts.get("engine.instances"),1);
+  assert.equal(counts.get("invocation.sites"),1);
+  assert.ok(times.includes("syntax.parse_ms"));
+  assert.ok([...counts.keys(),...times].every(key=>!key.includes("MetricFixture")&&!key.includes("SELECT")));
+});
