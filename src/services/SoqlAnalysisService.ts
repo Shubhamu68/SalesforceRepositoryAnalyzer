@@ -82,7 +82,7 @@ export class SoqlAnalysisService {
     return withSoqlPerformance(async () => {
     progress?.moveTo("scanning");
     const scanned = await timeSoqlPhase("repository.scan", () => scanApexSoqlWithUnresolved(
-      this.repositoryPath, this.metadata
+      this.repositoryPath, this.metadata, progress?(completed,total)=>progress.reportClasses(completed,total):undefined
     ));
     const queries: SoqlQuery[] = scanned.queries
       .filter((query) => isDataAccessAnalysisObject(query.object));
@@ -177,7 +177,7 @@ export class SoqlAnalysisService {
       progress?.setTotalPersonas(personas.length);
       progress?.moveTo("scanning");
       const scanned = await timeSoqlPhase("repository.scan",
-        () => scanApexSoqlWithUnresolved(this.repositoryPath, this.metadata));
+        () => scanApexSoqlWithUnresolved(this.repositoryPath, this.metadata,progress?(completed,total)=>progress.reportClasses(completed,total):undefined));
       const queries = scanned.queries
         .filter((query) => isDataAccessAnalysisObject(query.object));
       recordSoqlCount("queries.analyzed", queries.length);
