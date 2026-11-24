@@ -431,3 +431,16 @@ Live Round 1 baseline: 72.010 s wall clock, 40.024 s scanning (12.121 s reposito
 - Regression tests cover repository syntax reuse, targeted explicit grants/denials, absent rows, unsupported filters, conflicting and unexpected rows. Compare a cold and a warm run on the same repo/persona/org, including new probe-cache and targeted-batch counters, and verify report coverage and permission findings. Under 50 seconds is a target, not a measured result.
 
 Source-backed refinements (including the remaining OMSQueryService variant, eight budget failures and other unresolved sites), deeper cross-resolver evaluation reuse, worker threads and Batch 3 are deferred. Do not infer readiness for Stage 4 from synthetic test coverage.
+
+
+## P0 correction and bounded P1 refinements
+
+Round two live baseline: 64.886 s total, 25.038 s repository scan, 2.339 s graph build, 3,170 syntax misses for 3,170 classes; 595 queries, 51 unresolved sites and 8 budget failures. The four targeted batches resolved none of 12 requested fields and added four queryAll calls; all eight historical failures were HTTP 400 in org.other.
+
+- P0: exact equality field-access checks are the default again in the shared gateway. Targeted batching is retained only as an explicit constructor opt-in, for controlled testing. All existing verification and compound-parent rules remain unchanged. Diagnostics separate Custom Labels, Field Sets, Custom Metadata, schema and permission metadata, and UserLogin; structured Salesforce error codes are restricted to a fixed allowlist. No query values, arbitrary error text or custom metadata names appear in performance counter labels.
+- P1: repeated identical scalar parameter comparisons retain a path-specific truth fact, only when every lexical reference is in that guard. No runtime value is invented; additional reads/writes disqualify correlation. Root liveness removes the fact after its last lexical use. Existing path and operation budgets are unchanged.
+- Direct leading calls in if conditions can contribute caller argument evidence. Nested/non-leading calls with unknown execution order are not promoted by this rule.
+- Direct executeBatch(new T(...)) receiver evidence extends to a restricted scalar local-declaration prefix in start, requiring actual constructor-backed receiver fields and no arbitrary calls, member writes or property chains. Open framework coverage still remains REVIEW.
+- Constructors allow a narrow set of supported pure String built-ins; reversed null checks in otherwise canonical lazy getters qualify under the existing write/alias safeguards.
+
+The affected Salesforce business-class source files were not available in this project; these are analyzer-code-backed generic refinements with synthetic regression fixtures, not verified fixes of the eight actual budget failures or the remaining lost OMSQueryService variant. Obtain the affected methods and actual callers/constructors before site-specific work. Batch 3 and Stage 4 remain deferred.
