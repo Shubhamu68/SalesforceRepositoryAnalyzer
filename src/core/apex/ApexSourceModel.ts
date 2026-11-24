@@ -19,6 +19,8 @@ export interface IndexedApexMethod {
   start: number;
   end: number;
   parameters: string[];
+  /** Static methods have no instance-this context. */
+  isStatic?:boolean;
   /** Only explicitly private methods permit exhaustive same-class caller tracing. */
   visibility: "private" | "public" | "protected" | "global" | "unspecified";
   body: SourceNode[];
@@ -246,6 +248,7 @@ export function indexApexMethods(source: string): IndexedApexMethod[] {
     const visibility=/\b(private|public|protected|global)\b/i.exec(prefix);
     methods.push({name:match[1],start:brace+1,end:closeBrace,parameters:args,
       visibility:(visibility?.[1].toLowerCase()??"unspecified") as IndexedApexMethod["visibility"],
+      isStatic:/\bstatic\b/i.test(prefix),
       body:parseApexStatements(source,brace+1,closeBrace,masked)});
     call.lastIndex=brace+1;
   }
