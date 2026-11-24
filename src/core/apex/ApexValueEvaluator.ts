@@ -359,7 +359,16 @@ export function evaluateApexExpression(
         return context.resolveCall?.("Schema.fieldSetFields",[
           textValue(receiver.objectApiName),textValue(receiver.developerName)]) ??
           unknown("Field Set members not proven from authoritative metadata.");
-      if(receiver.kind==="unknown")return receiver;
+      if(receiver.kind==="unknown"){
+        const qualifier=name.slice(0,-10);
+        // getFields is also a legitimate repository static helper name.
+        // A known lexical receiver must still use the Field Set semantics.
+        if(/^[A-Za-z_]\w*$/.test(qualifier)&&!context.values.has(qualifier)){
+          const helper=context.resolveCall?.(name,args);
+          if(helper!==undefined)return helper;
+        }
+        return receiver;
+      }
     }
     if(lname.endsWith(".getfieldpath")&&args.length===0){
       const receiver=evaluateApexExpression(name.slice(0,-13),context,depth+1);
