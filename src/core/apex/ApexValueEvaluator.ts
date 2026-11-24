@@ -308,6 +308,8 @@ export function evaluateApexExpression(
     if(lname.endsWith(".keyset")&&args.length===0){
       const receiver=evaluateApexExpression(name.slice(0,-7),context,depth+1);
       return receiver.kind==="map"?listValue(receiver.entries.map(([key])=>key),true):
+        // Schema Describe maps are represented by a known field-name collection.
+        receiver.kind==="collection"?listValue(receiver.items,true):
         unknown("Map keySet() receiver is unresolved: "+
           (receiver.kind==="unknown"?receiver.reason:"receiver is not a map."));
     }
