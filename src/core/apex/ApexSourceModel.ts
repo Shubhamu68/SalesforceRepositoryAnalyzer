@@ -19,6 +19,8 @@ export interface IndexedApexMethod {
   start: number;
   end: number;
   parameters: string[];
+  /** Scalar parameter types are retained for bounded symbolic evaluation. */
+  parameterTypes?: string[];
   /** Static methods have no instance-this context. */
   isStatic?:boolean;
   /** Only explicitly private methods permit exhaustive same-class caller tracing. */
@@ -248,11 +250,12 @@ export function indexApexMethods(source: string): IndexedApexMethod[] {
     }
     const closeBrace=matchingPair(masked,brace,"{","}");
     if(closeBrace<0)continue;
-    const args=splitApexTopLevel(source.slice(opening+1,closing),",")
-      .map(v=>v.trim().match(/([A-Za-z_]\w*)\s*$/)?.[1]??"")
-      .filter(Boolean);
+    const rawParameters=splitApexTopLevel(source.slice(opening+1,closing),",");
+    const parameters=rawParameters.map(v=>/^(?:final\s+)?([\w.\s<>,\[\]]+)\s+([A-Za-z_]\w*)$/i.exec(v.trim()));
+    const args=parameters.map((v,i)=>v?.[2]??rawParameters[i].trim().match(/([A-Za-z_]\w*)\s*$/)?.[1]??"").filter(Boolean);
+    const parameterTypes=parameters.length===args.length?parameters.map(v=>v?.[1].trim()??""):[];
     const visibility=/\b(private|public|protected|global)\b/i.exec(prefix);
-    methods.push({name:match[1],start:brace+1,end:closeBrace,parameters:args,
+    methods.push({name:match[1],start:brace+1,end:closeBrace,parameters:args,parameterTypes,
       visibility:(visibility?.[1].toLowerCase()??"unspecified") as IndexedApexMethod["visibility"],
       isStatic:/\bstatic\b/i.test(prefix),
       body:parseApexStatements(source,brace+1,closeBrace,masked)});
