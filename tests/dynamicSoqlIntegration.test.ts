@@ -1081,7 +1081,7 @@ test("instance-final field cannot be used as a static class-qualified constant",
   }finally{await rm(dir,{recursive:true,force:true});}
 });
 
-test("blank final member is not inferred from static initializer side effects",async()=>{
+test("blank final member resolves from proven straight-line static initialization",async()=>{
   const dir=await mkdtemp(path.join(os.tmpdir(),"v011-static-blank-"));
   try{
     await writeFile(path.join(dir,"BlankField.cls"),[
@@ -1092,9 +1092,8 @@ test("blank final member is not inferred from static initializer side effects",a
       "}",
     ].join("\n"));
     const result=await scanApexSoqlWithUnresolved(dir);
-    assert.equal(result.queries.length,0);
-    assert.equal(result.unresolvedDynamic.length,1);
-    assert.match(result.unresolvedDynamic[0].reason,/no declaration initializer/i);
+    assert.deepEqual(result.queries.map(q=>q.query),["SELECT Name FROM Account"]);
+    assert.equal(result.unresolvedDynamic.length,0);
   }finally{await rm(dir,{recursive:true,force:true});}
 });
 
