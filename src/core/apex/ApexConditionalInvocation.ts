@@ -17,6 +17,19 @@ export function invocationMayExecute(statement:string,offset:number,
   if(offset<start||offset>=end)return true;
   const visit=(from:number,to:number,depth:number):boolean=>{
     if(depth>24)return true;
+    // Separate argument expressions first, including arguments following a ternary.
+    let argumentDepth=0;
+    for(let i=from;i<to;i++){
+      const ch=masked[i];
+      if(ch==="<"&&/\b(?:List|Set|Map)\s*$/i.test(masked.slice(from,i))){
+        const close=matchingPair(masked,i,"<",">");
+        if(close>=0&&close<to){i=close;continue;}
+      }
+      if("([{".includes(ch))argumentDepth++;
+      else if(")]}".includes(ch))argumentDepth--;
+      else if(ch===","&&argumentDepth===0)
+        return offset<i?visit(from,i,depth+1):visit(i+1,to,depth+1);
+    }
     let nesting=0,question=-1,colon=-1,inner=0;
     for(let i=from;i<to;i++){
       const ch=masked[i];
@@ -29,14 +42,15 @@ export function invocationMayExecute(statement:string,offset:number,
       }else if(ch===":"&&question>=0){
         if(inner>0)inner--;
         else{colon=i;break;}
-      }else if(ch===","&&question<0){
-        // Multiple argument expressions: split at a top-level comma.
-        return offset<i?visit(from,i,depth+1):visit(i+1,to,depth+1);
       }
     }
     if(question>=0&&colon>=0){
       if(offset<question)return visit(from,question,depth+1);
       const condition=statement.slice(from,question).trim();
+      // Only proven pure built-ins are eligible for pruning. User-defined
+      // calls can mutate state or throw; their branches stay conservative.
+      const calls=[...maskApexSource(condition).matchAll(/\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(/g)];
+      if(calls.some(call=>!/^(?:[A-Za-z_]\w*\.(?:isEmpty|contains|containsKey)|String\.(?:isBlank|isNotBlank))$/i.test(call[1])))return true;
       const value=evaluate(condition);
       const known=value.kind==="text"&&value.values.length===1&&value.scalarType==="boolean"
         ?value.values[0]:undefined;
