@@ -155,9 +155,26 @@ export class ApexInstanceIndex {
       else if(step.initializer)fields.set(step.field,evaluate(step.initializer,new Map()));
     }
     if(constructors.length){
-      const ctor=constructors[0];
-      const parameters=new Map(ctor.parameters.map((p,i)=>[p,args[i]]));
-      if(!execute(ctor.body,parameters))return unknown("Constructor has unsupported effects for "+name+".");
+      const active=new Set<typeof constructors[number]>();
+      const invoke=(ctor:typeof constructors[number],inputs:readonly ApexValue[]):boolean=>{
+        if(active.has(ctor)||active.size>=8)return false;
+        active.add(ctor);
+        try{
+          const parameters=new Map(ctor.parameters.map((p,i)=>[p,inputs[i]]));
+          const first=ctor.body[0];
+          const delegation=first?.kind==="statement"
+            ?/^\s*this\s*\(([\s\S]*)\)\s*;\s*$/i.exec(stripApexComments(first.text??""))
+            :null;
+          if(delegation){
+            const delegated=delegation[1].trim()?splitApexTopLevel(delegation[1],",").map(expr=>evaluate(expr,parameters)):[];
+            const matches=shape.constructors.filter(c=>c.parameters.length===delegated.length);
+            if(matches.length!==1||delegated.some(value=>value.kind==="unknown")||!invoke(matches[0],delegated))return false;
+            return execute(ctor.body.slice(1),parameters);
+          }
+          return execute(ctor.body,parameters);
+        }finally{active.delete(ctor);}
+      };
+      if(!invoke(constructors[0],args))return unknown("Constructor has unsupported effects or delegation for "+name+".");
     }
     if(unsupportedEffect)return unknown("Constructor or initializer contains unproven effects for "+name+".");
     return {kind:"instance",className:shape.name,entries:[...fields]} satisfies Instance;
