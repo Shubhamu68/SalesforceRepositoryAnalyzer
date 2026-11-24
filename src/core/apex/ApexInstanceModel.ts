@@ -101,7 +101,7 @@ export class ApexInstanceIndex {
       // are not modeled here. Pure scalar expressions and metadata constants
       // can be evaluated using the existing expression interpreter.
       const calls=[...maskApexSource(expr).matchAll(/\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(/g)];
-      if(calls.length){unsupportedEffect=true;return unknown("Constructor expression has unproven effects.");}
+      if(calls.some(call=>!/^String\.(?:isBlank|isNotBlank|valueOf|escapeSingleQuotes)$/i.test(call[1]))){unsupportedEffect=true;return unknown("Constructor expression has unproven effects.");}
       const env=new Map<string,ApexValue>();
       for(const [key,value] of fields){env.set(key,value);env.set("this."+key,value);}
       for(const [key,value] of parameters)env.set(key,value);
