@@ -677,8 +677,8 @@ export class ApexDataFlowEngine {
         next.push(...result.states);returns.push(...result.returns);
       }
       if(this.exceeded)break;
-      // Drop only proven dead root-local scalar bindings, not mutable aliases,
-      // fields, loop-carried values or parameters, before state deduplication.
+      // Drop proven dead root-local and declared scalar parameter bindings,
+      // not mutable aliases, fields or loop-carried values, before deduplication.
       if(live)for(const frame of next)live.discardDeadScalars(frame.values,node.end);
       const distinct=mergeEquivalentStates(next);
       if(!this.budget.checkPaths(distinct.filter(frame=>!frame.stopped).length,node.start,owner?.name??"(unknown method)")){
