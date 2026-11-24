@@ -7,6 +7,7 @@ import {ApexInstanceIndex} from "./ApexInstanceModel.js";
 import { ApexStaticValueIndex } from "./ApexStaticValueIndex.js";
 import {discoverApexInvocations} from "./ApexInvocationModel.js";
 import {apexStateIdentity} from "./ApexStateIdentity.js";
+import {invocationRelevantIdentifiers} from "./ApexDependencySlice.js";
 
 /** Shared repository evidence, independent of SOQL and persona permissions. */
 export interface ApexRepositorySource {
@@ -46,6 +47,43 @@ export interface ApexCallerEvidence {
 /** Canonical argument-vector identity includes aliases, not only JSON content. */
 function argumentIdentity(args:readonly ApexValue[]):string{
   return apexStateIdentity(new Map(args.map((value,i)=>[String(i),value])),false);
+}
+/**
+ * Prioritize concrete query-relevant inputs and diverse projected values.
+ * Projection is only a scheduling heuristic: never a coverage proof.
+ * Keep full original contexts, including alias identity and unknown provenance.
+ */
+export function selectApexCallerSeeds(seeds:readonly ApexValue[][],parameters:readonly string[],
+  relevant:ReadonlySet<string>,limit:number):ApexValue[][]{
+  if(limit<=0)return [];
+  if(seeds.length<=limit)return [...seeds];
+  const indices=parameters.map((p,i)=>relevant.has(p.toLowerCase())?i:-1).filter(i=>i>=0);
+  if(!indices.length)return seeds.slice(0,limit);
+  const ranked=seeds.map((seed,order)=>{
+    const projection=indices.map(i=>seed[i]??unknown("Missing argument."));
+    // Unknown provenance text is not a useful diversity signal. This only
+    // groups candidates for selection; original values remain untouched.
+    const group=argumentIdentity(projection.map(value=>value.kind==="unknown"
+      ?unknown("Unproven projected argument."):value));
+    return {seed,order,group,known:projection.filter(v=>v.kind!=="unknown").length};
+  }).sort((a,b)=>b.known-a.known||a.order-b.order);
+  const groups=new Map<string,typeof ranked>();
+  for(const candidate of ranked){
+    const group=groups.get(candidate.group)??[];group.push(candidate);groups.set(candidate.group,group);
+  }
+  const selected:ApexValue[][]=[];
+  // First take a representative from each distinct projection, then allow
+  // additional candidates from those groups if there is remaining budget.
+  for(let round=0;selected.length<limit;round++){
+    let added=false;
+    for(const group of groups.values()){
+      if(!group[round])continue;
+      selected.push(group[round].seed);added=true;
+      if(selected.length>=limit)break;
+    }
+    if(!added)break;
+  }
+  return selected;
 }
 const MAX_METHOD_DEPTH = 6;
 const MAX_CALL_CONTEXTS = 64;
@@ -494,8 +532,10 @@ export class ApexRepositoryMethodIndex {
     const argumentsByValue=new Map<string,ApexValue[]>();
     const maxSeeds=8;
     const seeds=[...new Map([...contexts.known,...contexts.partial].map(seed=>[argumentIdentity(seed),seed])).values()];
-    let bounded=contexts.bounded||seeds.length>maxSeeds;
-    for(const seed of seeds.slice(0,maxSeeds)){
+    const relevant=invocationRelevantIdentifiers(method.body,offset,expressions.join(" "));
+    const selected=selectApexCallerSeeds(seeds,method.parameters,relevant,maxSeeds);
+    let bounded=contexts.bounded||seeds.length>selected.length;
+    for(const seed of selected){
       const engine=new ApexDataFlowEngine(owner.source,{maxOperations:2000,
         resolveExternal:(name,args)=>resolveExternal?.(name,args) ??
           this.evaluateReturn(owner.filePath,name,args,resolveExternal)});
