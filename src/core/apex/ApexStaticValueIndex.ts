@@ -10,8 +10,10 @@ interface Declaration {
   type:string;
   visibility:"private"|"public"|"global"|"protected"|"unspecified";
   isFinal:boolean;
+  isStatic:boolean;
   isMutablePrivate:boolean;
   unsafeWrite:boolean;
+  initializerPresent:boolean;
 }
 const identifier=/^[A-Za-z_]\w*$/;
 const MAX_CONSTANTS=10000;
@@ -49,25 +51,32 @@ export class ApexStaticValueIndex {
         if(masked[i]==="{")current++;
         else if(masked[i]==="}")current=Math.max(0,current-1);
       }
-      const declaration=/\b((?:(?:public|private|protected|global|static|final|transient)\s+)+)(String|Integer|Long|Decimal|Double|Boolean|Id)\s+([A-Za-z_]\w*)\s*=/g;
+      const declaration=/\b((?:(?:public|private|protected|global|static|final|transient)\s+)*)(String|Integer|Long|Decimal|Double|Boolean|Id)\s+([A-Za-z_]\w*)\s*(=|;)/gi;
       let hit:RegExpExecArray|null;
       while((hit=declaration.exec(masked))!==null){
         if(depth[hit.index]!==1)continue;
         const modifiers=hit[1].trim().split(/\s+/).map(s=>s.toLowerCase());
-        if(!modifiers.includes("static")||total++>MAX_CONSTANTS)continue;
+        if(total++>MAX_CONSTANTS)continue;
         const field=hit[3];
         if(!identifier.test(field))continue;
+        const initialized=hit[4]==="=";
         const begin=hit.index+hit[0].length;
-        const semi=masked.indexOf(";",begin);
+        const semi=initialized?masked.indexOf(";",begin):hit.index+hit[0].length-1;
         if(semi<0||depth[semi]!==1)continue;
-        const expr=file.source.slice(begin,semi).trim();
-        if(!expr||expr.length>4000)continue;
+        const expr=initialized?file.source.slice(begin,semi).trim():"";
+        if(expr.length>4000)continue;
         const visibility=modifiers.includes("private")?"private":
           modifiers.includes("global")?"global":
           modifiers.includes("protected")?"protected":
           modifiers.includes("public")?"public":"unspecified";
         const isFinal=modifiers.includes("final");
-        const privateCandidate=!isFinal&&visibility==="private";
+        const isStatic=modifiers.includes("static");
+        // An omitted Apex access modifier defaults to private. A private
+        // non-final static may be proven only when this entire class has no
+        // mutation and it is not exposed to test code.
+        const testVisible=/@TestVisible\s*$/i.test(masked.slice(Math.max(0,hit.index-80),hit.index));
+        const privateCandidate=isStatic&&!isFinal&&
+          (visibility==="private"||visibility==="unspecified")&&!testVisible;
         const rest=masked.slice(semi+1);
         const escaped=field.replace(/[.*+?^$()|[\]{}\\]/g,"\\$&");
         const write=new RegExp("\\b"+escaped+
@@ -79,7 +88,8 @@ export class ApexStaticValueIndex {
           prefixWrite.test(pre)||prefixWrite.test(rest));
         const entry:Declaration={
           owner,field,initializer:expr,type:hit[2],visibility,isFinal,
-          isMutablePrivate:privateCandidate,unsafeWrite,
+          isStatic,isMutablePrivate:privateCandidate,unsafeWrite,
+          initializerPresent:initialized&&expr.length>0,
         };
         const key=(owner+"."+field).toLowerCase();
         this.declarations.set(key,[...(this.declarations.get(key)??[]),entry]);
@@ -94,6 +104,51 @@ export class ApexStaticValueIndex {
 
   resolve(name:string):ApexValue {
     return this.compute(name.toLowerCase(),new Set<string>(),0);
+  }
+
+  /**
+   * A final *instance* field is not a class constant. Only a known owning
+   * instance (e.g. this.FIELD in an instance method) may use its literal
+   * declaration initializer. Constructor-assigned/blank/mutable fields
+   * remain unknown and require object-flow analysis.
+   */
+  resolveInstance(owner:string,field:string):ApexValue {
+    const key=(owner+"."+field).toLowerCase();
+    if(this.classOwners.get(owner.toLowerCase())?.size!==1)
+      return unknown("Instance field owner "+owner+" is missing or ambiguous.");
+    const matches=this.declarations.get(key)??[];
+    if(matches.length!==1)
+      return unknown("Instance field "+key+" has no single proven declaration.");
+    if(matches[0].isStatic)
+      return unknown("Field "+key+" is static, not an instance member.");
+    if(!matches[0].isFinal)
+      return unknown("Instance field "+key+" is not final and may be modified by methods.");
+    if(!matches[0].initializerPresent)
+      return unknown("Final instance field "+key+
+        " requires constructor or initializer-block tracking.");
+    return this.evaluateInstanceInitializer(matches[0],new Set<string>(),0);
+  }
+
+  private evaluateInstanceInitializer(
+    declaration:Declaration,active:Set<string>,depth:number,
+  ):ApexValue {
+    const key=(declaration.owner+"."+declaration.field).toLowerCase();
+    if(depth>=MAX_DEPTH||active.has(key))
+      return unknown("Cyclic or oversized instance field initializer: "+key);
+    active.add(key);
+    try {
+      const value=evaluateApexExpression(declaration.initializer,{
+        values:new Map(),
+        resolveCall:(method,args)=>{
+          if(method!=="Apex.constant"||args.length!==1||
+            args[0].kind!=="text"||args[0].values.length!==1)return undefined;
+          return this.compute(args[0].values[0].toLowerCase(),active,depth+1);
+        },
+      });
+      return value.kind==="text"&&value.values.length===1||
+        value.kind==="number"?value:unknown(
+          "Final instance field "+key+" initializer is not a proven scalar.");
+    }finally{active.delete(key);}
   }
 
   private compute(key:string,active:Set<string>,depth:number):ApexValue{
@@ -114,6 +169,13 @@ export class ApexStaticValueIndex {
       ?"Apex field "+key+" has ambiguous declarations."
       :"Apex field "+key+" has no supported static scalar initializer declaration.");
     const entry=entries[0];
+    if(!entry.isStatic)
+      return unknown("Apex member "+key+
+        " is an instance field (not static); class-qualified references "+
+        "cannot prove its value without a specific instance.");
+    if(!entry.initializerPresent)
+      return unknown("Apex static field "+key+
+        " has no declaration initializer; static initialization is not proven.");
     if(!entry.isFinal && !entry.isMutablePrivate)
       return unknown("Apex static field "+key+
         " is externally mutable (not final); its initializer is not a proven runtime value.");
