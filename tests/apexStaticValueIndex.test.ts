@@ -58,6 +58,19 @@ test("v0.1.1 public or protected mutable static fields do not become query const
   expectText(idx,"AdvantageConstants.VERIFIED","OrderSummary");
 });
 
+test("v0.1.1 pure scalar initializers support String/Integer.valueOf chains",()=>{
+  const idx=index(
+    ["NumericCodes.cls","public class NumericCodes {\n"+
+      " public static final Integer CODE = Integer.valueOf('945');\n"+
+      " public static final String TRX_SET_945 = String.valueOf(CODE);\n"+
+      " public static final String PREFIX = 'TRX_';\n"+
+      " public static final String FULL = PREFIX + TRX_SET_945;\n}"],
+  );
+  assert.deepEqual(idx.resolve("NumericCodes.CODE"),{kind:"number",value:945});
+  expectText(idx,"NumericCodes.TRX_SET_945","945");
+  expectText(idx,"NumericCodes.FULL","TRX_945");
+});
+
 test("v0.1.1 null initializers and prefix increments cannot prove static query fields",()=>{
   const idx=index(["MutableConfig.cls","public class MutableConfig {\n"+
     " private static Integer COUNT = 1;\n"+
