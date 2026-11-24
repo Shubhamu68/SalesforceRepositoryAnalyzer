@@ -9,6 +9,7 @@ import {
 import {ApexLocalLiveness,declaredLoopLocals} from "./ApexLocalLiveness.js";
 import {apexStateIdentity} from "./ApexStateIdentity.js";
 import {ApexExecutionBudget} from "./ApexExecutionBudget.js";
+import {invocationMayExecute} from "./ApexConditionalInvocation.js";
 
 /** Capture is by source offset, not file+line, so alternatives never collide. */
 export interface ApexCallSite {
@@ -187,6 +188,7 @@ export class ApexDataFlowEngine {
   readonly sites: ApexCallSite[];
   private readonly methods: IndexedApexMethod[];
   private readonly captures = new Map<number,ApexCallValue[]>();
+  private readonly skippedInvocations=new Map<number,number>();
   private readonly options: Required<Pick<ApexFlowOptions,"maxPaths"|"maxOperations"|"maxDepth">> & ApexFlowOptions;
   private readonly summaries = new Map<string,ApexValue>();
   private readonly activeCalls = new Set<string>();
@@ -347,6 +349,11 @@ export class ApexDataFlowEngine {
     for(let i=low;i<this.sites.length&&this.sites[i].offset<end;i++){
       const site=this.sites[i];
       if(this.activeQueryOffset!==undefined&&site.offset!==this.activeQueryOffset)continue;
+      if(!invocationMayExecute(this.source.slice(start,end),site.offset-start,
+        condition=>this.evaluate(condition,clone(state),depth))){
+        this.skippedInvocations.set(site.offset,(this.skippedInvocations.get(site.offset)??0)+1);
+        continue;
+      }
       const value=this.evaluate(site.argument,state,depth);
       const access=site.accessLevelArgument?
         this.evaluate(site.accessLevelArgument,state,depth):textValue("(default)");
@@ -366,6 +373,26 @@ export class ApexDataFlowEngine {
     }
     this.captureCalls(node.start,node.end,state,depth);
     if(!original)return;
+    if(/^throw\b/i.test(original)){
+      // Explicit throw ends the current normal path. The parser currently
+      // treats catch paths conservatively; do not invent a helper return.
+      const owner=this.currentMethod;
+      const inTry=(nodes:SourceNode[]):boolean=>nodes.some(n=>n.start<=node.start&&node.start<n.end&&
+        (n.condition==="__apex_exception_path_unknown__"||inTry(n.body??[])||inTry(n.otherwise??[])));
+      const capturedSite=this.sites.find(s=>s.offset===this.activeQueryOffset);
+      const containingTry=(nodes:SourceNode[]):boolean=>nodes.some(n=>n.start<=node.start&&node.start<n.end&&
+        ((n.condition==="__apex_exception_path_unknown__"&&capturedSite!==undefined&&
+          (n.body??[]).some(child=>child.start<=capturedSite.offset&&capturedSite.offset<child.end))||
+          containingTry(n.body??[])||containingTry(n.otherwise??[])));
+      if(owner&&(!inTry(owner.body)||containingTry(owner.body))){
+        state.stopped=true;
+        return;
+      }
+      // A caught throw outside the supported normal-path scope may transfer
+      // control to a handler with different values; fail closed.
+      for(const name of state.values.keys())state.values.set(name,unknown("Caught throw continuation is not proven."));
+      return;
+    }
     if(/^return\b/.test(original)){
       state.stopped=true;
       return this.evaluate(original.replace(/^return\s+/,""),state,depth);
@@ -573,7 +600,7 @@ export class ApexDataFlowEngine {
       // Only the source prefix leading to this execution site can contribute
       // to its query value. Helpers (depth>0) must evaluate their full body.
       if(depth===0&&this.activeStopOffset!==undefined&&node.start>this.activeStopOffset)break;
-      if(this.exceeded)break;
+      if(this.exceeded||states.every(state=>state.stopped))break;
       const next:State[]=[];
       for(const state of states){
         if(this.exceeded)break;
@@ -689,10 +716,12 @@ export class ApexDataFlowEngine {
    */
   analyze(): {
     captures:Map<number,ApexCallValue[]>;
+    unreachable:Set<number>;
     exceeded:boolean;
     failures:Map<number,string>;
   } {
     let anyExceeded=false;
+    const unreachable=new Set<number>();
     for(const site of this.sites){
       this.budget.reset();
       this.activeQueryOffset=site.offset;
@@ -726,9 +755,9 @@ export class ApexDataFlowEngine {
           }
           const env=new Map<string,ApexValue>();
           owner.parameters.forEach((name,index)=>env.set(name,args[index]));
-          const before=this.captures.get(site.offset)?.length??0;
+          const before=(this.captures.get(site.offset)?.length??0)+(this.skippedInvocations.get(site.offset)??0);
           this.execute(owner.body,[{values:env}],0);
-          if((this.captures.get(site.offset)?.length??0)===before){
+          if((this.captures.get(site.offset)?.length??0)+(this.skippedInvocations.get(site.offset)??0)===before){
             this.failures.set(site.offset,
               "Private caller context did not reach the query execution site.");
             break;
@@ -741,7 +770,7 @@ export class ApexDataFlowEngine {
         // call-site must supply a proven argument context to claim RESOLVED.
         for(const caller of callers){
           this.activeStopOffset=caller.offset;
-          const before=this.captures.get(site.offset)?.length??0;
+          const before=(this.captures.get(site.offset)?.length??0)+(this.skippedInvocations.get(site.offset)??0);
           const env=new Map<string,ApexValue>();
           for(const p of caller.method.parameters)
             env.set(p,unknown("Runtime caller parameter: "+p));
@@ -749,7 +778,7 @@ export class ApexDataFlowEngine {
           this.currentMethod=caller.method;
           try{this.execute(caller.method.body,[{values:env}],0);}
           finally{this.currentMethod=previousMethod;}
-          if((this.captures.get(site.offset)?.length??0)===before)
+          if((this.captures.get(site.offset)?.length??0)+(this.skippedInvocations.get(site.offset)??0)===before)
             this.failures.set(site.offset,
               "Private helper caller did not establish a complete query execution context.");
           if(this.exceeded)break;
@@ -765,7 +794,7 @@ export class ApexDataFlowEngine {
         this.activeSlice=undefined;
       }
       if(!this.exceeded && !this.failures.has(site.offset) &&
-          !(this.captures.get(site.offset)?.length)){
+          !(this.captures.get(site.offset)?.length)&&!this.skippedInvocations.has(site.offset)){
         // A sliced method may omit a side-effecting control-flow dependency.
         // Retry without slicing rather than misreporting a recognized query
         // as an invocation outside a method. Unproven values remain unknown.
@@ -783,12 +812,15 @@ export class ApexDataFlowEngine {
         // A bounded helper summary should not be reused for another site.
         this.summaries.clear();
         this.captures.delete(site.offset);
+      }else if(!this.failures.has(site.offset)&&!this.captures.get(site.offset)?.length&&
+        this.skippedInvocations.has(site.offset)){
+        unreachable.add(site.offset);
       }
     }
     this.currentMethod=undefined;
     this.activeStopOffset=undefined;
     this.activeQueryOffset=undefined;
     this.activeSlice=undefined;
-    return {captures:this.captures,exceeded:anyExceeded,failures:this.failures};
+    return {captures:this.captures,unreachable,exceeded:anyExceeded,failures:this.failures};
   }
 }
