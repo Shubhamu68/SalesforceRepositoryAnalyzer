@@ -154,3 +154,28 @@ test("Custom Metadata provider handles canonical Salesforce field casing in Apex
   assert.equal(result.complete,true,JSON.stringify(result));
   assert.equal(result.value?.[0].type__c,"Draft");
 });
+
+test("CMDT provider issues validated server-side typed WHERE filters and accepts an empty result",async()=>{
+  const calls:string[]=[];
+  const connection={
+    status:{organizationId:"00Dmock",userId:"005mock",instanceUrl:"https://example.my.salesforce.com",connectedAt:"connection-1"},
+    queryAll:async(soql:string,api:string)=>{
+      assert.equal(api,"data");calls.push(soql);return [];
+    },
+  } as unknown as SalesforceOrgConnection;
+  const provider=new SalesforceApexMetadataProvider(connection);
+  const result=await provider.getCustomMetadataRecords("Example__mdt",["Source_Field__c"],[
+    {field:"EDI_Code__c",value:"945"},{field:"Active__c",value:true},
+    {field:"Sequence__c",value:2},{field:"Label__c",value:"O'Brien\\Folder"},
+    {field:"Text__c",value:"true"},
+  ]);
+  assert.equal(result.complete,true);assert.deepEqual(result.value,[]);
+  assert.equal(calls.length,1);
+  assert.ok(calls[0].includes("FROM Example__mdt WHERE EDI_Code__c = '945' AND Active__c = true AND Sequence__c = 2"));
+  assert.ok(calls[0].includes("Label__c = 'O\\'Brien\\\\Folder'"));
+  assert.ok(calls[0].includes("Text__c = 'true'"));
+  const invalid=await provider.getCustomMetadataRecords("Example__mdt",["Source_Field__c"],[
+    {field:"Active__c OR Name",value:true},
+  ]);
+  assert.equal(invalid.complete,false);assert.equal(calls.length,1);
+});
