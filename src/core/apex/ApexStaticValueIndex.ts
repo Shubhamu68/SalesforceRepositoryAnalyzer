@@ -105,6 +105,7 @@ export class ApexStaticValueIndex {
         const masked=maskApexSource(file.source);
         const owner=/\bclass\s+([A-Za-z_]\w*)\b/i.exec(masked)?.[1];
         if(!owner)continue;
+        const methods=indexApexMethods(file.source);
         const token=/\b[A-Za-z_]\w*\b/g;
         let hit:RegExpExecArray|null;
         while((hit=token.exec(masked))!==null){
@@ -121,6 +122,17 @@ export class ApexStaticValueIndex {
           // alias. Treat it as an escape even if later writes are not found.
           const alias=entry.collection&&/^\s*;/.test(after)&&((/=\s*$/.test(prefix)&&!/==\s*$/.test(prefix))||/\breturn\s*$/i.test(prefix));
           if(!direct&&!alias)continue;
+          const method=methods.filter(m=>m.start<=hit!.index&&hit!.index<m.end)
+            .sort((a,b)=>(a.end-a.start)-(b.end-b.start))[0];
+          // A declaration of a method-local scalar with a matching name is
+          // not a write to the class member. Parameter shadowing is similarly
+          // explicit. Other ambiguous lexical writes stay conservative.
+          if(direct&&!qualified&&method&&(
+            method.parameters.some(p=>p.toLowerCase()===entry.field.toLowerCase())||
+            /(?:^|[;{}])\s*(?:final\s+)?(?:String|Boolean|Integer|Long|Decimal|Double|Id|(?:List|Set|Map)\s*<[\w\s,.<>]+>)\s*$/i.test(before)
+          ))continue;
+          if(alias&&method&&readOnlyCollectionAlias(masked,method.start,method.end,
+            qualified?hit.index-(before.length-qualified.index):hit.index))continue;
           const found=writes.get(key)??[];
           found.push({filePath:path.resolve(file.filePath),offset:hit.index});
           writes.set(key,found);
@@ -294,6 +306,46 @@ function staticBlockCandidates(source:string,masked:string,depth:Int16Array,
     blocks.lastIndex=close+1;
   }
   return result;
+}
+
+/** Prove a direct typed local alias is read-only in one lexical method.
+ * Scalar leaf reads and keySet/containsKey/size/isEmpty are allowed.
+ * Collection-valued get() must itself flow only to a proven read-only
+ * typed local. Other uses, escapes, mutation and ambiguity fail closed. */
+function readOnlyCollectionAlias(masked:string,start:number,end:number,referenceStart:number):boolean{
+  const local=/\b((?:List|Set|Map)\s*<[\w\s,.<>]+>)\s+([A-Za-z_]\w*)\s*=\s*$/i.exec(masked.slice(start,referenceStart));
+  if(!local)return false;
+  const visiting=new Set<string>();
+  const prove=(type:string,name:string,depth:number):boolean=>{
+    if(depth>6||visiting.has(name.toLowerCase()))return false;
+    visiting.add(name.toLowerCase());
+    try{
+      const text=masked.slice(start,end);
+      const declaration=new RegExp("\\b(?:List|Set|Map)\\s*<[\\w\\s,.<>]+>\\s+"+name+"\\s*=","gi");
+      const decls=[...text.matchAll(declaration)];
+      if(decls.length!==1)return false;
+      const declarationName=decls[0].index!+decls[0][0].toLowerCase().lastIndexOf(name.toLowerCase());
+      const uses=new RegExp("\\b"+name+"\\b","gi");
+      let count=0;
+      for(const use of text.matchAll(uses)){
+        if(++count>200)return false;
+        const at=use.index!;
+        if(at===declarationName)continue;
+        const call=/^\s*\.\s*(keySet|containsKey|size|isEmpty|get)\s*\(/i.exec(text.slice(at+name.length));
+        if(!call)return false;
+        if(call[1].toLowerCase()!=="get")continue;
+        const scalarLeaf=/^(?:Map\s*<\s*[\w.]+\s*,\s*(?:String|Id|Integer|Long|Decimal|Double|Boolean)\s*>|List\s*<\s*(?:String|Id|Integer|Long|Decimal|Double|Boolean)\s*>)$/i.test(type);
+        if(scalarLeaf)continue;
+        const open=at+name.length+call[0].length-1;
+        const close=matchingPair(text,open);
+        if(close<0||!/^\s*;/.test(text.slice(close+1)))return false;
+        const nested=/\b((?:List|Set|Map)\s*<[\w\s,.<>]+>)\s+([A-Za-z_]\w*)\s*=\s*$/i.exec(text.slice(0,at));
+        if(!nested||!prove(nested[1],nested[2],depth+1))return false;
+      }
+      return count>0;
+    }finally{visiting.delete(name.toLowerCase());}
+  };
+  return prove(local[1],local[2],0);
 }
 
 /** Canonical lazy getter: if (field == null) { field = literal; } return field;
