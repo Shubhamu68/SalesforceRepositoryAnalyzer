@@ -65,6 +65,14 @@ export async function timeSoqlOrgQuery<T>(soql: string, work: () => Promise<T>):
   try { return await work(); }
   catch (error) {
     recordSoqlCount("org.queryAll.failures");
+    recordSoqlCount(category+".failures");
+    // Only fixed diagnostic categories and numeric HTTP status; never log
+    // exception messages, query text, org identity or Salesforce payloads.
+    const status=(error as {statusCode?:unknown}|null)?.statusCode;
+    const type=typeof status==="number"&&Number.isInteger(status)&&status>=400&&status<=599
+      ?"http_"+status:"transport_or_other";
+    recordSoqlCount("org.queryAll.failure."+type);
+    recordSoqlCount(category+".failure."+type);
     throw error;
   } finally {
     const ms = elapsedMs(started);
