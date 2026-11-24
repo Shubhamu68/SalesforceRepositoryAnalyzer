@@ -30,8 +30,36 @@ export interface IndexedApexMethod {
 const CONTROL = new Set(["if","else","for","while","switch","catch","try","do","synchronized"]);
 const whitespace = (char: string | undefined): boolean => char === undefined || /\s/.test(char);
 
+/** Bounded, exact-source cache. Syntax only: no metadata, permissions or
+ * evaluated state. A changed source string always has a different key. */
+type CachedSyntax={masked?:string;methods?:IndexedApexMethod[];weight:number};
+const syntaxCache=new Map<string,CachedSyntax>();
+const MAX_SYNTAX_ENTRIES=2048,MAX_SYNTAX_CHARS=12_000_000;
+let syntaxChars=0;
+function syntaxEntry(source:string):CachedSyntax|undefined{
+  // Tiny expression fragments are deliberately not cached here.
+  if(source.length<512||source.length>MAX_SYNTAX_CHARS/4)return undefined;
+  const old=syntaxCache.get(source);
+  if(old){syntaxCache.delete(source);syntaxCache.set(source,old);return old;}
+  // Approximate text/AST cost, not an exact heap measurement.
+  const weight=source.length*4;
+  while(syntaxCache.size&&(syntaxCache.size>=MAX_SYNTAX_ENTRIES||syntaxChars+weight>MAX_SYNTAX_CHARS)){
+    const first=syntaxCache.keys().next().value!;
+    syntaxChars-=syntaxCache.get(first)!.weight;syntaxCache.delete(first);
+  }
+  const entry:CachedSyntax={weight};
+  syntaxCache.set(source,entry);syntaxChars+=weight;return entry;
+}
+
 /** Preserve offsets/newlines; mask comments and Apex quoted strings. */
-export function maskApexSource(source: string): string {
+export function maskApexSource(source:string):string{
+  const entry=syntaxEntry(source);
+  if(entry?.masked!==undefined)return entry.masked;
+  const value=maskUncached(source);
+  if(entry)entry.masked=value;
+  return value;
+}
+function maskUncached(source: string): string {
   const out = source.split("");
   let mode: "normal" | "line" | "block" | "single" | "double" = "normal";
   const blank = (i: number) => { if (source[i] !== "\r" && source[i] !== "\n") out[i] = " "; };
@@ -229,7 +257,23 @@ export function parseApexStatements(
 }
 
 /** Reusable method index; no dependency on SOQL scanning or persona policies. */
-export function indexApexMethods(source: string): IndexedApexMethod[] {
+export function indexApexMethods(source:string):IndexedApexMethod[]{
+  const entry=syntaxEntry(source);
+  if(entry?.methods)return entry.methods;
+  const methods=indexMethodsUncached(source);
+  if(entry){
+    // Source nodes are shared read-only syntax. Freeze recursively to prevent
+    // a consumer from contaminating another request's parsed representation.
+    const freezeNodes=(nodes:SourceNode[])=>{
+      for(const node of nodes){if(node.body)freezeNodes(node.body);if(node.otherwise)freezeNodes(node.otherwise);Object.freeze(node);}
+      Object.freeze(nodes);
+    };
+    for(const method of methods){freezeNodes(method.body);Object.freeze(method.parameters);if(method.parameterTypes)Object.freeze(method.parameterTypes);Object.freeze(method);}
+    Object.freeze(methods);entry.methods=methods;
+  }
+  return methods;
+}
+function indexMethodsUncached(source: string): IndexedApexMethod[] {
   const masked = maskApexSource(source);
   const methods: IndexedApexMethod[] = [];
   const call = /\b([A-Za-z_]\w*)\s*\(/g;
