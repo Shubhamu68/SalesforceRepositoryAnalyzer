@@ -27,6 +27,7 @@ export function invocationDependencySlice(nodes:SourceNode[], offset:number, exp
       const terminates=/^(?:return|throw|break|continue)\b/i.test(statement);
       const assignment=/\b([A-Za-z_]\w*)\s*(\+?=)\s*([\s\S]+?);?\s*$/.exec(statement);
       const mutation=/\b([A-Za-z_]\w*)\s*\.\s*(?:add|addAll|clear|remove|put|putAll)\s*\(/i.exec(statement);
+      const memberWrite=/^\s*[A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)+\s*(?:\+?=)(?!=|>)/.test(maskApexSource(statement));
       const write=assignment?.[1]??mutation?.[1];
       // Keeping a referenced outer declaration preserves its lexical scope:
       // otherwise branch cleanup incorrectly deletes assignments to it.
@@ -36,11 +37,14 @@ export function invocationDependencySlice(nodes:SourceNode[], offset:number, exp
       const calls=[...maskApexSource(statement).matchAll(/\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\s*\(/g)];
       const containsCall=calls.length>0;
       const safeDebug=calls.length===1&&/^System\.debug\s*\(/i.test(statement);
-      const needed=includesCall||terminates||(write!==undefined&&relevant.has(write))||
+      const needed=includesCall||terminates||memberWrite||(write!==undefined&&relevant.has(write))||
         (declaration!==undefined&&relevant.has(declaration))||
         (containsCall&&!safeDebug)||(!write&&/[\[\]{}]/.test(statement));
       if(!needed)return false;
       live.add(node);
+      // Member writes can change the value read through another alias. Keep
+      // the receiver declaration and its reference-producing dependencies.
+      if(memberWrite)for(const name of identifiers(statement))relevant.add(name);
       if(write!==undefined&&relevant.has(write)) {
         for(const name of identifiers(assignment?.[3]??statement))relevant.add(name);
       }
