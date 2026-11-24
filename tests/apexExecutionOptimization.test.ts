@@ -112,3 +112,23 @@ test("malformed SELECT is never repaired; report original punctuation with liter
   assert.match(result.unresolved[0].reason,/Reconstructed query structure.*SELECT Id, FROM Account/);
   assert.doesNotMatch(result.unresolved[0].reason,/private value/);
 });
+
+
+test("terminated paths do not consume the live frontier budget or lose return alternatives",()=>{
+  const code=[
+    "public class Builder {",
+    " public static String build(Boolean a,Boolean b,Boolean c){",
+    "   String name='Account';",
+    "   if(a){name='Contact';return 'SELECT Id FROM Contact';}",
+    "   if(b){name='Case';return 'SELECT Id FROM Contact';}",
+    "   if(c){name='Opportunity';return 'SELECT Id FROM Contact';}",
+    "   return 'SELECT Id FROM '+name;",
+    " }",
+    "}",
+  ].join("\n");
+  const engine=new ApexDataFlowEngine(code,{maxPaths:2});
+  const method=indexApexMethods(code)[0];
+  const result=engine.summarizeMethodReturn(method,[unknown("a"),unknown("b"),unknown("c")]);
+  assert.equal(result.kind,"text");
+  if(result.kind==="text")assert.deepEqual(result.values.sort(),["SELECT Id FROM Account","SELECT Id FROM Contact"]);
+});
