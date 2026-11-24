@@ -72,8 +72,11 @@ export class ApexStaticValueIndex {
         const escaped=field.replace(/[.*+?^$()|[\]{}\\]/g,"\\$&");
         const write=new RegExp("\\b"+escaped+
           "\\s*(?:(?:\\+\\+|--|(?:[+\\-*\\/%&|^])?=(?!=)))","m");
+        const prefixWrite=new RegExp("(?:\\+\\+|--)\\s*"+escaped+"\\b","m");
         const pre=masked.slice(classBrace+1,hit.index);
-        const unsafeWrite=privateCandidate&&(write.test(pre)||write.test(rest));
+        const unsafeWrite=privateCandidate&&(
+          write.test(pre)||write.test(rest)||
+          prefixWrite.test(pre)||prefixWrite.test(rest));
         const entry:Declaration={
           owner,field,initializer:expr,type:hit[2],visibility,isFinal,
           isMutablePrivate:privateCandidate,unsafeWrite,
@@ -139,6 +142,8 @@ export class ApexStaticValueIndex {
           return this.compute(args[0].values[0].toLowerCase(),active,depth+1);
         },
       });
+      if(/^null$/i.test(entry.initializer.trim()))
+        result=unknown("Apex static field "+key+" has a null initializer.");
       if(result.kind==="text"&&result.values.length!==1)
         result=unknown("Static field "+key+" has multiple possible initializer values.");
       if(result.kind!=="text"&&result.kind!=="number"&&result.kind!=="unknown")
