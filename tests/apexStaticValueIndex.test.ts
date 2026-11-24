@@ -166,3 +166,55 @@ test("Apex map literal key is not a static field write",()=>{
   ].join("\n")]);
   expectText(idx,"Config.PRODUCT","Product2");
 });
+
+test("all modifier and scope variants are classified without treating instance final as class constants",()=>{
+  const idx=index(["ModifierMatrix.cls",[
+    "public class ModifierMatrix {",
+    " public static final String A = 'Id';",
+    " private static final string B = 'Name';",
+    " protected final static String C = 'Phone';",
+    " global STATIC FINAL STRING D = 'CreatedDate';",
+    " static final String E = 'OwnerId';",
+    " final static String F = 'LastModifiedDate';",
+    " private final String G = 'Industry';",
+    " public final String H = 'Type';",
+    " final String I = 'AnnualRevenue';",
+    " private final String J;",
+    " public static final String K;",
+    " public static String L;",
+    " public static String M = 'Description';",
+    "}",
+  ].join("\n")]);
+  for(const [field,expected] of Object.entries({
+    A:"Id",B:"Name",C:"Phone",D:"CreatedDate",E:"OwnerId",F:"LastModifiedDate",
+  }))expectText(idx,"ModifierMatrix."+field,expected);
+  for(const field of ["G","H","I"])
+    expectUnknown(idx,"ModifierMatrix."+field,/instance field/i);
+  for(const [field,expected] of Object.entries({
+    G:"Industry",H:"Type",I:"AnnualRevenue",
+  }))expectText({resolve:(name:string)=>idx.resolveInstance("ModifierMatrix",name.split(".")[1])} as ApexStaticValueIndex,"ModifierMatrix."+field,expected);
+  expectUnknown(idx,"ModifierMatrix.K",/no declaration initializer/i);
+  expectUnknown(idx,"ModifierMatrix.L",/no declaration initializer/i);
+  expectUnknown(idx,"ModifierMatrix.M",/externally mutable/i);
+  expectUnknown(idx,"ModifierMatrix.J",/instance field/i);
+  const incomplete=idx.resolveInstance("ModifierMatrix","J");
+  assert.equal(incomplete.kind,"unknown");
+  if(incomplete.kind==="unknown")assert.match(incomplete.reason,/constructor|initializer-block/i);
+});
+
+test("non-primitive or unsupported declarations never become scalar constants",()=>{
+  const idx=index(["NonScalars.cls",[
+    "public class NonScalars {",
+    " public static final String QUERY = 'SELECT Id FROM Account';",
+    " public static final Integer LIMIT_VALUE = 5;",
+    " public static final String[] FIELDS = new String[]{'Name'};",
+    " public static final List<String> ALIASES = new List<String>{'Name'};",
+    " public static final String PROPERTY { get; private set; }",
+    "}",
+  ].join("\n")]);
+  expectText(idx,"NonScalars.QUERY","SELECT Id FROM Account");
+  assert.deepEqual(idx.resolve("NonScalars.LIMIT_VALUE"),{kind:"number",value:5});
+  expectUnknown(idx,"NonScalars.FIELDS",/no supported static scalar initializer/i);
+  expectUnknown(idx,"NonScalars.ALIASES",/no supported static scalar initializer/i);
+  expectUnknown(idx,"NonScalars.PROPERTY",/no supported static scalar initializer/i);
+});
