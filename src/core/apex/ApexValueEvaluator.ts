@@ -1,4 +1,5 @@
 import { splitApexTopLevel, stripApexComments } from "./ApexSourceModel.js";
+import { parseCustomMetadataQuery } from "./ApexCustomMetadataQueryModel.js";
 
 /** Portable abstract Apex values: no Salesforce API calls and no eval(). */
 export type ApexValue =
@@ -230,11 +231,24 @@ export function evaluateApexExpression(
         unknown("Complete Field Set members not available from connected org.")
       :unknown("Field Set name not proven.");
   }
-  // Only custom-metadata SOQL used in a for-each iterable can be supplied as
-  // a complete row set; ordinary bracketed SOQL is not a scalar expression.
-  if(/^\[\s*SELECT\b[\s\S]*\]$/i.test(expr))
-    return context.resolveCall?.("Apex.metadataRows",[textValue(expr)]) ??
-      unknown("Static metadata query rows have not been completely established.");
+  // Resolve metadata binds in the current lexical environment (including
+  // helper parameters and known member initializers), not at source discovery.
+  if(/^\[\s*SELECT\b[\s\S]*\]$/i.test(expr)){
+    const query=parseCustomMetadataQuery(expr);
+    if(!query)return unknown("Static Custom Metadata WHERE or SELECT expression is unsupported.");
+    const values:ApexValue[]=[];
+    for(const predicate of query.predicates){
+      const value=evaluateApexExpression(predicate.right,context,depth+1);
+      if(value.kind==="unknown")return unknown("Custom Metadata "+query.type+
+        " WHERE "+predicate.field+" has an unresolved runtime bind: "+value.reason);
+      if(onlyText(value)===null||(predicate.bind&&onlyText(value)==="null"))
+        return unknown("Custom Metadata "+query.type+" WHERE "+predicate.field+
+          " does not have one supported scalar value.");
+      values.push(value);
+    }
+    return context.resolveCall?.("Apex.metadataRows",[textValue(query.expression),...values]) ??
+      unknown("Complete Custom Metadata "+query.type+" rows have not been established.");
+  }
   // Schema Describe is a metadata dependency, not a method to execute.
   // A caller-supplied read-only snapshot must prove the complete field list.
   const directDescribe=/^([A-Za-z_]\w*)\.SObjectType\.getDescribe\(\)\.fields\.getMap\(\)$/i.exec(expr);
