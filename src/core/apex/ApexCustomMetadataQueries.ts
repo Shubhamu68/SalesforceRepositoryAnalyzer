@@ -1,150 +1,131 @@
 import { evaluateApexExpression, textValue, unknown, type ApexValue }
   from "./ApexValueEvaluator.js";
-import { maskApexSource, matchingPair, stripApexComments }
-  from "./ApexSourceModel.js";
-import type { ApexMetadataProvider } from "../metadata/ApexMetadataProvider.js";
+import { maskApexSource, matchingPair, stripApexComments } from "./ApexSourceModel.js";
+import { parseCustomMetadataQuery, type MetadataLoopQuery } from "./ApexCustomMetadataQueryModel.js";
+import type { ApexMetadataProvider, MetadataResult } from "../metadata/ApexMetadataProvider.js";
 
-/** A syntactically complete, bounded literal SOQL iterator over Custom Metadata. */
-interface MetadataLoopQuery {
-  expression:string;
-  type:string;
-  fields:string[];
-  predicates:Array<{field:string;right:string}>;
-}
-const API=/^[A-Za-z_]\w*$/;
 const MAX_ROWS=100;
 const MAX_REFERENCES=30;
 
-/**
- * Only complete, source-local [SELECT ... FROM Object__mdt WHERE ...]
- * iterables can be interpreted. Invalid predicates never trigger a best-effort
- * org query, because filtering errors would invent executable query variants.
- */
 export function findCustomMetadataLoops(source:string):MetadataLoopQuery[] {
-  const clean=stripApexComments(source);
-  const visible=maskApexSource(clean);
+  const clean=stripApexComments(source), visible=maskApexSource(clean);
   const result:MetadataLoopQuery[]=[];
   for(let i=0;i<visible.length;i++){
     if(visible[i]!=="[")continue;
     const end=matchingPair(visible,i,"[","]");
     if(end<0)continue;
-    const expression=clean.slice(i,end+1).trim();
-    const body=expression.slice(1,-1).trim()
-      .replace(/\s+WITH\s+SECURITY_ENFORCED\s*$/i,"");
-    const parsed=/^SELECT\s+([\w\s,]+?)\s+FROM\s+([A-Za-z_]\w*__mdt)\s+WHERE\s+([\s\S]+)$/i.exec(body);
-    if(!parsed){i=end;continue;}
-    const fields=parsed[1].split(",").map(x=>x.trim());
-    if(!fields.length||fields.some(x=>!API.test(x))){i=end;continue;}
-    const pieces=parsed[3].split(/\s+AND\s+/i);
-    const predicates:Array<{field:string;right:string}>=[];
-    let valid=pieces.length>0;
-    for(const term of pieces) {
-      const m=/^([A-Za-z_]\w*)\s*=\s*([\s\S]+)$/.exec(term.trim());
-      if(!m||!API.test(m[1])||/\b(?:OR|LIKE|IN|GROUP|ORDER|LIMIT)\b/i.test(m[2].replace(/'(?:\\.|[^'])*'/g,""))){
-        valid=false;break;
-      }
-      predicates.push({field:m[1],right:m[2].trim()});
-    }
-    if(valid)result.push({expression,type:parsed[2],fields,predicates});
+    const query=parseCustomMetadataQuery(clean.slice(i,end+1));
+    if(query)result.push(query);
     i=end;
     if(result.length>MAX_REFERENCES)break;
   }
   return result;
 }
+
 function scalar(value:unknown):ApexValue {
   if(typeof value==="string")return textValue(value);
   if(typeof value==="boolean")return textValue(String(value));
-  if(typeof value==="number"&&Number.isFinite(value))
-    return {kind:"number",value};
+  if(typeof value==="number"&&Number.isFinite(value))return {kind:"number",value};
   return unknown("Custom Metadata value is null or not a scalar.");
 }
 function single(value:ApexValue):string|undefined {
   if(value.kind==="text"&&value.values.length===1)return value.values[0];
-  if(value.kind==="number")return String(value.value);
+  if(value.kind==="number"&&Number.isFinite(value.value))return String(value.value);
   return undefined;
 }
 
-/**
- * Preload an org-backed row inventory before symbolic Apex evaluation.
- * Every WHERE bind and selected field must be completely provable.
- * The result is immutable and can be reused by the symbolic execution engine.
- */
+export interface CustomMetadataRequest {
+  key:string;
+  type:string;
+  selected:string[];
+  query:MetadataLoopQuery;
+  filters:Array<{field:string;value:string}>;
+}
+export type CustomMetadataInventory=MetadataResult<Array<Record<string,unknown>>>;
+
+/** The inventory key intentionally excludes filter values: callers with
+ * different known binds reuse the same complete, read-only org inventory. */
+export function planCustomMetadataRequest(expression:string,values:readonly ApexValue[]):
+  CustomMetadataRequest|{kind:"unknown";reason:string} {
+  const query=parseCustomMetadataQuery(expression);
+  if(!query||values.length!==query.predicates.length)
+    return {kind:"unknown",reason:"Custom Metadata WHERE or SELECT expression is unsupported."};
+  const filters:CustomMetadataRequest["filters"]=[];
+  for(const [i,predicate] of query.predicates.entries()){
+    const value=single(values[i]);
+    if(value===undefined)return {kind:"unknown",reason:"Custom Metadata WHERE "+predicate.field+" has an unresolved runtime bind."};
+    filters.push({field:predicate.field,value});
+  }
+  const selectedMap=new Map<string,string>();
+  for(const field of [...query.fields,...query.predicates.map(p=>p.field)])
+    selectedMap.set(field.toLowerCase(),field);
+  const selected=[...selectedMap.values()].sort((a,b)=>a.toLowerCase().localeCompare(b.toLowerCase()));
+  return {key:query.type.toLowerCase()+"|"+[...selectedMap.keys()].sort().join(","),
+    type:query.type,selected,query,filters};
+}
+
+/** Apply the current invocation's filters to complete org rows. Never
+ * substitute all metadata records for an unknown bind or truncate the set. */
+export function resolveCustomMetadataRows(request:CustomMetadataRequest,found:CustomMetadataInventory):ApexValue {
+  if(!found.complete||!found.value)
+    return unknown("Complete Custom Metadata "+request.type+" rows unavailable: "+
+      (found.reason??"Live org metadata not verified."));
+  const matching:Array<Array<[string,ApexValue]>>=[];
+  for(const raw of found.value){
+    if(!raw||typeof raw!=="object")return unknown("Invalid Custom Metadata row.");
+    const keys=new Map(Object.keys(raw).map(k=>[k.toLowerCase(),k]));
+    const read=(field:string)=>raw[keys.get(field.toLowerCase())!];
+    if(request.selected.some(field=>!keys.has(field.toLowerCase())))
+      return unknown("Custom Metadata "+request.type+" row omitted selected/filter fields.");
+    let included=true;
+    for(const {field,value} of request.filters){
+      const actual=read(field);
+      // A null field cannot equal a known non-null scalar. Missing fields
+      // are separately rejected above, not silently treated as null.
+      if(actual===null){included=false;break;}
+      const converted=single(scalar(actual));
+      if(converted===undefined)return unknown("Custom Metadata "+request.type+" WHERE "+field+" is not a supported scalar.");
+      if(converted.toLowerCase()!==value.toLowerCase()){included=false;break;}
+    }
+    if(!included)continue;
+    const values:Array<[string,ApexValue]>=[];
+    for(const field of request.query.fields){
+      const item=scalar(read(field));
+      if(item.kind==="unknown")return unknown("Custom Metadata "+request.type+" selected field "+field+" is null or unsupported.");
+      if(/(?:^|_)Field__c$/i.test(field)){
+        const value=single(item);
+        if(!value||!/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/.test(value))
+          return unknown("Custom Metadata "+request.type+" field path "+field+" is invalid.");
+      }
+      values.push([field,item]);
+    }
+    matching.push(values);
+    if(matching.length>MAX_ROWS)return unknown("Custom Metadata "+request.type+" exceeds the bounded matching row limit.");
+  }
+  // No ORDER BY is accepted; deterministic order for field inventory.
+  matching.sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  return {kind:"records",items:matching};
+}
+
+/** Compatibility utility for consumers resolving source-level literal binds.
+ * The main analyzer discovers requests on demand from lexical execution. */
 export async function buildCustomMetadataRows(
   source:string,metadata:ApexMetadataProvider|undefined,
   resolveConstant:(name:string)=>ApexValue|undefined,
-):Promise<Map<string,ApexValue>> {
-  const descriptors=findCustomMetadataLoops(source);
-  const outputs=new Map<string,ApexValue>();
-  if(!descriptors.length)return outputs;
+):Promise<Map<string,ApexValue>>{
+  const descriptors=findCustomMetadataLoops(source),outputs=new Map<string,ApexValue>();
   for(const descriptor of descriptors){
-    const fail=(reason:string)=>outputs.set(descriptor.expression,unknown(reason));
-    if(!metadata){fail("Custom Metadata requires a connected authoritative org.");continue;}
-    if(descriptors.length>MAX_REFERENCES) {
-      fail("Too many Custom Metadata query references.");continue;
+    if(!metadata||descriptors.length>MAX_REFERENCES){
+      outputs.set(descriptor.expression,unknown(!metadata?"Custom Metadata requires a connected authoritative org.":"Too many Custom Metadata query references."));continue;
     }
-    const filters:Array<{field:string;value:string}>=[];
-    let unsafe:string|undefined;
-    for(const predicate of descriptor.predicates){
-      const rhs=predicate.right.replace(/^:/,"");
-      const evaluated=evaluateApexExpression(rhs,{
-        values:new Map(),
-        resolveCall:(name,args)=>name==="Apex.constant" &&
-          args[0]?.kind==="text"&&args[0].values.length===1
-          ?resolveConstant(args[0].values[0]):undefined,
-      });
-      const value=single(evaluated);
-      if(value===undefined){
-        unsafe="Custom Metadata WHERE "+predicate.field+
-          " depends on an unresolved runtime value or mutable Apex constant.";
-        break;
-      }
-      filters.push({field:predicate.field,value});
-    }
-    if(unsafe){fail(unsafe);continue;}
-    const selected=[...new Set([...descriptor.fields,
-      ...descriptor.predicates.map(x=>x.field)])];
-    const found=await metadata.getCustomMetadataRecords(descriptor.type,selected);
-    if(!found.complete||!found.value){
-      fail("Complete Custom Metadata "+descriptor.type+" rows unavailable: "+
-        (found.reason??"Live org metadata not verified."));continue;
-    }
-    const matching:Array<Array<[string,ApexValue]>>=[];
-    let invalid=false;
-    for(const raw of found.value){
-      if(!raw||typeof raw!=="object"||
-         selected.some(field=>!Object.prototype.hasOwnProperty.call(raw,field)||
-           scalar(raw[field]).kind==="unknown")){invalid=true;break;}
-      const included=filters.every(({field,value})=>{
-        const actual=scalar(raw[field]);
-        const converted=single(actual);
-        return converted!==undefined&&converted.toLowerCase()===value.toLowerCase();
-      });
-      if(!included)continue;
-      const values:Array<[string,ApexValue]>=[];
-      for(const field of descriptor.fields){
-        if(!Object.prototype.hasOwnProperty.call(raw,field)){
-          invalid=true;break;
-        }
-        const item=scalar(raw[field]);
-        if(item.kind==="unknown"){invalid=true;break;}
-        if(/(?:^|_)Field__c$/i.test(field)){
-          const value=single(item);
-          if(!value||!/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/.test(value)){
-            invalid=true;break;
-          }
-        }
-        values.push([field,item]);
-      }
-      if(invalid)break;
-      matching.push(values);
-      if(matching.length>MAX_ROWS){invalid=true;break;}
-    }
-    if(invalid){fail("Custom Metadata rows have incomplete or unsafe fields, or exceed the bounded row limit.");continue;}
-    // The metadata query does not specify ORDER BY. Appending the complete
-    // field inventory to a SELECT is order-insensitive for OLS/FLS; canonical
-    // sorting avoids nondeterministic workbook output for equal row sets.
-    matching.sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b)));
-    outputs.set(descriptor.expression,{kind:"records",items:matching});
+    const values=descriptor.predicates.map(p=>evaluateApexExpression(p.right,{
+      values:new Map(),resolveCall:(name,args)=>name==="Apex.constant"&&args[0]?.kind==="text"&&args[0].values.length===1?
+        resolveConstant(args[0].values[0]):undefined,
+    }));
+    const request=planCustomMetadataRequest(descriptor.expression,values);
+    if("kind" in request){outputs.set(descriptor.expression,request);continue;}
+    outputs.set(descriptor.expression,resolveCustomMetadataRows(request,
+      await metadata.getCustomMetadataRecords(request.type,request.selected)));
   }
   return outputs;
 }
