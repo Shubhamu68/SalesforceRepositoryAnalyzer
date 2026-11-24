@@ -10,25 +10,22 @@ import {ApexLocalLiveness,declaredLoopLocals} from "./ApexLocalLiveness.js";
 import {apexStateIdentity} from "./ApexStateIdentity.js";
 import {ApexExecutionBudget} from "./ApexExecutionBudget.js";
 import {invocationMayExecute} from "./ApexConditionalInvocation.js";
+import {discoverApexInvocations,dynamicDatabaseQuerySelector,type ApexInvocationSelector,type ApexCallSite} from "./ApexInvocationModel.js";
+export type {ApexCallSite} from "./ApexInvocationModel.js";
 
-/** Capture is by source offset, not file+line, so alternatives never collide. */
-export interface ApexCallSite {
-  offset: number;
-  line: number;
-  method: string;
-  argument: string;
-  accessLevelArgument?: string;
-}
 export interface ApexCallValue {
   site: ApexCallSite;
   query: ApexValue;
   accessLevel: ApexValue;
+  /** Values in the selector-requested argument order. */
+  arguments?:readonly ApexValue[];
 }
 export interface ApexFlowOptions {
   /** Pluggable read-only, preloaded metadata or constant value source. */
   resolveExternal?: (name: string, args: ApexValue[]) => ApexValue | undefined;
   /** Only completely proven private-method caller contexts can narrow entry inputs. */
   resolvePrivateContexts?: (method: IndexedApexMethod) => ApexValue[][] | undefined;
+  selectInvocation?:ApexInvocationSelector;
   maxPaths?: number;
   maxOperations?: number;
   maxDepth?: number;
@@ -112,7 +109,6 @@ function queryDependencySlice(nodes:SourceNode[], offset:number, expression:stri
   for(let i=nodes.length-1;i>=0;i--)mark(nodes[i]);
   return live;
 }
-const EXECUTION = /\bDatabase\s*\.\s*(queryWithBinds|countQueryWithBinds|getQueryLocatorWithBinds|query|countQuery|getQueryLocator)\s*\(/gi;
 const DEFAULT_PATHS = 32, DEFAULT_OPERATIONS = 5000, DEFAULT_DEPTH = 6;
 const MAX_LOOP_ITEMS = 100;
 
@@ -151,33 +147,6 @@ function bool(value: ApexValue): boolean | undefined {
 function asText(value:ApexValue):string|undefined {
   return value.kind==="text"&&value.values.length===1?value.values[0]:undefined;
 }
-function findCalls(source:string,masked:string):ApexCallSite[]{
-  const sites:ApexCallSite[]=[];
-  EXECUTION.lastIndex=0;
-  let match:RegExpExecArray|null;
-  while((match=EXECUTION.exec(masked))!==null){
-    const open=masked.indexOf("(",match.index);
-    const end=matchingPair(masked,open);
-    if(end<0){
-      sites.push({offset:match.index,line:sourceLine(source,match.index),
-        method:match[1],argument:""});
-      continue;
-    }
-    const args=splitApexTopLevel(source.slice(open+1,end),",");
-    // Bracketed SOQL is already parsed by the existing static scanner.
-    // Database.getQueryLocator([SELECT ...]) is not a string-built query.
-    if(/^\s*\[\s*SELECT\b/i.test(args[0]??"")){
-      EXECUTION.lastIndex=end+1;
-      continue;
-    }
-    const index=/withbinds$/i.test(match[1])?2:1;
-    sites.push({offset:match.index,line:sourceLine(source,match.index),
-      method:match[1],argument:args[0]??"",
-      ...(args[index]?{accessLevelArgument:args[index]}:{})});
-    EXECUTION.lastIndex=end+1;
-  }
-  return sites;
-}
 
 /**
  * Bounded path-sensitive abstract interpreter, reusable by other Apex features.
@@ -211,7 +180,7 @@ export class ApexDataFlowEngine {
     this.budget=new ApexExecutionBudget(this.options.maxOperations,this.options.maxPaths);
     const masked=maskApexSource(source);
     this.className=/\bclass\s+([A-Za-z_]\w*)\b/i.exec(masked)?.[1];
-    this.sites=findCalls(source,masked);
+    this.sites=discoverApexInvocations(source,options.selectInvocation??dynamicDatabaseQuerySelector);
     this.methods=indexApexMethods(source);
   }
   private evaluate(expr:string, state:State, depth:number):ApexValue {
@@ -354,11 +323,11 @@ export class ApexDataFlowEngine {
         this.skippedInvocations.set(site.offset,(this.skippedInvocations.get(site.offset)??0)+1);
         continue;
       }
-      const value=this.evaluate(site.argument,state,depth);
-      const access=site.accessLevelArgument?
-        this.evaluate(site.accessLevelArgument,state,depth):textValue("(default)");
+      const args=site.arguments.map(argument=>this.evaluate(argument,state,depth));
+      const value=args[0]??unknown("Invocation has no selected argument.");
+      const access=args[1]??textValue("(default)");
       const captures=this.captures.get(site.offset)??[];
-      captures.push({site,query:value,accessLevel:access});
+      captures.push({site,query:value,accessLevel:access,arguments:args});
       this.captures.set(site.offset,captures);
     }
   }
@@ -579,7 +548,8 @@ export class ApexDataFlowEngine {
         if(site.offset<node.start||site.offset>=node.end)continue;
         if(this.captures.has(site.offset))continue;
         this.captures.set(site.offset,[{site,query:unknown("Query occurs in a runtime-dependent loop."),
-          accessLevel:unknown("Loop execution context unknown.")}]);
+          accessLevel:unknown("Loop execution context unknown."),
+          arguments:site.arguments.map(()=>unknown("Loop execution context unknown."))}]);
       }
       return {states:[state,changed],returns:[]};
     }
@@ -746,7 +716,7 @@ export class ApexDataFlowEngine {
         // Public/protected/global methods must never use this optimization.
         this.activeStopOffset=site.offset;
         this.activeSlice=queryDependencySlice(owner.body,site.offset,
-          site.argument+" "+(site.accessLevelArgument??""));
+          site.arguments.join(" "));
         for(const args of closedContexts){
           if(args.length!==owner.parameters.length||
              args.some(value=>value.kind==="unknown")){
@@ -789,7 +759,7 @@ export class ApexDataFlowEngine {
         // Restrict the query's root method to statements that can affect its
         // argument. Calls and opaque operations are deliberately retained.
         this.activeSlice=queryDependencySlice(owner.body,site.offset,
-          site.argument+" "+(site.accessLevelArgument??""));
+          site.arguments.join(" "));
         this.execute(owner.body,[{values:env}],0);
         this.activeSlice=undefined;
       }
