@@ -1026,3 +1026,65 @@ test("actual mutable AdvantageConstants Product Selector map key preserves rejec
     assert.match(result.unresolvedDynamic[0].reason,/externally mutable/i);
   }finally{await rm(dir,{recursive:true,force:true});}
 });
+
+test("scope-aware final fields participate in real dynamic query building",async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),"v011-modifier-scope-"));
+  try{
+    await writeFile(path.join(dir,"FieldScopes.cls"),[
+      "public class FieldScopes {",
+      " private static final String STATIC_FIELD = 'Id';",
+      " private final String INSTANCE_FIELD = 'Name';",
+      " public static void staticQuery(){",
+      "   Database.query('SELECT '+STATIC_FIELD+' FROM Account');",
+      " }",
+      " public void instanceQuery(){",
+      "   Database.query('SELECT '+this.INSTANCE_FIELD+' FROM Contact');",
+      " }",
+      " public static void shadowedQuery(){",
+      "   final String STATIC_FIELD = 'Phone';",
+      "   Database.query('SELECT '+STATIC_FIELD+' FROM Account');",
+      " }",
+      "}",
+    ].join("\n"));
+    const result=await scanApexSoqlWithUnresolved(dir);
+    assert.equal(result.unresolvedDynamic.length,0,JSON.stringify(result.unresolvedDynamic));
+    assert.deepEqual(result.queries.map(x=>x.query).sort(),[
+      "SELECT Id FROM Account","SELECT Name FROM Contact","SELECT Phone FROM Account",
+    ].sort());
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test("instance-final field cannot be used as a static class-qualified constant",async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),"v011-instance-not-static-"));
+  try{
+    await writeFile(path.join(dir,"BadFieldScope.cls"),[
+      "public class BadFieldScope {",
+      " public final String ITEM_FIELD = 'Name';",
+      " public static void run(){",
+      "   Database.query('SELECT '+BadFieldScope.ITEM_FIELD+' FROM Account');",
+      " }",
+      "}",
+    ].join("\n"));
+    const result=await scanApexSoqlWithUnresolved(dir);
+    assert.equal(result.queries.length,0);
+    assert.equal(result.unresolvedDynamic.length,1);
+    assert.match(result.unresolvedDynamic[0].reason,/instance field.*not static/i);
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test("blank final member is not inferred from static initializer side effects",async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),"v011-static-blank-"));
+  try{
+    await writeFile(path.join(dir,"BlankField.cls"),[
+      "public class BlankField {",
+      " public static final String Q;",
+      " static { Q='Name'; }",
+      " public static void run(){Database.query('SELECT '+BlankField.Q+' FROM Account');}",
+      "}",
+    ].join("\n"));
+    const result=await scanApexSoqlWithUnresolved(dir);
+    assert.equal(result.queries.length,0);
+    assert.equal(result.unresolvedDynamic.length,1);
+    assert.match(result.unresolvedDynamic[0].reason,/no declaration initializer/i);
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
