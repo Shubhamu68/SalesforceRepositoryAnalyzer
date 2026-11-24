@@ -92,19 +92,21 @@ export class ApexStaticValueIndex {
       const keys=new Set(blockCandidates.map(c=>(c.entry.owner+"."+c.entry.field).toLowerCase()));
       for(const file of sources){
         const masked=maskApexSource(file.source);
-        const owner=/\\bclass\\s+([A-Za-z_]\\w*)\\b/i.exec(masked)?.[1];
+        const owner=/\bclass\s+([A-Za-z_]\w*)\b/i.exec(masked)?.[1];
         if(!owner)continue;
         // Include direct assignments, compound assignments, increments, indexed
         // assignments and standard collection mutators. Shadowed locals may
         // conservatively invalidate a candidate; aliases are not proven here.
-        const token=/\\b(?:([A-Za-z_]\\w*)\\s*\\.\\s*)?([A-Za-z_]\\w*)\\b/g;
+        const token=/\b[A-Za-z_]\w*\b/g;
         let hit:RegExpExecArray|null;
         while((hit=token.exec(masked))!==null){
-          const key=((hit[1]??owner)+"."+hit[2]).toLowerCase();
+          const before=masked.slice(Math.max(0,hit.index-256),hit.index);
+          const qualified=/\b([A-Za-z_]\w*)\s*\.\s*$/.exec(before);
+          const key=((qualified?.[1]??owner)+"."+hit[0]).toLowerCase();
           if(!keys.has(key))continue;
           const after=masked.slice(token.lastIndex,token.lastIndex+256);
-          const before=masked.slice(Math.max(0,hit.index-24),hit.index);
-          if(!/^(?:\\s*(?:=(?!=|>)|[+\\-*/%&|^]=|\\+\\+|--)|\\s*\\[[^\\];]*\\]\\s*(?:=(?!=|>)|[+\\-*/%&|^]=|\\+\\+|--)|\\s*\\.\\s*(?:add|addAll|remove|removeAll|retainAll|clear|put|putAll|set|sort)\\s*\\()/i.test(after)&&!/(?:\\+\\+|--)\\s*$/.test(before))continue;
+          const prefix=qualified?before.slice(0,qualified.index):before;
+          if(!/^(?:\s*(?:=(?!=|>)|[+\-*/%&|^]=|\+\+|--)|\s*\[[^\];]*\]\s*(?:=(?!=|>)|[+\-*/%&|^]=|\+\+|--)|\s*\.\s*(?:add|addAll|remove|removeAll|retainAll|clear|put|putAll|set|sort)\s*\()/i.test(after)&&!/(?:\+\+|--)\s*$/.test(prefix))continue;
           const found=writes.get(key)??[];
           found.push({filePath:path.resolve(file.filePath),offset:hit.index});
           writes.set(key,found);
