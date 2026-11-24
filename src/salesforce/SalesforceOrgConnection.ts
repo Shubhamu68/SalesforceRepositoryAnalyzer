@@ -2,7 +2,7 @@ import { SalesforceCliAuthProvider, SalesforceCliLoginCancelledError, type CliOr
 import { timedAuthStep } from "./SalesforceAuthTiming.js";
 import { SalesforceReadRequestGateway, SalesforceReadTransportError, type SalesforceReadResult } from "./SalesforceReadRequestGateway.js";
 import { XMLParser } from "fast-xml-parser";
-import { recordSoqlCount, timeSoqlOrgQuery, timeSoqlPhase } from "../services/SoqlPerformanceMetrics.js";
+import { recordSoqlCount, timeSoqlOrgQuery, timeSoqlPhase, safeSalesforceErrorCode } from "../services/SoqlPerformanceMetrics.js";
 /**
  * Local Salesforce CLI browser authorization: no Analyzer-owned client secret
  * or integration Run As identity. Tokens stay in backend process memory.
@@ -557,7 +557,8 @@ export class SalesforceOrgConnection {
         const errors = Array.isArray(payload) ? payload : [payload];
         throw new SalesforceConnectionError(this.queryReadLabel(soql,api)+
           " failed (HTTP "+response.status+", "+attempts+" attempt(s), "+elapsedMs+" ms): "+
-          errors.map(apiErrorMessage).join(" | ").slice(0,500),response.status);
+          errors.map(apiErrorMessage).join(" | ").slice(0,500),response.status,
+          safeSalesforceErrorCode(errors.find(error=>error&&typeof error==="object"&&typeof (error as Record<string,unknown>).errorCode==="string")?.errorCode));
       }
       const page = payload as QueryResult | null;
       if (!page || !Array.isArray(page.records) || typeof page.done !== "boolean") {
@@ -691,7 +692,7 @@ export class SalesforceOrgConnection {
 
 export class SalesforceConnectionError extends Error {
   readonly statusCode: number;
-  constructor(message: string, statusCode: number) {
+  constructor(message: string, statusCode: number, readonly salesforceErrorCode?:string) {
     super(message);
     this.statusCode = statusCode;
   }
