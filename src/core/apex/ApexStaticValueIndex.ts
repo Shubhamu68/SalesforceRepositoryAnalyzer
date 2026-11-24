@@ -10,12 +10,13 @@ interface Declaration {
   isStatic:boolean;
   initializerPresent:boolean;
 }
+type MetadataResolver=(name:string,args:ApexValue[])=>ApexValue|undefined;
 const identifier=/^[A-Za-z_]\w*$/;
 const MAX_CONSTANTS=10000;
 const MAX_DEPTH=24;
 
 /**
- * Repository-wide declared-initializer snapshot for Apex scalar members.
+ * Repository-wide declared-initializer snapshot for Apex scalar and collection members.
  *
  * Analysis policy: a complete, evaluable class-level initializer is the
  * assumed value, independent of visibility, final, annotations, or possible
@@ -28,12 +29,13 @@ export class ApexStaticValueIndex {
   private readonly declarations=new Map<string,Declaration[]>();
   private readonly classOwners=new Map<string,Set<string>>();
   private readonly cache=new Map<string,ApexValue>();
+  private readonly metadataCaches=new WeakMap<MetadataResolver,Map<string,ApexValue>>();
 
   constructor(sources:readonly ApexStaticSource[]){
     let total=0;
     for(const file of sources){
       const masked=maskApexSource(file.source);
-      const classMatch=/\bclass\s+([A-Za-z_]\w*)\b/.exec(masked);
+      const classMatch=/\bclass\s+([A-Za-z_]\w*)\b/i.exec(masked);
       if(!classMatch)continue;
       const owner=classMatch[1];
       const ownerKey=owner.toLowerCase();
@@ -49,12 +51,12 @@ export class ApexStaticValueIndex {
         if(masked[i]==="{")current++;
         else if(masked[i]==="}")current=Math.max(0,current-1);
       }
-      const declaration=/\b((?:(?:public|private|protected|global|static|final|transient)\s+)*)(String|Integer|Long|Decimal|Double|Boolean|Id)\s+([A-Za-z_]\w*)\s*(=|;)/gi;
+      const declaration=/\b((?:(?:public|private|protected|global|static|final|transient)\s+)*)(String|Integer|Long|Decimal|Double|Boolean|Id|(?:List|Set|Map)\s*<[\w\s,.<>]+>)\s+([A-Za-z_]\w*)\s*(=|;)/gi;
       let hit:RegExpExecArray|null;
       while((hit=declaration.exec(masked))!==null){
         if(depth[hit.index]!==1)continue;
         const modifiers=hit[1].trim().split(/\s+/).map(s=>s.toLowerCase());
-        if(total++>MAX_CONSTANTS)continue;
+        if(total++>=MAX_CONSTANTS)continue;
         const field=hit[3];
         if(!identifier.test(field))continue;
         const initialized=hit[4]==="=";
@@ -62,7 +64,7 @@ export class ApexStaticValueIndex {
         const semi=initialized?masked.indexOf(";",begin):hit.index+hit[0].length-1;
         if(semi<0||depth[semi]!==1)continue;
         const expr=initialized?file.source.slice(begin,semi).trim():"";
-        if(expr.length>4000)continue;
+        if(expr.length>16000)continue;
         const entry:Declaration={
           owner,field,initializer:expr,
           isStatic:modifiers.includes("static"),
@@ -79,8 +81,8 @@ export class ApexStaticValueIndex {
     return this.classOwners.has(name.toLowerCase());
   }
 
-  resolve(name:string):ApexValue {
-    return this.compute(name.toLowerCase(),new Set<string>(),0);
+  resolve(name:string,metadata?:MetadataResolver):ApexValue {
+    return this.compute(name.toLowerCase(),new Set<string>(),0,false,metadata);
   }
 
   /**
@@ -88,83 +90,53 @@ export class ApexStaticValueIndex {
    * scope use its declared initializer under the same snapshot assumption.
    * Constructor-only and blank fields still require object-flow analysis.
    */
-  resolveUnqualified(owner:string,field:string,insideStaticMethod:boolean):ApexValue|undefined {
+  resolveUnqualified(owner:string,field:string,insideStaticMethod:boolean,metadata?:MetadataResolver):ApexValue|undefined {
     const entry=this.declarations.get((owner+"."+field).toLowerCase());
     if(!entry?.length)return undefined;
     if(entry.length!==1)
       return unknown("Apex member "+owner+"."+field+" has ambiguous declarations.");
-    if(entry[0].isStatic)return this.resolve(owner+"."+field);
+    if(entry[0].isStatic)return this.resolve(owner+"."+field,metadata);
     if(insideStaticMethod)
       return unknown("Instance member "+owner+"."+field+
         " cannot be referenced as a static field.");
-    return this.resolveInstance(owner,field);
+    return this.resolveInstance(owner,field,metadata);
   }
 
-  resolveInstance(owner:string,field:string):ApexValue {
-    const key=(owner+"."+field).toLowerCase();
-    if(this.classOwners.get(owner.toLowerCase())?.size!==1)
-      return unknown("Instance field owner "+owner+" is missing or ambiguous.");
-    const matches=this.declarations.get(key)??[];
-    if(matches.length!==1)
-      return unknown("Instance field "+key+" has no single proven declaration.");
-    if(matches[0].isStatic)
-      return unknown("Field "+key+" is static, not an instance member.");
-    if(!matches[0].initializerPresent)
-      return unknown("Instance field "+key+
-        " requires constructor or initializer-block tracking.");
-    return this.evaluateInstanceInitializer(matches[0],new Set<string>(),0);
+  resolveInstance(owner:string,field:string,metadata?:MetadataResolver):ApexValue {
+    return this.compute((owner+"."+field).toLowerCase(),new Set<string>(),0,true,metadata,true);
   }
 
-  private evaluateInstanceInitializer(
-    declaration:Declaration,active:Set<string>,depth:number,
-  ):ApexValue {
-    const key=(declaration.owner+"."+declaration.field).toLowerCase();
-    if(depth>=MAX_DEPTH||active.has(key))
-      return unknown("Cyclic or oversized instance field initializer: "+key);
-    active.add(key);
-    try {
-      const value=evaluateApexExpression(declaration.initializer,{
-        values:new Map(),
-        resolveCall:(method,args)=>{
-          if(method!=="Apex.constant"||args.length!==1||
-            args[0].kind!=="text"||args[0].values.length!==1)return undefined;
-          return this.compute(args[0].values[0].toLowerCase(),active,depth+1);
-        },
-      });
-      if(/^null$/i.test(declaration.initializer.trim()))
-        return unknown("Apex instance field "+key+" has a null initializer.");
-      if(value.kind==="unknown")return value;
-      return value.kind==="text"&&value.values.length===1||
-        value.kind==="number"&&Number.isFinite(value.value)?value:unknown(
-          "Instance field "+key+" initializer is not a supported scalar.");
-    }finally{active.delete(key);}
-  }
-
-  private compute(key:string,active:Set<string>,depth:number):ApexValue{
-    const cached=this.cache.get(key);
-    if(cached)return cached;
-    if(active.has(key))return unknown("Cyclic Apex static initializer: "+key);
-    if(depth>=MAX_DEPTH)return unknown("Apex static initializer dependency depth exceeded: "+key);
+  private compute(key:string,active:Set<string>,depth:number,allowInstance:boolean,
+    metadata?:MetadataResolver,requireInstance=false):ApexValue{
+    if(active.has(key))return unknown("Cyclic Apex member initializer: "+key);
+    if(depth>=MAX_DEPTH)return unknown("Apex initializer dependency depth exceeded: "+key);
     const dot=key.lastIndexOf(".");
     if(dot<1)return unknown("Malformed Apex class-qualified constant: "+key);
     const className=key.slice(0,dot);
     const owners=this.classOwners.get(className);
-    if(!owners?.size)return unknown(
-      "Apex class "+className+" is missing from the indexed repository.");
-    if(owners.size!==1)return unknown(
-      "Apex class "+className+" has ambiguous repository definitions.");
+    if(!owners?.size)return unknown("Apex class "+className+" is missing from the indexed repository.");
+    if(owners.size!==1)return unknown("Apex class "+className+" has ambiguous repository definitions.");
     const entries=this.declarations.get(key)??[];
     if(entries.length!==1)return unknown(entries.length
       ?"Apex field "+key+" has ambiguous declarations."
-      :"Apex field "+key+" has no supported static scalar initializer declaration.");
+      :"Apex field "+key+" has no supported static scalar initializer or collection initializer declaration.");
     const entry=entries[0];
-    if(!entry.isStatic)
-      return unknown("Apex member "+key+
-        " is an instance field (not static); class-qualified references "+
-        "cannot prove its value without a specific instance.");
+    if(requireInstance&&entry.isStatic)
+      return unknown("Field "+key+" is static, not an instance member.");
+    if(!allowInstance&&!entry.isStatic)
+      return unknown("Apex member "+key+" is an instance field (not static); class-qualified references cannot prove its value without a specific instance.");
     if(!entry.initializerPresent)
-      return unknown("Apex static field "+key+
-        " has no declaration initializer; static initialization is not proven.");
+      return unknown(entry.isStatic?"Apex static field "+key+" has no declaration initializer; static initialization is not proven.":
+        "Instance field "+key+" requires constructor or initializer-block tracking.");
+    // Metadata-dependent values must not leak across scans or discovery passes.
+    let cache=this.cache;
+    if(metadata){
+      let scoped=this.metadataCaches.get(metadata);
+      if(!scoped){scoped=new Map();this.metadataCaches.set(metadata,scoped);}
+      cache=scoped;
+    }
+    const cached=cache.get(key);
+    if(cached)return cached;
     active.add(key);
     let result:ApexValue;
     try {
@@ -176,27 +148,39 @@ export class ApexStaticValueIndex {
         if(token.index>0&&expressionMasked[token.index-1]===".")continue;
         const localName=token[0];
         const localKey=(entry.owner+"."+localName).toLowerCase();
-        if(localKey===key||!this.declarations.has(localKey))continue;
-        values.set(localName,this.compute(localKey,active,depth+1));
+        if(!this.declarations.has(localKey))continue;
+        values.set(localName,this.compute(localKey,active,depth+1,!entry.isStatic,metadata));
       }
       result=evaluateApexExpression(entry.initializer,{
         values,
         resolveCall:(method,args)=>{
-          if(method!=="Apex.constant"||args.length!==1||
-            args[0].kind!=="text"||args[0].values.length!==1)return undefined;
-          return this.compute(args[0].values[0].toLowerCase(),active,depth+1);
+          if(method==="Apex.constant"&&args.length===1&&
+            args[0].kind==="text"&&args[0].values.length===1)
+            return this.compute(args[0].values[0].toLowerCase(),active,depth+1,false,metadata);
+          if(method==="System.Label")return metadata?.(method,args);
+          return undefined;
         },
       });
       if(/^null$/i.test(entry.initializer.trim()))
-        result=unknown("Apex static field "+key+" has a null initializer.");
-      if(result.kind==="text"&&result.values.length!==1)
-        result=unknown("Static field "+key+" has multiple possible initializer values.");
-      if(result.kind!=="text"&&result.kind!=="number"&&result.kind!=="unknown")
-        result=unknown("Static field "+key+" does not have a proven scalar initializer.");
-      if(result.kind==="number"&&!Number.isFinite(result.value))
-        result=unknown("Static field "+key+" initializer is not finite.");
+        result=unknown("Apex field "+key+" has a null initializer.");
+      if(!completeInitializer(result))
+        result=unknown("Apex field "+key+" does not have a complete supported scalar or collection initializer.");
     }finally{active.delete(key);}
-    this.cache.set(key,result);
+    cache.set(key,result);
     return result;
+  }
+}
+
+/** Snapshot values are immutable abstract values. Only bounded, completely
+ * evaluated scalar leaves, string collections and nested maps qualify. */
+function completeInitializer(value:ApexValue,depth=0):boolean{
+  if(depth>12)return false;
+  switch(value.kind){
+    case "unknown": return depth===0;
+    case "text": return value.values.length===1;
+    case "number": return Number.isFinite(value.value);
+    case "collection": return value.items.length<=2000;
+    case "map": return value.entries.length<=200&&value.entries.every(([,v])=>completeInitializer(v,depth+1));
+    default: return false;
   }
 }
