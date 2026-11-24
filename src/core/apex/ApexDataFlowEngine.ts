@@ -3,7 +3,7 @@ import {
   type IndexedApexMethod, type SourceNode,
 } from "./ApexSourceModel.js";
 import {
-  evaluateApexExpression, addApexValues, listValue, textValue, unknown,
+  evaluateApexExpression, addApexValues, listValue, textValue, unknown, runtimeParameter, booleanValue,
   type ApexEnvironment, type ApexValue, type ApexExpressionContext,
 } from "./ApexValueEvaluator.js";
 import {ApexLocalLiveness,declaredLoopLocals} from "./ApexLocalLiveness.js";
@@ -410,7 +410,7 @@ export class ApexDataFlowEngine {
         if(added.kind==="text"&&added.values.length>this.options.maxPaths)
           state.values.set(name,unknown("Too many += alternatives for "+name));
         else if(added.kind==="unknown")
-          state.values.set(name,unknown("Cannot determine += value of "+name+": "+added.reason));
+          state.values.set(name,{...added,reason:"Cannot determine += value of "+name+": "+added.reason});
         else state.values.set(name,added);
       }
       this.taintCollectionsPassedToUnknownCalls(rhs,state);
@@ -437,9 +437,9 @@ export class ApexDataFlowEngine {
       const result=this.statement(node,state,depth);
       return {states:[state],returns:result?[result]:[]};
     }
-    const scoped=(nodes:SourceNode[]):FrameResult=>{
-      const before=new Set(state.values.keys());
-      const result=this.execute(nodes,[clone(state)],depth);
+    const scoped=(nodes:SourceNode[],seed=state):FrameResult=>{
+      const before=new Set(seed.values.keys());
+      const result=this.execute(nodes,[clone(seed)],depth);
       for(const frame of result.states){
         // Locals introduced by a nested branch/block must not escape scope.
         // Assignments to existing symbols remain visible after the block.
@@ -452,8 +452,22 @@ export class ApexDataFlowEngine {
     if(node.kind==="if"){
       const condition=this.evaluate(node.condition??"",state,depth);
       const known=bool(condition);
-      const paths=[...(known!==false?[scoped(node.body??[])]:[]),
-        ...(known!==true?[scoped(node.otherwise??[])]:[])];
+      // Refine only a declared Boolean parameter in a simple, direct guard.
+      // Do not assume truth of arbitrary expressions, mutable fields or calls.
+      const guard=/^\s*(!\s*)?([A-Za-z_]\w*)\s*$/.exec(node.condition??"");
+      const parameterIndex=guard?this.currentMethod?.parameters.indexOf(guard[2])??-1:-1;
+      const name=parameterIndex>=0?this.currentMethod!.parameters[parameterIndex]:undefined;
+      const refine=known===undefined&&name!==undefined&&
+        this.currentMethod?.parameterTypes?.[parameterIndex]?.toLowerCase()==="boolean"&&
+        state.values.get(name)?.kind==="unknown";
+      const branch=(truth:boolean,nodes:SourceNode[]):FrameResult=>{
+        if(!refine||!name)return scoped(nodes);
+        const seed=clone(state);
+        seed.values.set(name,booleanValue(guard?.[1]?!truth:truth));
+        return scoped(nodes,seed);
+      };
+      const paths=[...(known!==false?[branch(true,node.body??[])]:[]),
+        ...(known!==true?[branch(false,node.otherwise??[])]:[])];
       return {states:paths.flatMap(x=>x.states),returns:paths.flatMap(x=>x.returns)};
     }
     if(node.kind==="for"){
@@ -675,7 +689,7 @@ export class ApexDataFlowEngine {
     const env=new Map<string,ApexValue>();
     method.parameters.forEach((name,index)=>env.set(name,
       callerArgs?.length===method.parameters.length
-        ?callerArgs[index] : unknown("Runtime caller parameter: "+name)));
+        ?callerArgs[index] : runtimeParameter(name,method.parameterTypes?.[index],"Runtime caller parameter: "+name)));
     const previousMethod=this.currentMethod;
     this.currentMethod=method;
     try{this.execute(method.body,[{values:env}],0);}
@@ -775,8 +789,7 @@ export class ApexDataFlowEngine {
           this.activeStopOffset=caller.offset;
           const before=(this.captures.get(site.offset)?.length??0)+(this.skippedInvocations.get(site.offset)??0);
           const env=new Map<string,ApexValue>();
-          for(const p of caller.method.parameters)
-            env.set(p,unknown("Runtime caller parameter: "+p));
+          caller.method.parameters.forEach((p,i)=>env.set(p,runtimeParameter(p,caller.method.parameterTypes?.[i],"Runtime caller parameter: "+p)));
           const previousMethod:IndexedApexMethod|undefined=this.currentMethod;
           this.currentMethod=caller.method;
           try{this.execute(caller.method.body,[{values:env}],0);}
@@ -788,7 +801,7 @@ export class ApexDataFlowEngine {
         }
       }else{
         const env=new Map<string,ApexValue>();
-        for(const p of owner.parameters)env.set(p,unknown("Runtime method parameter: "+p));
+        owner.parameters.forEach((p,i)=>env.set(p,runtimeParameter(p,owner.parameterTypes?.[i],"Runtime method parameter: "+p)));
         // Restrict the query's root method to statements that can affect its
         // argument. Calls and opaque operations are deliberately retained.
         this.activeSlice=invocationDependencySlice(owner.body,site.offset,
@@ -805,7 +818,7 @@ export class ApexDataFlowEngine {
         this.activeSlice=undefined;
         this.activeStopOffset=site.offset;
         const env=new Map<string,ApexValue>();
-        owner.parameters.forEach(name=>env.set(name,unknown("Runtime method parameter: "+name)));
+        owner.parameters.forEach((name,i)=>env.set(name,runtimeParameter(name,owner.parameterTypes?.[i],"Runtime method parameter: "+name)));
         this.execute(owner.body,[{values:env}],0);
       }
       if(this.exceeded){
