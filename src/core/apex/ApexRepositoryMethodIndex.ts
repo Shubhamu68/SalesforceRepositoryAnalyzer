@@ -3,6 +3,7 @@ import { ApexDataFlowEngine } from "./ApexDataFlowEngine.js";
 import { indexApexMethods, maskApexSource, matchingPair, splitApexTopLevel,
   type IndexedApexMethod } from "./ApexSourceModel.js";
 import { unknown, type ApexValue } from "./ApexValueEvaluator.js";
+import {ApexInstanceIndex} from "./ApexInstanceModel.js";
 import { ApexStaticValueIndex } from "./ApexStaticValueIndex.js";
 
 /** Shared repository evidence, independent of SOQL and persona permissions. */
@@ -55,6 +56,7 @@ export class ApexRepositoryMethodIndex {
   private readonly callers=new Map<string,Caller[]>();
   private readonly paths=new Map<string,IndexedSource>();
   private readonly staticValues:ApexStaticValueIndex;
+  private readonly instances:ApexInstanceIndex;
   private readonly callerEvidence=new Map<string,ApexCallerEvidence>();
   private readonly contextualEvidence=new Map<string,ApexCallerContexts>();
   private readonly privateContexts=new Map<string,ApexValue[][] | null>();
@@ -66,6 +68,7 @@ export class ApexRepositoryMethodIndex {
 
   constructor(files:readonly ApexRepositorySource[]) {
     this.staticValues=new ApexStaticValueIndex(files);
+    this.instances=new ApexInstanceIndex(files);
     const indexed:IndexedSource[]=[];
     for(const file of files) {
       const masked=maskApexSource(file.source);
@@ -112,6 +115,10 @@ export class ApexRepositoryMethodIndex {
         this.callers.set(key,callers);
       }
     }
+  }
+
+  constructInstance(filePath:string,name:string,args:ApexValue[],resolveExternal?: (name:string,args:ApexValue[])=>ApexValue|undefined):ApexValue|undefined{
+    return this.instances.construct(name,args,filePath,resolveExternal);
   }
 
   /** Source-backed scalar initializers; unresolved/mutable values fail closed. */
