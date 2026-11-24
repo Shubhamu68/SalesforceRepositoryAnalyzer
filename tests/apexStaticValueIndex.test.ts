@@ -291,3 +291,68 @@ test("unknown collection initializer preserves its dependency",()=>{
   const idx=index(["Fields.cls","public class Fields { public static List<String> ITEMS = new List<String>{UnknownConfig.FIELD}; }"]);
   expectUnknown(idx,"Fields.ITEMS",/UnknownConfig.*missing/i);
 });
+
+
+test("straight-line static blocks establish blank static scalars and string collections",()=>{
+  const idx=index(["BlockConfig.cls",[
+    "public class BlockConfig {",
+    "  static String OBJECT_NAME;",
+    "  private static Set<String> FIELDS;",
+    "  static { OBJECT_NAME = 'Acc' + 'ount'; FIELDS = new Set<String>{'Id','Name','Id'}; }",
+    "  public static String getObject(){return OBJECT_NAME;}",
+    "}",
+  ].join("\n")]);
+  expectText(idx,"BlockConfig.OBJECT_NAME","Account");
+  assert.deepEqual(idx.resolve("BlockConfig.FIELDS"),{kind:"collection",items:["Id","Name"],unique:true});
+  assert.deepEqual(idx.resolveUnqualified("BlockConfig","OBJECT_NAME",true),{kind:"text",values:["Account"]});
+});
+
+test("conditional, duplicate, forward and unsupported static-block assignments stay unknown",()=>{
+  for(const [name,code] of [
+    ["Conditional","static String FIELD; static { if (true) {FIELD = 'Id';} }"],
+    ["Repeated","static String FIELD; static {FIELD='Id';} static {FIELD='Name';}"],
+    ["Forward","static { FIELD='Id'; } static String FIELD;"],
+    ["Helper","static String FIELD; static {FIELD = helper();}"],
+    ["OtherEffect","static String FIELD; static {FIELD='Id'; System.debug('other effect');}"],
+    ["InstanceOnly","String FIELD; { FIELD='Id'; }"],
+  ]){
+    const idx=index([name+".cls","public class "+name+" {"+code+"}"]);
+    assert.equal(idx.resolve(name+".FIELD").kind,"unknown",name);
+  }
+});
+
+test("direct writes invalidate newly inferred static-block snapshots",()=>{
+  const idx=index(
+    ["Config.cls",[
+      "public class Config {",
+      "  public static String FIELD;",
+      "  public static List<String> FIELDS;",
+      "  public static Integer COUNT;",
+      "  public static String EXTERNAL;",
+      "  public static String STABLE;",
+      "  static {FIELD='Id'; FIELDS=new List<String>{'Id'}; COUNT=1; EXTERNAL='Id'; STABLE='Name';}",
+      "  public static void change(){FIELD += 'x'; FIELDS.add('Name'); ++COUNT;}",
+      "  public static void read(){Boolean b = STABLE == 'Name'; System.debug('STABLE = test');}",
+      "}",
+    ].join("\n")],
+    ["Writer.cls","public class Writer { public static void change(){Config.EXTERNAL = 'Phone';} }"],
+  );
+  for(const name of ["FIELD","FIELDS","COUNT","EXTERNAL"])
+    expectUnknown(idx,"Config."+name,/additional repository-visible writes/i);
+  expectText(idx,"Config.STABLE","Name");
+});
+
+test("comments, nested blocks and map arrows do not invent a static initializer or mutation",()=>{
+  const idx=index(["BlockMap.cls",[
+    "public class BlockMap {",
+    "  static String MISSING;",
+    "  static String FIELD;",
+    "  static { /* comment */ FIELD = 'Id'; }",
+    "  // static { MISSING='Name'; }",
+    "  public static Map<String,String> read(){ return new Map<String,String>{FIELD => 'Name'}; }",
+    "  public class Inner { static { MISSING='Phone'; } }",
+    "}",
+  ].join("\n")]);
+  expectText(idx,"BlockMap.FIELD","Id");
+  expectUnknown(idx,"BlockMap.MISSING",/no declaration initializer/i);
+});
