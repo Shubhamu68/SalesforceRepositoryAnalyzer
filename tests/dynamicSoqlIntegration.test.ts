@@ -441,7 +441,10 @@ test("Stage 2: known repository caller does not prove exhaustive public field-li
       "}",
     ].join("\n"));
     const inventory=await scanApexSoqlWithUnresolved(dir);
-    assert.equal(inventory.queries.length,0);
+    assert.equal(inventory.queries.length,1);
+    assert.equal(inventory.queries[0].query,"SELECT Id, Name FROM Account");
+    assert.equal(inventory.queries[0].coverage,"KNOWN_CALLER_CONTEXT");
+    assert.equal(inventory.unresolvedDynamic[0].knownVariants,1);
     assert.equal(inventory.unresolvedDynamic.length,1);
     assert.match(inventory.unresolvedDynamic[0].reason,/String\.join/i);
     assert.match(inventory.unresolvedDynamic[0].reason,/externally callable/i);
@@ -529,7 +532,10 @@ test("Stage 2 hardening: unknown public input to private query remains unresolve
       "}",
     ].join("\n"));
     const result=await scanApexSoqlWithUnresolved(dir);
-    assert.equal(result.queries.length,0);
+    assert.equal(result.queries.length,1);
+    assert.equal(result.queries[0].query,"SELECT Id FROM Account");
+    assert.equal(result.queries[0].coverage,"KNOWN_CALLER_CONTEXT");
+    assert.equal(result.unresolvedDynamic[0].knownVariants,1);
     assert.equal(result.unresolvedDynamic.length,1);
   }finally{await rm(dir,{recursive:true,force:true});}
 });
@@ -550,7 +556,10 @@ test("Stage 2 hardening: public query stays unresolved even with class-qualified
       "}",
     ].join("\n"));
     const result=await scanApexSoqlWithUnresolved(dir);
-    assert.equal(result.queries.length,0);
+    assert.equal(result.queries.length,1);
+    assert.equal(result.queries[0].query,"SELECT Id, Name FROM Account");
+    assert.equal(result.queries[0].coverage,"KNOWN_CALLER_CONTEXT");
+    assert.equal(result.unresolvedDynamic[0].knownVariants,1);
     assert.equal(result.unresolvedDynamic.length,1);
     assert.match(result.unresolvedDynamic[0].reason,/externally callable/i);
   }finally{await rm(dir,{recursive:true,force:true});}
@@ -605,7 +614,10 @@ test("Stage 2 hardening: private wrapper establishes known cross-class caller ev
       "}",
     ].join("\n"));
     const r=await scanApexSoqlWithUnresolved(dir);
-    assert.equal(r.queries.length,0);
+    assert.equal(r.queries.length,1);
+    assert.equal(r.queries[0].query,"SELECT Name FROM Account");
+    assert.equal(r.queries[0].coverage,"KNOWN_CALLER_CONTEXT");
+    assert.equal(r.unresolvedDynamic[0].knownVariants,1);
     assert.equal(r.unresolvedDynamic.length,1);
     assert.match(r.unresolvedDynamic[0].reason,/1 known and 0 unproven/i);
     assert.match(r.unresolvedDynamic[0].reason,/externally callable/i);
