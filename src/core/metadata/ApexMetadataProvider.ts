@@ -8,6 +8,11 @@ export interface MetadataResult<T> {
   reason?: string;
   source: "LIVE_ORG" | "REPOSITORY";
 }
+/** A proven equality filter, with its original scalar type preserved. */
+export interface CustomMetadataFilter {
+  readonly field:string;
+  readonly value:string|number|boolean;
+}
 export interface ApexMetadataProvider {
   /** Cache scope must include org identity and connection epoch when live. */
   readonly scopeKey: string;
@@ -16,8 +21,8 @@ export interface ApexMetadataProvider {
   getCustomLabelValue?(labelApiName: string): Promise<MetadataResult<string>>;
   /** Ordered SOQL-ready field paths from a uniquely identified Field Set. */
   getFieldSetFields?(objectApiName:string,fieldSetDeveloperName:string):Promise<MetadataResult<string[]>>;
-  /** For future record-driven loops; callers must supply proven filters. */
+  /** Complete matching records for proven equality filters; no partial results. */
   getCustomMetadataRecords(
-    objectApiName: string, fields: readonly string[],
+    objectApiName: string, fields: readonly string[], filters?: readonly CustomMetadataFilter[],
   ): Promise<MetadataResult<Array<Record<string, unknown>>>>;
 }
