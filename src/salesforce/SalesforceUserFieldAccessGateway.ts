@@ -147,6 +147,7 @@ export class SalesforceUserFieldAccessGateway {
   constructor(
     private readonly connection: Connection,
     private readonly metadata?: SalesforceFieldMetadataService,
+    private readonly options: {targetedBatching?:boolean} = {},
   ) {}
 
   private scope(): string {
@@ -190,7 +191,10 @@ export class SalesforceUserFieldAccessGateway {
   private async exact(userId: string, object: string, field: string): Promise<DirectAccess> {
     const key = this.scope() + "|" + userKey(userId) + "|" + norm(object) + "|" + norm(field);
     return this.cached(this.exactCache, key, async () => {
-      return this.enqueueExact(userId,object,field);
+      // Live profiling: all four speculative IN batches were unproductive.
+      // Keep equality as the default across every shared gateway consumer.
+      return this.options.targetedBatching===true
+        ?this.enqueueExact(userId,object,field):this.singleExact(this.scope(),userId,object,field);
     });
   }
 
