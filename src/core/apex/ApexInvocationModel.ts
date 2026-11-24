@@ -19,8 +19,8 @@ export interface ApexCallSite {
 // Cache only the built-in pure selector. User-supplied selectors may carry
 // state, so never memoize their decisions. Lifetime follows the syntax cache.
 const databaseSites=new WeakMap<IndexedApexMethod[],ApexCallSite[]>();
-export function discoverApexInvocations(source:string,select:ApexInvocationSelector):ApexCallSite[]{
-  const key=select===dynamicDatabaseQuerySelector?indexApexMethods(source):undefined;
+export function discoverApexInvocations(source:string,select:ApexInvocationSelector,methods?:IndexedApexMethod[]):ApexCallSite[]{
+  const key=select===dynamicDatabaseQuerySelector?(methods??indexApexMethods(source)):undefined;
   const cached=key?databaseSites.get(key):undefined;
   if(cached)return cached.map(site=>({...site,arguments:[...site.arguments]}));
   const masked=maskApexSource(source);
