@@ -331,6 +331,9 @@ function readOnlyCollectionAlias(masked:string,start:number,end:number,reference
         if(++count>200)return false;
         const at=use.index!;
         if(at===declarationName)continue;
+        // The qualified backing-field token may have the same spelling as
+        // the local alias; it is part of the source binding, not an alias use.
+        if(depth===0&&at>=referenceStart-start&&at<text.indexOf(";",referenceStart-start))continue;
         const call=/^\s*\.\s*(keySet|containsKey|size|isEmpty|get)\s*\(/i.exec(text.slice(at+name.length));
         if(!call)return false;
         if(call[1].toLowerCase()!=="get")continue;
