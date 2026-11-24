@@ -282,7 +282,7 @@ export class ApexDataFlowEngine {
           const alternatives=[...new Set(result.returns.flatMap(v=>v.kind==="text"?v.values:[]))];
           value=alternatives.length>this.options.maxPaths
             ?unknown("Too many helper return alternatives.")
-            :{kind:"text",values:alternatives};
+            :{kind:"text",values:alternatives,...(result.returns.every(v=>v.kind==="text"&&v.scalarType==="boolean")?{scalarType:"boolean" as const}:{})};
         }else{
           // A List/Set or number is safe only when every return path has the
           // same complete value. Never merge different collections by union.
@@ -595,7 +595,7 @@ export class ApexDataFlowEngine {
       const alternatives=[...new Set(result.returns.flatMap(value=>
         value.kind==="text"?value.values:[]))];
       return alternatives.length<=this.options.maxPaths
-        ?{kind:"text",values:alternatives}
+        ?{kind:"text",values:alternatives,...(result.returns.every(v=>v.kind==="text"&&v.scalarType==="boolean")?{scalarType:"boolean" as const}:{})}
         :unknown("Apex helper return alternatives exceed the limit.");
     }
     const unique=new Map(result.returns.map(value=>[JSON.stringify(value),value]));
