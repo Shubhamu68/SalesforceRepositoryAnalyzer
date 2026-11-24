@@ -8,7 +8,7 @@ interface ClassShape {
   filePath:string;
   fields:Array<{name:string;initializer?:string}>;
   constructors:Array<{parameters:string[];body:SourceNode[]}>;
-  initializers:SourceNode[][];
+  initializationOrder:Array<{field:string;initializer?:string}|{block:SourceNode[]}>;
   supported:boolean;
 }
 const scalar=/^(?:(?:public|private|protected|global|final|transient)\s+)*(?:String|Boolean|Integer|Long|Decimal|Double|Id)\s+([A-Za-z_]\w*)\s*(?:=\s*([\s\S]+))?$/i;
@@ -28,7 +28,7 @@ export class ApexInstanceIndex {
         const parent=classes.filter(c=>c.start<open&&open<c.end).at(-1);
         const name=parent?parent.name+"."+hit[1]:hit[1];
         classes.push({name,start:open,end:close});
-        const shape:ClassShape={name,filePath:file.filePath,fields:[],constructors:[],initializers:[],
+        const shape:ClassShape={name,filePath:file.filePath,fields:[],constructors:[],initializationOrder:[],
           supported:!/\b(?:extends|implements)\b/i.test(hit[2])};
         // Split direct class members at top-level semicolons and blocks.
         let start=open+1;
@@ -48,7 +48,7 @@ export class ApexInstanceIndex {
           if(masked[boundary]===";"){
             if(!/\bstatic\b/i.test(visible)){
               const field=scalar.exec(header);
-              if(field)shape.fields.push({name:field[1],initializer:field[2]});
+              if(field){shape.fields.push({name:field[1],initializer:field[2]});shape.initializationOrder.push({field:field[1],initializer:field[2]});}
               else shape.supported=false;
             }
             start=boundary+1;continue;
@@ -64,7 +64,7 @@ export class ApexInstanceIndex {
             if(parameters.some(p=>!p))shape.supported=false;
             else shape.constructors.push({parameters,body:parseApexStatements(source,boundary+1,end,masked)});
           }else if(!visible){
-            shape.initializers.push(parseApexStatements(source,boundary+1,end,masked));
+            shape.initializationOrder.push({block:parseApexStatements(source,boundary+1,end,masked)});
           }else if(/^static$/i.test(visible)){
             // Static initialization is outside the per-instance domain.
           }else if(!/\)\s*$/.test(visible)&&!/\bclass\b/i.test(visible)){
@@ -94,21 +94,19 @@ export class ApexInstanceIndex {
       return unknown("Constructor overload is not uniquely proven for "+name+".");
     const fields=new Map<string,ApexValue>();
     const fieldNames=new Map(shape.fields.map(f=>[f.name.toLowerCase(),f.name]));
+    let unsupportedEffect=false;
     const evaluate=(expr:string,parameters:Map<string,ApexValue>):ApexValue=>{
       // No arbitrary helper calls from constructors: effects and heap transfer
       // are not modeled here. Pure scalar expressions and metadata constants
       // can be evaluated using the existing expression interpreter.
       const calls=[...maskApexSource(expr).matchAll(/\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(/g)];
-      if(calls.length)return unknown("Constructor expression has unproven effects.");
+      if(calls.length){unsupportedEffect=true;return unknown("Constructor expression has unproven effects.");}
       const env=new Map<string,ApexValue>();
       for(const [key,value] of fields){env.set(key,value);env.set("this."+key,value);}
       for(const [key,value] of parameters)env.set(key,value);
       return evaluateApexExpression(expr,{values:env,resolveCall:resolve});
     };
-    for(const field of shape.fields){
-      const value=field.initializer?evaluate(field.initializer,new Map()):unknown("Instance field has no proven assignment.");
-      fields.set(field.name,value);
-    }
+    for(const field of shape.fields)fields.set(field.name,unknown("Instance field has no proven assignment."));
     const execute=(nodes:SourceNode[],parameters:Map<string,ApexValue>):boolean=>{
       for(const node of nodes){
         if(node.kind!=="statement")return false;
@@ -122,13 +120,16 @@ export class ApexInstanceIndex {
       }
       return true;
     };
-    for(const block of shape.initializers)if(!execute(block,new Map()))
-      return unknown("Instance initializer has unsupported effects for "+name+".");
+    for(const step of shape.initializationOrder){
+      if("block" in step){if(!execute(step.block,new Map()))return unknown("Instance initializer has unsupported effects for "+name+".");}
+      else if(step.initializer)fields.set(step.field,evaluate(step.initializer,new Map()));
+    }
     if(constructors.length){
       const ctor=constructors[0];
       const parameters=new Map(ctor.parameters.map((p,i)=>[p,args[i]]));
       if(!execute(ctor.body,parameters))return unknown("Constructor has unsupported effects for "+name+".");
     }
+    if(unsupportedEffect)return unknown("Constructor or initializer contains unproven effects for "+name+".");
     return {kind:"instance",className:shape.name,entries:[...fields]} satisfies Instance;
   }
 }
