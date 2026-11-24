@@ -102,6 +102,17 @@ export class ApexRepositoryMethodIndex {
     return this.staticValues.resolve(name);
   }
 
+  /** Resolve an unqualified static/instance member using its actual owner. */
+  evaluateScopeField(owner:string,field:string,mode:"this"|"unqualified",
+    inStaticMethod:boolean):ApexValue|undefined {
+    if(!this.staticValues.hasClass(owner))return undefined;
+    if(mode==="this"){
+      return inStaticMethod?unknown("Cannot read this."+field+" inside a static method."):
+        this.staticValues.resolveInstance(owner,field);
+    }
+    return this.staticValues.resolveUnqualified(owner,field,inStaticMethod);
+  }
+
   private methodKey(cls:string,name:string,arity:number):string {
     return cls.toLowerCase()+"|"+name.toLowerCase()+"|"+arity;
   }
