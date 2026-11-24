@@ -1,4 +1,4 @@
-import {analyzeApexInvocations} from "../core/apex/ApexAnalysisEngine.js";
+import {analyzeApexInvocations,inspectApexInvocationContexts} from "../core/apex/ApexAnalysisEngine.js";
 import {dynamicDatabaseQuerySelector,type ApexCallSite} from "../core/apex/ApexInvocationModel.js";
 import {explainUncapturedApexQuery} from "../core/apex/ApexExecutionPathDiagnostics.js";
 import type { ApexRepositoryMethodIndex } from "../core/apex/ApexRepositoryMethodIndex.js";
@@ -53,6 +53,25 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
           (evidence.externallyCallable
             ?" Method is externally callable; complete caller coverage cannot be established from repository metadata."
             :"");
+        const scoped=inspectApexInvocationContexts(filePath,site.offset,site.arguments,resolveExternal,repositoryIndex);
+        if(scoped?.contexts.known.length){
+          const variants=new Set<string>();
+          for(const args of scoped.arguments){
+            const query=args[0];
+            if(query?.kind!=="text")continue;
+            for(const value of query.values){
+              const text=value.trim();
+              if(!/^SELECT\b/i.test(text))continue;
+              const parsed=parseNestedSoql(text,site.line);
+              const fields=extractSoqlExpressionFields(text);
+              if(parsed&&fields.parsed&&!fields.limitations.length)variants.add(text);
+            }
+          }
+          explanation+=" Known repository contexts: "+scoped.contexts.known.length+
+            "; structurally valid query variants in probed contexts: "+variants.size+
+            (scoped.bounded?" (bounded sample).":"." )+
+            " Context evidence only; complete execution coverage is not proven.";
+        }
       }
       unresolved.push({filePath,lineNumber:site.line,siteId,reason:explanation});
     };
