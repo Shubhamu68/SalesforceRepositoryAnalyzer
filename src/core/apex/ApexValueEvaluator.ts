@@ -9,6 +9,7 @@ export type ApexValue =
   | { kind: "collection"; items: string[]; unique: boolean }
   | { kind: "map"; entries: Array<[string,ApexValue]> }
   | { kind: "instance"; className:string; entries: Array<[string,ApexValue]> }
+  | { kind: "instanceList"; elementType:string; items:ApexValue[] }
   | { kind: "record"; entries: Array<[string,ApexValue]> }
   | { kind: "records"; items: Array<Array<[string,ApexValue]>> }
   | { kind: "fieldSet"; objectApiName:string; developerName:string }
@@ -78,7 +79,7 @@ export function addApexValues(left: ApexValue,right: ApexValue): ApexValue {
   if(left.kind==="collection"||right.kind==="collection"||
      left.kind==="map"||right.kind==="map"||
      left.kind==="record"||right.kind==="record"||left.kind==="instance"||right.kind==="instance"||
-     left.kind==="records"||right.kind==="records"||
+     left.kind==="records"||right.kind==="records"||left.kind==="instanceList"||right.kind==="instanceList"||
      left.kind==="fieldSet"||right.kind==="fieldSet")
     return unknown("Cannot concatenate an Apex collection as text.");
   const from=(x:ApexValue):string[]=>
@@ -194,6 +195,15 @@ export function evaluateApexExpression(
   }
   if(expr.startsWith("-")){
     return integerArithmetic({kind:"number",value:0},evaluateApexExpression(expr.slice(1),context,depth+1),"-");
+  }
+  // Keep custom-object allocations and their correlated member values separate.
+  const instanceList=/^new\s+List\s*<\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*>\s*(?:\{([\s\S]*)\}|\(\s*\))$/i.exec(expr);
+  if(instanceList&&!/^(?:String|Id|Integer|Long|Decimal|Double|Boolean|Date|Datetime|Time|Blob|Object|SObject)$/i.test(instanceList[1])){
+    const items=instanceList[2]?.trim()?splitApexTopLevel(instanceList[2],",").map(item=>evaluateApexExpression(item,context,depth+1)):[];
+    const type=instanceList[1].toLowerCase();
+    if(items.length>100||items.some(item=>item.kind!=="instance"||!(item.className.toLowerCase()===type||item.className.toLowerCase().endsWith("."+type))))
+      return unknown("Custom Apex list contains an unproven instance or exceeds the item bound.");
+    return {kind:"instanceList",elementType:instanceList[1],items};
   }
   const create=/^new\s+(List|Set)\s*<[\w\s,.<>]+>\s*(?:\(([\s\S]*)\)|\{([\s\S]*)\})$/i.exec(expr);
   if(create){
@@ -348,6 +358,11 @@ export function evaluateApexExpression(
       // Preserve the actual missing metadata/helper dependency instead of
       // reporting a misleading "unsupported map.get" error.
       if(receiver.kind==="unknown")return receiver;
+      if(receiver.kind==="instanceList"){
+        const index=args[0];
+        return index.kind==="number"&&Number.isInteger(index.value)&&index.value>=0&&index.value<receiver.items.length
+          ?receiver.items[index.value]:unknown("Custom Apex list index is not proven.");
+      }
       if(receiver.kind==="map"){
         const key=onlyText(args[0]);
         if(key===null)return unknown("Map.get key depends on runtime input: "+
@@ -405,6 +420,7 @@ export function evaluateApexExpression(
       const receiver=evaluateApexExpression(name.slice(0,dot),context,depth+1);
       if(operation==="isempty"&&receiver.kind==="collection")return booleanValue(receiver.items.length===0);
       if(operation==="isempty"&&receiver.kind==="map")return booleanValue(receiver.entries.length===0);
+      if(operation==="isempty"&&receiver.kind==="instanceList")return booleanValue(receiver.items.length===0);
       if(operation==="isempty"&&receiver.kind==="records")return booleanValue(receiver.items.length===0);
       if(operation==="contains"&&receiver.kind==="collection"){
         const item=args.length===1?args[0]:undefined;
