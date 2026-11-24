@@ -90,6 +90,7 @@ export class ApexStaticValueIndex {
     if(blockCandidates.length){
       const writes=new Map<string,Array<{filePath:string;offset:number}>>();
       const keys=new Set(blockCandidates.map(c=>(c.entry.owner+"."+c.entry.field).toLowerCase()));
+      const fieldNames=new Set(blockCandidates.map(c=>c.entry.field.toLowerCase()));
       for(const file of sources){
         const masked=maskApexSource(file.source);
         const owner=/\bclass\s+([A-Za-z_]\w*)\b/i.exec(masked)?.[1];
@@ -100,6 +101,7 @@ export class ApexStaticValueIndex {
         const token=/\b[A-Za-z_]\w*\b/g;
         let hit:RegExpExecArray|null;
         while((hit=token.exec(masked))!==null){
+          if(!fieldNames.has(hit[0].toLowerCase()))continue;
           const before=masked.slice(Math.max(0,hit.index-256),hit.index);
           const qualified=/\b([A-Za-z_]\w*)\s*\.\s*$/.exec(before);
           const key=((qualified?.[1]??owner)+"."+hit[0]).toLowerCase();
@@ -237,7 +239,9 @@ function staticBlockCandidates(source:string,masked:string,depth:Int16Array,
     const open=blocks.lastIndex-1;
     const close=matchingPair(masked,open,"{","}");
     if(close<0||close>classEnd)return [];
-    for(const node of parseApexStatements(source,open+1,close,masked)){
+    const nodes=parseApexStatements(source,open+1,close,masked);
+    if(masked.slice(nodes[nodes.length-1]?.end??open+1,close).trim())return [];
+    for(const node of nodes){
       if(node.kind!=="statement"||!node.text)return [];
       const clean=stripApexComments(node.text);
       const assignment=/^\s*([A-Za-z_]\w*)\s*=(?!=|>)\s*([\s\S]+);\s*$/.exec(clean);
