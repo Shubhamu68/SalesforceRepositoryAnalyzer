@@ -108,3 +108,39 @@ test("constructor delegation preserves initializer order and rejects cycles and 
   assert.deepEqual(index.constructInstance("Config.cls","Config",[]),{kind:"instance",className:"Config",entries:[["field",textValue("Id, Name, Phone")]]});
   assert.equal(index.constructInstance("Cycle.cls","Cycle",[])?.kind,"unknown");
 });
+
+
+test("typed custom object list retains paired fields and objects through enhanced for",async()=>{
+  const wrapper="public class Config { public String objectName; public String fieldName; public Config(String obj,String field){objectName=obj;fieldName=field;} }";
+  const consumer="public class Consumer { public static void run(){ List<Config> configs=new List<Config>{new Config('Account','Name'),new Config('Contact','Email')}; for(Config info:configs){ Database.query('SELECT '+info.fieldName+' FROM '+info.objectName); } } }";
+  const index=new ApexRepositoryMethodIndex([{filePath:"Config.cls",source:wrapper},{filePath:"Consumer.cls",source:consumer}]);
+  const result=await new ApexAnalysisEngine(index).analyze("Consumer.cls",ctx=>extractDynamicSoqlQueries(consumer,"Consumer.cls",ctx.resolveExternal,ctx.repositoryIndex));
+  assert.equal(result.unresolved.length,0,JSON.stringify(result.unresolved));
+  assert.deepEqual(result.queries.map(q=>q.query).sort(),["SELECT Email FROM Contact","SELECT Name FROM Account"]);
+});
+
+test("custom object lists support add/get and preserve tracked member aliases",async()=>{
+  const wrapper="public class Config { public String field; public Config(String value){field=value;} }";
+  const consumer="public class Consumer { public static void run(){ List<Config> configs=new List<Config>(); Config first=new Config('Name'); configs.add(first); first.field='Phone'; Config selected=configs.get(0); Database.query('SELECT '+selected.field+' FROM Account'); } }";
+  const index=new ApexRepositoryMethodIndex([{filePath:"Config.cls",source:wrapper},{filePath:"Consumer.cls",source:consumer}]);
+  const result=await new ApexAnalysisEngine(index).analyze("Consumer.cls",ctx=>extractDynamicSoqlQueries(consumer,"Consumer.cls",ctx.resolveExternal,ctx.repositoryIndex));
+  assert.equal(result.unresolved.length,0,JSON.stringify(result.unresolved));
+  assert.deepEqual(result.queries.map(q=>q.query),["SELECT Phone FROM Account"]);
+});
+
+test("unknown mutation of a custom object list does not appear fully resolved",async()=>{
+  const wrapper="public class Config { public String field; public Config(String value){field=value;} }";
+  const consumer="public class Consumer { public static void run(){ List<Config> configs=new List<Config>{new Config('Name')}; External.modify(configs); for(Config info:configs){ Database.query('SELECT '+info.field+' FROM Account'); } } }";
+  const index=new ApexRepositoryMethodIndex([{filePath:"Config.cls",source:wrapper},{filePath:"Consumer.cls",source:consumer}]);
+  const result=await new ApexAnalysisEngine(index).analyze("Consumer.cls",ctx=>extractDynamicSoqlQueries(consumer,"Consumer.cls",ctx.resolveExternal,ctx.repositoryIndex));
+  assert.equal(result.queries.length,0);
+  assert.equal(result.unresolved.length,1);
+});
+
+test("structural mutation while iterating a custom object list retains uncertainty",async()=>{
+  const wrapper="public class Config { public String field; public Config(String value){field=value;} }";
+  const consumer="public class Consumer { public static void run(){ List<Config> configs=new List<Config>{new Config('Name'),new Config('Email')}; for(Config info:configs){ configs.clear(); Database.query('SELECT '+info.field+' FROM Account'); } } }";
+  const index=new ApexRepositoryMethodIndex([{filePath:"Config.cls",source:wrapper},{filePath:"Consumer.cls",source:consumer}]);
+  const result=await new ApexAnalysisEngine(index).analyze("Consumer.cls",ctx=>extractDynamicSoqlQueries(consumer,"Consumer.cls",ctx.resolveExternal,ctx.repositoryIndex));
+  assert.equal(result.unresolved.length,1);
+});
