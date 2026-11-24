@@ -7,6 +7,7 @@ export type ApexValue =
   | { kind: "text"; values: string[]; scalarType?: "boolean" }
   | { kind: "collection"; items: string[]; unique: boolean }
   | { kind: "map"; entries: Array<[string,ApexValue]> }
+  | { kind: "instance"; className:string; entries: Array<[string,ApexValue]> }
   | { kind: "record"; entries: Array<[string,ApexValue]> }
   | { kind: "records"; items: Array<Array<[string,ApexValue]>> }
   | { kind: "fieldSet"; objectApiName:string; developerName:string }
@@ -73,7 +74,7 @@ function combinations(left: ApexValue,right: ApexValue): ApexValue {
     return {kind:"number",value:left.value+right.value};
   if(left.kind==="collection"||right.kind==="collection"||
      left.kind==="map"||right.kind==="map"||
-     left.kind==="record"||right.kind==="record"||
+     left.kind==="record"||right.kind==="record"||left.kind==="instance"||right.kind==="instance"||
      left.kind==="records"||right.kind==="records"||
      left.kind==="fieldSet"||right.kind==="fieldSet")
     return unknown("Cannot concatenate an Apex collection as text.");
@@ -132,6 +133,10 @@ export function evaluateApexExpression(
   if(label)return context.resolveCall?.("System.Label",[textValue(label[1])]) ??
     unknown("Custom Label "+label[1]+" is not available from complete org metadata.");
   const instanceMember=/^([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/.exec(expr);
+  if(instanceMember && context.values.get(instanceMember[1])?.kind==="instance"){
+    const instance=context.values.get(instanceMember[1])!;
+    if(instance.kind==="instance")return instance.entries.find(([key])=>key.toLowerCase()===instanceMember[2].toLowerCase())?.[1]??unknown("Instance member "+instanceMember[2]+" is not proven.");
+  }
   if(instanceMember && context.values.get(instanceMember[1])?.kind==="record"){
     const record=context.values.get(instanceMember[1])!;
     if(record.kind==="record")
@@ -286,6 +291,12 @@ export function evaluateApexExpression(
       if(entries.length>MAX_MAP_ENTRIES)return unknown("Apex map entry limit exceeded.");
     }
     return {kind:"map",entries};
+  }
+  const allocation=/^new\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(([\s\S]*)\)$/i.exec(expr);
+  if(allocation){
+    const args=allocation[2].trim()?splitApexTopLevel(allocation[2],",").map(x=>evaluateApexExpression(x,context,depth+1)):[];
+    return context.resolveCall?.("Apex.construct",[textValue(allocation[1]),...args])??
+      unknown("Apex constructor "+allocation[1]+" is not proven.");
   }
   const call=/^([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(([\s\S]*)\)$/s.exec(expr);
   if(call){
