@@ -7,12 +7,7 @@ interface Declaration {
   owner:string;
   field:string;
   initializer:string;
-  type:string;
-  visibility:"private"|"public"|"global"|"protected"|"unspecified";
-  isFinal:boolean;
   isStatic:boolean;
-  isMutablePrivate:boolean;
-  unsafeWrite:boolean;
   initializerPresent:boolean;
 }
 const identifier=/^[A-Za-z_]\w*$/;
@@ -20,11 +15,14 @@ const MAX_CONSTANTS=10000;
 const MAX_DEPTH=24;
 
 /**
- * Repository-wide source proof of Apex scalar static initializers.
+ * Repository-wide declared-initializer snapshot for Apex scalar members.
  *
- * Public/protected/global non-final static fields may change in any Apex
- * entry point. Only final fields and private fields without writes qualify.
- * Cross-class dependencies and cycles are evaluated recursively and bounded.
+ * Analysis policy: a complete, evaluable class-level initializer is the
+ * assumed value, independent of visibility, final, annotations, or possible
+ * reassignment elsewhere. This is repository-based query reconstruction,
+ * not proof that every runtime execution sees the initializer.
+ * Scope, missing initializers, unsupported values, and dependency cycles
+ * remain subject to the same bounded evaluation rules.
  */
 export class ApexStaticValueIndex {
   private readonly declarations=new Map<string,Declaration[]>();
@@ -65,33 +63,9 @@ export class ApexStaticValueIndex {
         if(semi<0||depth[semi]!==1)continue;
         const expr=initialized?file.source.slice(begin,semi).trim():"";
         if(expr.length>4000)continue;
-        const visibility=modifiers.includes("private")?"private":
-          modifiers.includes("global")?"global":
-          modifiers.includes("protected")?"protected":
-          modifiers.includes("public")?"public":"unspecified";
-        const isFinal=modifiers.includes("final");
-        const isStatic=modifiers.includes("static");
-        // An omitted Apex access modifier defaults to private. A private
-        // non-final static may be proven only when this entire class has no
-        // mutation and it is not exposed to test code.
-        const annotationRegion=masked.slice(Math.max(classBrace+1,hit.index-400),hit.index);
-        const annotationBoundary=Math.max(annotationRegion.lastIndexOf(";"),
-          annotationRegion.lastIndexOf("{"),annotationRegion.lastIndexOf("}"));
-        const testVisible=/@TestVisible\b/i.test(annotationRegion.slice(annotationBoundary+1));
-        const privateCandidate=isStatic&&!isFinal&&
-          (visibility==="private"||visibility==="unspecified")&&!testVisible;
-        const rest=masked.slice(semi+1);
-        const escaped=field.replace(/[.*+?^$()|[\]{}\\]/g,"\\$&");
-        const write=new RegExp("\\b"+escaped+
-          "\\s*(?:(?:\\+\\+|--|(?:[+\\-*\\/%&|^])?=(?![=>])))","m");
-        const prefixWrite=new RegExp("(?:\\+\\+|--)\\s*"+escaped+"\\b","m");
-        const pre=masked.slice(classBrace+1,hit.index);
-        const unsafeWrite=privateCandidate&&(
-          write.test(pre)||write.test(rest)||
-          prefixWrite.test(pre)||prefixWrite.test(rest));
         const entry:Declaration={
-          owner,field,initializer:expr,type:hit[2],visibility,isFinal,
-          isStatic,isMutablePrivate:privateCandidate,unsafeWrite,
+          owner,field,initializer:expr,
+          isStatic:modifiers.includes("static"),
           initializerPresent:initialized&&expr.length>0,
         };
         const key=(owner+"."+field).toLowerCase();
@@ -110,10 +84,9 @@ export class ApexStaticValueIndex {
   }
 
   /**
-   * A final *instance* field is not a class constant. Only a known owning
-   * instance (e.g. this.FIELD in an instance method) may use its literal
-   * declaration initializer. Constructor-assigned/blank/mutable fields
-   * remain unknown and require object-flow analysis.
+   * An instance field is not a class constant. In a valid owning-instance
+   * scope use its declared initializer under the same snapshot assumption.
+   * Constructor-only and blank fields still require object-flow analysis.
    */
   resolveUnqualified(owner:string,field:string,insideStaticMethod:boolean):ApexValue|undefined {
     const entry=this.declarations.get((owner+"."+field).toLowerCase());
@@ -136,10 +109,8 @@ export class ApexStaticValueIndex {
       return unknown("Instance field "+key+" has no single proven declaration.");
     if(matches[0].isStatic)
       return unknown("Field "+key+" is static, not an instance member.");
-    if(!matches[0].isFinal)
-      return unknown("Instance field "+key+" is not final and may be modified by methods.");
     if(!matches[0].initializerPresent)
-      return unknown("Final instance field "+key+
+      return unknown("Instance field "+key+
         " requires constructor or initializer-block tracking.");
     return this.evaluateInstanceInitializer(matches[0],new Set<string>(),0);
   }
@@ -160,9 +131,12 @@ export class ApexStaticValueIndex {
           return this.compute(args[0].values[0].toLowerCase(),active,depth+1);
         },
       });
+      if(/^null$/i.test(declaration.initializer.trim()))
+        return unknown("Apex instance field "+key+" has a null initializer.");
+      if(value.kind==="unknown")return value;
       return value.kind==="text"&&value.values.length===1||
-        value.kind==="number"?value:unknown(
-          "Final instance field "+key+" initializer is not a proven scalar.");
+        value.kind==="number"&&Number.isFinite(value.value)?value:unknown(
+          "Instance field "+key+" initializer is not a supported scalar.");
     }finally{active.delete(key);}
   }
 
@@ -191,12 +165,6 @@ export class ApexStaticValueIndex {
     if(!entry.initializerPresent)
       return unknown("Apex static field "+key+
         " has no declaration initializer; static initialization is not proven.");
-    if(!entry.isFinal && !entry.isMutablePrivate)
-      return unknown("Apex static field "+key+
-        " is externally mutable (not final); its initializer is not a proven runtime value.");
-    if(entry.unsafeWrite)
-      return unknown("Private Apex static field "+key+
-        " is assigned after initialization; it is not a proven constant.");
     active.add(key);
     let result:ApexValue;
     try {
