@@ -202,7 +202,7 @@ test("all modifier and scope variants are classified without treating instance f
   if(incomplete.kind==="unknown")assert.match(incomplete.reason,/constructor|initializer-block/i);
 });
 
-test("non-primitive or unsupported declarations never become scalar constants",()=>{
+test("collection declarations resolve while unsupported arrays and properties remain unknown",()=>{
   const idx=index(["NonScalars.cls",[
     "public class NonScalars {",
     " public static final String QUERY = 'SELECT Id FROM Account';",
@@ -215,7 +215,7 @@ test("non-primitive or unsupported declarations never become scalar constants",(
   expectText(idx,"NonScalars.QUERY","SELECT Id FROM Account");
   assert.deepEqual(idx.resolve("NonScalars.LIMIT_VALUE"),{kind:"number",value:5});
   expectUnknown(idx,"NonScalars.FIELDS",/no supported static scalar initializer/i);
-  expectUnknown(idx,"NonScalars.ALIASES",/no supported static scalar initializer/i);
+  assert.deepEqual(idx.resolve("NonScalars.ALIASES"),{kind:"collection",items:["Name"],unique:false});
   expectUnknown(idx,"NonScalars.PROPERTY",/no supported static scalar initializer/i);
 });
 
@@ -262,4 +262,32 @@ test("snapshot policy resolves mutable aliases across unrelated classes without 
   assert.deepEqual(idx.resolveInstance("Settings","FIELD"),{kind:"text",values:["Id"]});
   assert.equal(idx.resolveInstance("Settings","MISSING").kind,"unknown");
   assert.equal(idx.resolveInstance("Settings","EMPTY").kind,"unknown");
+});
+
+test("repository snapshot resolves nested maps, set/list copies and instance aliases",()=>{
+  const idx=index(
+    ["Fields.cls",[
+      "public class Fields {",
+      " public static String NAME = 'Name';",
+      " public static List<String> BASE = new List<String>{'Id',NAME};",
+      " private static Set<String> SET_FIELDS = new Set<String>{'Id','Id',NAME};",
+      " public static Map<String,List<String>> GROUPS = new Map<String,List<String>>{'Account'=>BASE};",
+      " public static Map<String,Map<String,String>> NESTED = new Map<String,Map<String,String>>{'Account'=>new Map<String,String>{'1'=>NAME,'2'=>'Phone'}};",
+      " private List<String> own = new List<String>{'Email'};",
+      " private List<String> ownCopy = new List<String>(own);",
+      "}",
+    ].join("\n")],
+    ["Other.cls","public class Other { public static List<String> FIELDS = new List<String>(Fields.BASE); }"],
+  );
+  const list={kind:"collection",items:["Id","Name"],unique:false};
+  assert.deepEqual(idx.resolve("Fields.BASE"),list);
+  assert.deepEqual(idx.resolve("Other.FIELDS"),list);
+  assert.deepEqual(idx.resolve("Fields.SET_FIELDS"),{kind:"collection",items:["Id","Name"],unique:true});
+  assert.deepEqual(idx.resolve("Fields.GROUPS"),{kind:"map",entries:[["Account",list]]});
+  assert.deepEqual(idx.resolve("Fields.NESTED"),{kind:"map",entries:[["Account",{kind:"map",entries:[["1",{kind:"text",values:["Name"]}],["2",{kind:"text",values:["Phone"]}]]}]]});
+  assert.deepEqual(idx.resolveInstance("Fields","ownCopy"),{kind:"collection",items:["Email"],unique:false});
+});
+test("unknown collection initializer preserves its dependency",()=>{
+  const idx=index(["Fields.cls","public class Fields { public static List<String> ITEMS = new List<String>{UnknownConfig.FIELD}; }"]);
+  expectUnknown(idx,"Fields.ITEMS",/UnknownConfig.*missing/i);
 });
