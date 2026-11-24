@@ -165,3 +165,56 @@ test("framework receiver probing does not infer state after an intervening helpe
   assert.ok(!result.queries.some(q=>q.query==="SELECT Id FROM Account"));
   assert.equal(result.unresolved.length,1);
 });
+
+
+test("repeated immutable scalar comparison facts avoid incompatible paths",()=>{
+  const code="public class Builder { public static void run(String mode){ String fields='Id'; if(mode == 'Full'){fields='Name';} if(mode == 'Full'){fields+=', Phone';} Database.query('SELECT '+fields+' FROM Account'); } }";
+  const engine=new ApexDataFlowEngine(code,{maxPaths:2});
+  const result=engine.analyze();
+  assert.equal(result.exceeded,false);
+  assert.deepEqual(result.captures.get(engine.sites[0].offset)?.map(c=>c.query).sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b))),
+    [textValue("SELECT Id FROM Account"),textValue("SELECT Name, Phone FROM Account")]);
+});
+
+test("comparison correlation is rejected if the parameter is reassigned",()=>{
+  const code="public class Builder { public static void run(String mode){ String fields='Id'; if(mode == 'Full'){fields='Name';} mode='Full'; if(mode == 'Full'){fields+=', Phone';} Database.query('SELECT '+fields+' FROM Account'); } }";
+  const engine=new ApexDataFlowEngine(code);
+  const result=engine.analyze();
+  assert.deepEqual(result.captures.get(engine.sites[0].offset)?.map(c=>c.query).sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b))),
+    [textValue("SELECT Id, Phone FROM Account"),textValue("SELECT Name, Phone FROM Account")]);
+});
+
+test("batch receiver context survives a source-proven scalar local prefix",async()=>{
+  const batch="public class QueryBatch implements Database.Batchable<SObject> { private String query; public QueryBatch(String obj){query='SELECT Id FROM '+obj;} public Database.QueryLocator start(Database.BatchableContext bc){ String localQuery=this.query; return Database.getQueryLocator(localQuery); } public void execute(Database.BatchableContext bc,List<SObject> scope){} public void finish(Database.BatchableContext bc){} }";
+  const caller="public class Entry { public static void run(){ Database.executeBatch(new QueryBatch('Account')); } }";
+  const index=new ApexRepositoryMethodIndex([{filePath:"QueryBatch.cls",source:batch},{filePath:"Entry.cls",source:caller}]);
+  const report=await new ApexAnalysisEngine(index).analyze("QueryBatch.cls",ctx=>extractDynamicSoqlQueries(batch,"QueryBatch.cls",ctx.resolveExternal,ctx.repositoryIndex));
+  assert.deepEqual(report.queries.map(q=>q.query),["SELECT Id FROM Account"]);
+  assert.ok(report.queries.every(q=>q.coverage==="KNOWN_CALLER_CONTEXT"));
+  assert.equal(report.unresolved.length,1);
+});
+
+test("constructor can use supported pure String predicates with proven scalar inputs",()=>{
+  const source="public class Config { public String field; public Config(String input){if(String.isBlank(input)){field='Id';}else{field=input;}} }";
+  const index=new ApexRepositoryMethodIndex([{filePath:"Config.cls",source}]);
+  assert.deepEqual(index.constructInstance("Config.cls","Config",[textValue("")]),{kind:"instance",className:"Config",entries:[["field",textValue("Id")]]});
+  assert.deepEqual(index.constructInstance("Config.cls","Config",[textValue("Name")]),{kind:"instance",className:"Config",entries:[["field",textValue("Name")]]});
+});
+
+test("direct leading if-condition caller contributes a bounded known query variant",()=>{
+  const gateway="public class Gateway { public static Boolean fetch(String obj){Database.query('SELECT Id FROM '+obj);return true;} }";
+  const caller="public class Entry { public static void run(){ if(Gateway.fetch('Account')){System.debug('done');} } }";
+  const index=new ApexRepositoryMethodIndex([{filePath:"Gateway.cls",source:gateway},{filePath:"Entry.cls",source:caller}]);
+  const report=extractDynamicSoqlQueries(gateway,"Gateway.cls",undefined,index);
+  assert.deepEqual(report.queries.map(q=>q.query),["SELECT Id FROM Account"]);
+  assert.equal(report.unresolved.length,1);
+});
+
+test("non-leading short-circuited calls are not promoted to proven caller contexts",()=>{
+  const gateway="public class Gateway { public static Boolean fetch(String obj){Database.query('SELECT Id FROM '+obj);return true;} }";
+  const caller="public class Entry { public static void run(){ if(false && Gateway.fetch('Account')){System.debug('done');} } }";
+  const index=new ApexRepositoryMethodIndex([{filePath:"Gateway.cls",source:gateway},{filePath:"Entry.cls",source:caller}]);
+  const report=extractDynamicSoqlQueries(gateway,"Gateway.cls",undefined,index);
+  assert.equal(report.queries.length,0);
+  assert.equal(report.unresolved.length,1);
+});
