@@ -40,7 +40,10 @@ function mergeEquivalentStates(states:State[]):State[] {
   if(states.length<2)return states;
   const distinct=new Map<string,State>();
   for(const state of states) {
-    const key=apexStateIdentity(state.values,state.stopped===true);
+    // Completed returns/throws never re-enter the current normal frame.
+    // Their return values and invocation evidence have already been recorded
+    // independently, so their obsolete environments need not multiply paths.
+    const key=state.stopped?"terminated":apexStateIdentity(state.values,false);
     if(!distinct.has(key))distinct.set(key,state);
   }
   return [...distinct.values()];
@@ -537,7 +540,7 @@ export class ApexDataFlowEngine {
       // fields, loop-carried values or parameters, before state deduplication.
       if(live)for(const frame of next)live.discardDeadScalars(frame.values,node.end);
       const distinct=mergeEquivalentStates(next);
-      if(!this.budget.checkPaths(distinct.length,node.start,owner?.name??"(unknown method)")){
+      if(!this.budget.checkPaths(distinct.filter(frame=>!frame.stopped).length,node.start,owner?.name??"(unknown method)")){
         states=[{values:new Map([...distinct[0].values.keys()].map((k):[string,ApexValue]=>[k,
           unknown("Query path enumeration budget exceeded.")]))}];
       }else states=distinct;
