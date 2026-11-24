@@ -1,7 +1,7 @@
 import path from "node:path";
 import {countApex,timeApex} from "./ApexPerformance.js";
 import { ApexDataFlowEngine } from "./ApexDataFlowEngine.js";
-import { indexApexMethods, maskApexSource, matchingPair, splitApexTopLevel,
+import { ApexRepositorySyntaxInventory, maskApexSource, matchingPair, splitApexTopLevel,
   type IndexedApexMethod } from "./ApexSourceModel.js";
 import { unknown, type ApexValue } from "./ApexValueEvaluator.js";
 import {ApexInstanceIndex} from "./ApexInstanceModel.js";
@@ -116,14 +116,15 @@ export class ApexRepositoryMethodIndex {
   private nextScope=1;
 
   constructor(files:readonly ApexRepositorySource[]) {
-    this.staticValues=new ApexStaticValueIndex(files);
-    this.instances=new ApexInstanceIndex(files);
+    const syntax=new ApexRepositorySyntaxInventory();
+    this.staticValues=new ApexStaticValueIndex(files,syntax);
+    this.instances=new ApexInstanceIndex(files,syntax);
     const indexed:IndexedSource[]=[];
     for(const file of files) {
-      const masked=maskApexSource(file.source);
+      const masked=syntax.masked(file.source);
       const className=/\bclass\s+([A-Za-z_]\w*)\b/i.exec(masked)?.[1] ??
         path.basename(file.filePath).replace(/\.cls$/i,"");
-      const owner={...file,className,methods:indexApexMethods(file.source)};
+      const owner={...file,className,methods:syntax.methods(file.source)};
       const key=className.toLowerCase();
       this.classes.set(key,[...(this.classes.get(key)??[]),owner]);
       indexed.push(owner);
@@ -135,7 +136,7 @@ export class ApexRepositoryMethodIndex {
 
     }
     for(const owner of indexed) {
-      const masked=maskApexSource(owner.source);
+      const masked=syntax.masked(owner.source);
       // Only direct framework dispatch of a newly allocated receiver. Calls
       // through a local alias, scheduler, platform or unknown receiver remain open.
       if(/\bDatabase\s*\.\s*executeBatch\s*\(/i.test(masked)&&!this.classes.has("database")&&!/\b[A-Za-z_]\w*\s+Database\s*(?:[=;,)])/i.test(masked)){
@@ -191,6 +192,7 @@ export class ApexRepositoryMethodIndex {
         this.callers.set(key,callers);
       }
     }
+    syntax.clear();
   }
 
   indexedMethods(filePath:string,source:string):IndexedApexMethod[]|undefined{
