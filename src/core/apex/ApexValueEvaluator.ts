@@ -1,4 +1,5 @@
-import { splitApexTopLevel, stripApexComments } from "./ApexSourceModel.js";
+import { splitApexTopLevel, stripApexComments, maskApexSource } from "./ApexSourceModel.js";
+import {findApexTernary} from "./ApexConditionalInvocation.js";
 import { parseCustomMetadataQuery } from "./ApexCustomMetadataQueryModel.js";
 
 /** Portable abstract Apex values: no Salesforce API calls and no eval(). */
@@ -144,11 +145,19 @@ export function evaluateApexExpression(
     unknown(/^[a-z]/.test(constant[1])
       ?"Instance member expression "+expr+" depends on runtime object state."
       :"Repository Apex constant "+expr+" has no proven immutable literal value.");
-  if(expr.startsWith("!") && !expr.startsWith("!=")){
-    const result=evaluateApexExpression(expr.slice(1),context,depth+1);
-    const simple=onlyText(result);
-    return simple==="true"?booleanValue(false):simple==="false"?booleanValue(true):
-      unknown("Negated conditional depends on runtime input.");
+  const ternary=findApexTernary(maskApexSource(expr));
+  if(ternary){
+    const condition=evaluateApexExpression(expr.slice(0,ternary.question),context,depth+1);
+    const value=onlyText(condition);
+    const yes=expr.slice(ternary.question+1,ternary.colon);
+    const no=expr.slice(ternary.colon+1);
+    if(value==="true")return evaluateApexExpression(yes,context,depth+1);
+    if(value==="false")return evaluateApexExpression(no,context,depth+1);
+    const a=evaluateApexExpression(yes,context,depth+1);
+    const b=evaluateApexExpression(no,context,depth+1);
+    return a.kind==="text"&&b.kind==="text"
+      ?merged([...a.values,...b.values],a.scalarType==="boolean"&&b.scalarType==="boolean"?"boolean":undefined)
+      :unknown("Unknown ternary expression alternatives.");
   }
   for(const operator of ["||","&&"]){
     const terms=splitApexTopLevel(expr,operator);
@@ -159,21 +168,6 @@ export function evaluateApexExpression(
       if(checks.every(c=>c==="true"||c==="false"))
         return booleanValue(operator==="&&"?checks.every(c=>c==="true"):checks.some(c=>c==="true"));
       return unknown("Boolean condition depends on runtime inputs.");
-    }
-  }
-  const alternatives=splitApexTopLevel(expr,"?");
-  if(alternatives.length===2){
-    const branch=splitApexTopLevel(alternatives[1],":");
-    if(branch.length===2){
-      const condition=evaluateApexExpression(alternatives[0],context,depth+1);
-      const value=onlyText(condition);
-      if(value==="true")return evaluateApexExpression(branch[0],context,depth+1);
-      if(value==="false")return evaluateApexExpression(branch[1],context,depth+1);
-      const a=evaluateApexExpression(branch[0],context,depth+1);
-      const b=evaluateApexExpression(branch[1],context,depth+1);
-      return a.kind==="text"&&b.kind==="text"
-        ?merged([...a.values,...b.values])
-        :unknown("Unknown ternary expression alternatives.");
     }
   }
   for(const operator of ["==","!="]){
@@ -194,6 +188,12 @@ export function evaluateApexExpression(
   if(plus.length>1){
     const parts=plus.map(item=>evaluateApexExpression(item,context,depth+1));
     return parts.slice(1).reduce<ApexValue>((a,b)=>combinations(a,b),parts[0]);
+  }
+  if(expr.startsWith("!") && !expr.startsWith("!=")){
+    const result=evaluateApexExpression(expr.slice(1),context,depth+1);
+    const simple=onlyText(result);
+    return simple==="true"?booleanValue(false):simple==="false"?booleanValue(true):
+      unknown("Negated conditional depends on runtime input.");
   }
   const create=/^new\s+(List|Set)\s*<[\w\s,.<>]+>\s*(?:\(([\s\S]*)\)|\{([\s\S]*)\})$/i.exec(expr);
   if(create){
