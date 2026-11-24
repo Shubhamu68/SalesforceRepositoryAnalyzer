@@ -6,11 +6,12 @@ import type {ApexEnvironment,ApexValue} from "./ApexValueEvaluator.js";
 export function apexStateIdentity(values:ApexEnvironment,stopped:boolean):string {
   const references=new Map<ApexValue,number>();
   const encode=(value:ApexValue):unknown=>{
-    if(value.kind!=="collection"&&value.kind!=="map"&&value.kind!=="instance")return value;
+    if(value.kind!=="collection"&&value.kind!=="map"&&value.kind!=="instance"&&value.kind!=="instanceList")return value;
     const previous=references.get(value);
     if(previous!==undefined)return ["alias",previous];
     const id=references.size;
     references.set(value,id);
+    if(value.kind==="instanceList")return ["instanceList",id,value.elementType,value.items.map(encode)];
     return value.kind==="collection"
       ?["collection",id,value.unique,value.items]
       :[value.kind,id,value.kind==="instance"?value.className:null,value.entries.map(([key,item])=>[key,encode(item)])];
