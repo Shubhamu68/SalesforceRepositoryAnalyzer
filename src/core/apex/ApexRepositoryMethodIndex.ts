@@ -62,6 +62,7 @@ const MAX_CACHED_SUMMARIES = 1024;
 export class ApexRepositoryMethodIndex {
   private readonly classes=new Map<string,IndexedSource[]>();
   private readonly callers=new Map<string,Caller[]>();
+  private readonly methodsByKey=new Map<string,IndexedMethod[]>();
   private readonly batchAllocations=new Map<string,Caller[]>();
   private readonly paths=new Map<string,IndexedSource>();
   private readonly staticValues:ApexStaticValueIndex;
@@ -88,13 +89,17 @@ export class ApexRepositoryMethodIndex {
       this.classes.set(key,[...(this.classes.get(key)??[]),owner]);
       indexed.push(owner);
       this.paths.set(path.resolve(file.filePath),owner);
+      for(const method of owner.methods){
+        const key=this.methodKey(className,method.name,method.parameters.length);
+        const entries=this.methodsByKey.get(key)??[];entries.push({owner,method});this.methodsByKey.set(key,entries);
+      }
 
     }
     for(const owner of indexed) {
       const masked=maskApexSource(owner.source);
       // Only direct framework dispatch of a newly allocated receiver. Calls
       // through a local alias, scheduler, platform or unknown receiver remain open.
-      if(!this.classes.has("database")&&!/\b[A-Za-z_]\w*\s+Database\s*(?:[=;,)])/i.test(masked)){
+      if(/\bDatabase\s*\.\s*executeBatch\s*\(/i.test(masked)&&!this.classes.has("database")&&!/\b[A-Za-z_]\w*\s+Database\s*(?:[=;,)])/i.test(masked)){
         const calls=discoverApexInvocations(owner.source,(name,args)=>
           /^Database\.executeBatch$/i.test(name)&&args.length>=1&&args.length<=2?{method:name,argumentIndices:[0]}:undefined);
         for(const site of calls){
@@ -109,6 +114,7 @@ export class ApexRepositoryMethodIndex {
           this.batchAllocations.set(key,candidates);
         }
       }
+      const receiverShadows=new Map<string,boolean>();
       const expression=/\b([A-Za-z_]\w*)(?:\s*\.\s*([A-Za-z_]\w*))?\s*\(/g;
       let match:RegExpExecArray|null;
       while((match=expression.exec(masked))!==null) {
@@ -128,8 +134,13 @@ export class ApexRepositoryMethodIndex {
         // If a class qualifier also appears as a variable/parameter name,
         // dispatch is ambiguous. Err on the side of omitting the evidence.
         if(receiver&&receiver.toLowerCase()!=="this"){
-          const shadow=new RegExp("\\b[A-Za-z_]\\w*(?:\\s*<[\\w\\s,.<>]+>)?(?:\\[\\])?\\s+"+receiver+"\\s*(?:[=;,)\\[])", "i");
-          if(shadow.test(masked))continue;
+          const receiverKey=receiver.toLowerCase();
+          let ambiguous=receiverShadows.get(receiverKey);
+          if(ambiguous===undefined){
+            const shadow=new RegExp("\\b[A-Za-z_]\\w*(?:\\s*<[\\w\\s,.<>]+>)?(?:\\[\\])?\\s+"+receiver+"\\s*(?:[=;,)\\[])", "i");
+            ambiguous=shadow.test(masked);receiverShadows.set(receiverKey,ambiguous);
+          }
+          if(ambiguous)continue;
         }
         const expressions=owner.source.slice(opening+1,close).trim();
         const args=expressions?splitApexTopLevel(expressions,","):[];
@@ -175,9 +186,7 @@ export class ApexRepositoryMethodIndex {
   }
 
   private findMethods(cls:string,name:string,arity:number):IndexedMethod[] {
-    return (this.classes.get(cls.toLowerCase())??[]).flatMap(owner=>
-      owner.methods.filter(method=>method.name.toLowerCase()===name.toLowerCase() &&
-        method.parameters.length===arity).map(method=>({owner,method})));
+    return this.methodsByKey.get(this.methodKey(cls,name,arity))??[];
   }
 
   private scopeId(resolveExternal?: (name:string,args:ApexValue[])=>ApexValue|undefined):number {
