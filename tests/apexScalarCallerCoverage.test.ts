@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import {test} from "node:test";
-import {evaluateApexExpression,textValue,booleanValue,unknown} from "../src/core/apex/ApexValueEvaluator.js";
+import {evaluateApexExpression,textValue,booleanValue,unknown,runtimeParameter,describePartialApexText} from "../src/core/apex/ApexValueEvaluator.js";
 import {ApexRepositoryMethodIndex} from "../src/core/apex/ApexRepositoryMethodIndex.js";
 import {extractDynamicSoqlQueries} from "../src/scanner/dynamicSoqlScanner.js";
 
@@ -67,4 +67,28 @@ test("unknown structural fragments and unknown access mode do not produce a fals
   const index=new ApexRepositoryMethodIndex([{filePath:"Gateway.cls",source:code},{filePath:"Entry.cls",source:caller}]);
   const result=extractDynamicSoqlQueries(code,"Gateway.cls",undefined,index);
   assert.equal(result.unresolved.length,1);assert.equal(result.queries.length,0);
+});
+
+
+test("typed symbolic concatenation retains ordered fragments but never becomes executable query text",()=>{
+  const values=new Map([["size",runtimeParameter("size","Integer","runtime pagination")],["fields",runtimeParameter("fields","String","runtime field inventory")]]);
+  const result=evaluateApexExpression("'SELECT '+fields+' FROM Account LIMIT '+size",{values});
+  assert.equal(result.kind,"unknown");
+  if(result.kind!=="unknown")return;
+  assert.deepEqual(result.fragments,[
+    {kind:"literal",text:"SELECT "},
+    {kind:"hole",symbol:{name:"fields",type:"string"}},
+    {kind:"literal",text:" FROM Account LIMIT "},
+    {kind:"hole",symbol:{name:"size",type:"integer"}},
+  ]);
+  assert.match(describePartialApexText(result),/2 known text fragment\(s\), 2 unknown fragment\(s\).*integer, string/);
+  assert.doesNotMatch(describePartialApexText(result),/Account/);
+});
+
+test("symbolic runtime pagination and structural inputs retain REVIEW and mask literal contents",()=>{
+  const code="public class QueryService { public static void run(Integer pageSize){String q='SELECT Id FROM Account'; q+=' LIMIT '+pageSize; Database.query(q);} }";
+  const result=extractDynamicSoqlQueries(code,"QueryService.cls");
+  assert.equal(result.queries.length,0);
+  assert.equal(result.unresolved.length,1);
+  assert.match(result.unresolved[0].reason,/Partial expression evidence.*integer/);
 });
