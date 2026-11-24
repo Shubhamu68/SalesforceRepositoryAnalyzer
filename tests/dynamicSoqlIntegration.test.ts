@@ -1141,8 +1141,9 @@ test("class-level List Set Map initializers and tracked mutations produce comple
       "   Database.query('SELECT '+String.join(cols,',')+' FROM Account');",
       " }",
       " public static void direct(){",
-      "   QueryConfig.FIELDS.add('Industry');",
-      "   Database.query('SELECT '+String.join(QueryConfig.FIELDS,',')+' FROM Account');",
+      "   List<String> directFields=new List<String>(QueryConfig.FIELDS);",
+      "   directFields.add('Industry');",
+      "   Database.query('SELECT '+String.join(directFields,',')+' FROM Account');",
       " }",
       " public void instanceQuery(){",
       "   own.add('Email');",
@@ -1395,5 +1396,37 @@ test("static-block scalar values flow through the shared index into dynamic SOQL
     assert.deepEqual(result.queries.map(q=>q.query),["SELECT Id FROM Account"]);
     assert.equal(result.unresolvedDynamic.length,1);
     assert.match(result.unresolvedDynamic[0].reason,/additional repository-visible writes/i);
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+
+test("actual repository-visible shared static mutations invalidate dependent dynamic SELECTs",async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),"v011-mutated-static-"));
+  try{
+    await writeFile(path.join(dir,"Config.cls"),"public class Config { public static List<String> FIELDS=new List<String>{'Id'}; public static void change(){FIELDS.add('Name');} }");
+    await writeFile(path.join(dir,"Consumer.cls"),"public class Consumer { public static void run(){ Database.query('SELECT '+String.join(Config.FIELDS,',')+' FROM Account'); } }");
+    const result=await scanApexSoqlWithUnresolved(dir);
+    assert.equal(result.queries.length,0);
+    assert.equal(result.unresolvedDynamic.length,1);
+    assert.match(result.unresolvedDynamic[0].reason,/additional repository-visible writes/i);
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test("proven lazy getters resolve across classes and within the owning method context",async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),"v011-lazy-getter-"));
+  try{
+    await writeFile(path.join(dir,"Config.cls"),[
+      "public class Config {",
+      " private static String FIELD;",
+      " private static List<String> FIELDS;",
+      " public static String getField(){if(FIELD==null){FIELD='Name';}return FIELD;}",
+      " public static List<String> getFields(){if(FIELDS==null){FIELDS=new List<String>{'Id','Name'};}return new List<String>(FIELDS);}",
+      " public static void run(){Database.query('SELECT '+getField()+' FROM Account');}",
+      "}",
+    ].join("\n"));
+    await writeFile(path.join(dir,"Consumer.cls"),"public class Consumer { public static void run(){ Database.query('SELECT '+String.join(Config.getFields(),',')+' FROM Account'); } }");
+    const result=await scanApexSoqlWithUnresolved(dir);
+    assert.equal(result.unresolvedDynamic.length,0,JSON.stringify(result.unresolvedDynamic));
+    assert.deepEqual(result.queries.map(q=>q.query).sort(),["SELECT Id,Name FROM Account","SELECT Name FROM Account"]);
   }finally{await rm(dir,{recursive:true,force:true});}
 });
