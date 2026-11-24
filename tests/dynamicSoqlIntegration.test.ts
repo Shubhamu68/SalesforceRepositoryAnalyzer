@@ -1109,3 +1109,112 @@ test("declared class-member snapshot does not freeze reassigned method-local que
       ["SELECT Id FROM Account","SELECT Phone FROM Contact"].sort());
   }finally{await rm(dir,{recursive:true,force:true});}
 });
+
+test("class-level List Set Map initializers and tracked mutations produce complete query fields",async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),"v011-class-collections-"));
+  try{
+    await writeFile(path.join(dir,"QueryConfig.cls"),[
+      "public class QueryConfig {",
+      " public static List<String> FIELDS = new List<String>{'Id','Name'};",
+      " public static Set<String> EXTRA = new Set<String>{'Phone','Phone'};",
+      " public static Map<String,List<String>> GROUPS = new Map<String,List<String>>{'Account'=>FIELDS};",
+      "}",
+    ].join("\n"));
+    await writeFile(path.join(dir,"CollectionConsumer.cls"),[
+      "public class CollectionConsumer {",
+      " private List<String> own = new List<String>{'Id'};",
+      " public static void run(){",
+      "   List<String> cols = new List<String>(QueryConfig.GROUPS.get('Account'));",
+      "   cols.addAll(QueryConfig.EXTRA);",
+      "   cols.remove(1);",
+      "   Database.query('SELECT '+String.join(cols,',')+' FROM Account');",
+      " }",
+      " public static void direct(){",
+      "   QueryConfig.FIELDS.add('Industry');",
+      "   Database.query('SELECT '+String.join(QueryConfig.FIELDS,',')+' FROM Account');",
+      " }",
+      " public void instanceQuery(){",
+      "   own.add('Email');",
+      "   Database.query('SELECT '+String.join(this.own,',')+' FROM Contact');",
+      " }",
+      " public static void unchanged(){",
+      "   Database.query('SELECT '+String.join(QueryConfig.FIELDS,',')+' FROM Account');",
+      " }",
+      "}",
+    ].join("\n"));
+    const result=await scanApexSoqlWithUnresolved(dir);
+    assert.equal(result.unresolvedDynamic.length,0,JSON.stringify(result.unresolvedDynamic));
+    assert.deepEqual(result.queries.map(q=>q.query).sort(),[
+      "SELECT Id,Phone FROM Account",
+      "SELECT Id,Name,Industry FROM Account",
+      "SELECT Id,Email FROM Contact",
+      "SELECT Id,Name FROM Account",
+    ].sort());
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test("label-backed class map flows through cross-class nested loops; fresh scans read updated labels",async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),"v011-cross-class-label-"));
+  let label=JSON.stringify({Product2:{"1":"Name","2":"ProductCode"},Authorized_Product__c:{"1":"Item_Code__c"}});
+  let reads=0;
+  try{
+    await writeFile(path.join(dir,"LabelConfig.cls"),[
+      "public class LabelConfig {",
+      " public static String raw = System.Label.Product_Fields;",
+      " public static Map<String,Map<String,String>> config = (Map<String,Map<String,String>>) JSON.deserialize(raw,Map<String,Map<String,String>>.class);",
+      "}",
+    ].join("\n"));
+    await writeFile(path.join(dir,"FieldHelper.cls"),[
+      "public class FieldHelper {",
+      " public static List<String> productFields(){",
+      "   List<String> fields = new List<String>();",
+      "   Map<String,Map<String,String>> config = LabelConfig.config;",
+      "   for(String objectName : config.keySet()){",
+      "     Map<String,String> columns = config.get(objectName);",
+      "     for(String key : columns.keySet()){",
+      "       if(objectName == 'Product2'){fields.add(columns.get(key));}",
+      "     }",
+      "   }",
+      "   return fields;",
+      " }",
+      "}",
+    ].join("\n"));
+    for(const name of ["ConsumerA","ConsumerB"]){
+      await writeFile(path.join(dir,name+".cls"),[
+        "public class "+name+" {",
+        " public static void run(){",
+        "   Database.query('SELECT '+String.join(FieldHelper.productFields(),',')+' FROM Product2');",
+        " }",
+        "}",
+      ].join("\n"));
+    }
+    const provider={
+      scopeKey:"org-cross-class-label",
+      getCustomLabelValue:async(name:string)=>{
+        assert.equal(name,"Product_Fields");reads++;
+        return {complete:true as const,source:"LIVE_ORG" as const,value:label};
+      },
+      getObjectFieldNames:async()=>({complete:false as const,source:"LIVE_ORG" as const}),
+      getCustomMetadataRecords:async()=>({complete:false as const,source:"LIVE_ORG" as const}),
+    };
+    const first=await scanApexSoqlWithUnresolved(dir,provider);
+    assert.equal(first.unresolvedDynamic.length,0,JSON.stringify(first.unresolvedDynamic));
+    assert.equal(first.queries.length,2);
+    assert.ok(first.queries.every(q=>q.query==="SELECT Name,ProductCode FROM Product2"));
+    assert.equal(reads,1,"one shared label read per scan");
+    label=JSON.stringify({Product2:{"1":"Description"}});
+    const second=await scanApexSoqlWithUnresolved(dir,provider);
+    assert.equal(second.unresolvedDynamic.length,0,JSON.stringify(second.unresolvedDynamic));
+    assert.equal(second.queries.length,2);
+    assert.ok(second.queries.every(q=>q.query==="SELECT Description FROM Product2"));
+    assert.equal(reads,2);
+    const failed=await scanApexSoqlWithUnresolved(dir,{
+      ...provider,getCustomLabelValue:async()=>({complete:false as const,source:"LIVE_ORG" as const,
+        reason:"Custom Label Tooling API permission denied"}),
+    });
+    assert.equal(failed.queries.length,0);
+    assert.equal(failed.unresolvedDynamic.length,2);
+    for(const item of failed.unresolvedDynamic)
+      assert.match(item.reason,/Product_Fields.*permission denied/i);
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
