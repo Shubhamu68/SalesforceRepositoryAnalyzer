@@ -364,7 +364,7 @@ export class ApexRepositoryMethodIndex {
       return {...empty,candidateCalls:candidates.length,unknownCalls:candidates.length,bounded:true};
     const known=new Map<string,ApexValue[]>();
     const partial=new Map<string,ApexValue[]>();
-    let unknownCalls=0,bounded=false;
+    let unknownCalls=0,bounded=false,inheritedBounded=false;
     for(const call of candidates){
       // A variable shadowing a class name or an instance-qualified call
       // cannot establish static dispatch. Only explicit static targets qualify.
@@ -378,7 +378,7 @@ export class ApexRepositoryMethodIndex {
       // Repeated caller argument vectors from different hops need only one
       // evaluation, while distinct reference alias topologies stay distinct.
       const uniqueSeeds=[...new Map(seeds.map(seed=>[seed?argumentIdentity(seed):"runtime-entry",seed])).values()];
-      if(upstream?.bounded)bounded=true;
+      if(upstream?.bounded)inheritedBounded=true;
       let unproven=false;
       for(const seed of uniqueSeeds){
         if(work.remaining--<=0){bounded=true;break;}
@@ -406,7 +406,7 @@ export class ApexRepositoryMethodIndex {
       if(bounded)break;
     }
     const result:ApexCallerContexts={known:[...known.values()],partial:[...partial.values()],unknownCalls,
-      candidateCalls:candidates.length,externallyCallable:target.visibility!=="private",bounded};
+      candidateCalls:candidates.length,externallyCallable:target.visibility!=="private",bounded:bounded||inheritedBounded};
     // Recursive calls can encounter a shallower cycle/budget cut. Cache only
     // root results; never persist an incomplete nested traversal as exhaustive.
     if(stack.size===0){
