@@ -13,6 +13,11 @@ export interface CustomMetadataFilter {
   readonly field:string;
   readonly value:string|number|boolean;
 }
+/** Only set this proof when the provider executed the exact requested WHERE
+ * predicates and returned every matching row. Salesforce owns filter semantics. */
+export interface CustomMetadataResult extends MetadataResult<Array<Record<string,unknown>>> {
+  filterEvidence?: "SERVER_FILTERED";
+}
 export interface ApexMetadataProvider {
   /** Cache scope must include org identity and connection epoch when live. */
   readonly scopeKey: string;
@@ -24,5 +29,5 @@ export interface ApexMetadataProvider {
   /** Complete matching records for proven equality filters; no partial results. */
   getCustomMetadataRecords(
     objectApiName: string, fields: readonly string[], filters?: readonly CustomMetadataFilter[],
-  ): Promise<MetadataResult<Array<Record<string, unknown>>>>;
+  ): Promise<CustomMetadataResult>;
 }
