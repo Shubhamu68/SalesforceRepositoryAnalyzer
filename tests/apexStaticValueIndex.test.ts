@@ -35,15 +35,15 @@ test("v0.1.1 constant chain: static final aliases, cross-class members, derived 
   assert.deepEqual(idx.resolve("Objects.LIMIT"),{kind:"number",value:12});
 });
 
-test("v0.1.1 declared initializer snapshot intentionally uses initial values even with later writes",()=>{
+test("v0.1.1 declared initializer snapshots are invalidated by repository-visible writes",()=>{
   const idx=index(["PrivateConsts.cls","public class PrivateConsts {\n"+
     " private static String STABLE = 'Id';\n"+
     " private static String LATER = 'Name';\n"+
     " private static String INCREMENTED = 'Phone';\n"+
     " public static void update(){LATER = 'Phone'; INCREMENTED += 'more';}\n}"]);
   expectText(idx,"PrivateConsts.STABLE","Id");
-  expectText(idx,"PrivateConsts.LATER","Name");
-  expectText(idx,"PrivateConsts.INCREMENTED","Phone");
+  expectUnknown(idx,"PrivateConsts.LATER",/additional repository-visible writes/i);
+  expectUnknown(idx,"PrivateConsts.INCREMENTED",/additional repository-visible writes/i);
 });
 
 test("v0.1.1 public or protected initialized scalar fields participate in the snapshot",()=>{
@@ -71,12 +71,12 @@ test("v0.1.1 pure scalar initializers support String/Integer.valueOf chains",()=
   expectText(idx,"NumericCodes.FULL","TRX_945");
 });
 
-test("v0.1.1 snapshot ignores later prefix increments but null initializer stays unknown",()=>{
+test("v0.1.1 prefix increments invalidate static snapshots and null initializer stays unknown",()=>{
   const idx=index(["MutableConfig.cls","public class MutableConfig {\n"+
     " private static Integer COUNT = 1;\n"+
     " public static final String FIELD = null;\n"+
     " public static void update(){++COUNT;}\n}"]);
-  assert.deepEqual(idx.resolve("MutableConfig.COUNT"),{kind:"number",value:1});
+  expectUnknown(idx,"MutableConfig.COUNT",/additional repository-visible writes/i);
   expectUnknown(idx,"MutableConfig.FIELD",/null initializer/i);
 });
 
@@ -355,4 +355,49 @@ test("comments, nested blocks and map arrows do not invent a static initializer 
   ].join("\n")]);
   expectText(idx,"BlockMap.FIELD","Id");
   expectUnknown(idx,"BlockMap.MISSING",/no declaration initializer/i);
+});
+
+
+test("declaration snapshots reject qualified writes and direct collection aliases",()=>{
+  const idx=index(
+    ["Config.cls","public class Config { public static String OBJECT_NAME='Account'; public static List<String> FIELDS=new List<String>{'Id'}; public static String STABLE='Name'; }"],
+    ["Other.cls","public class Other { public static void change(){ Config.OBJECT_NAME='Contact'; List<String> alias=Config.FIELDS; alias.add('Name'); } }"]
+  );
+  expectUnknown(idx,"Config.OBJECT_NAME",/repository-visible writes/i);
+  expectUnknown(idx,"Config.FIELDS",/collection alias/i);
+  expectText(idx,"Config.STABLE","Name");
+});
+
+test("canonical lazy scalar and defensive-copy list getters resolve only on invocation",()=>{
+  const idx=index(["Config.cls",[
+    "public class Config {",
+    " private static String FIELD;",
+    " private static List<String> FIELDS=null;",
+    " public static String getField(){if(FIELD==null){FIELD='Name';}return FIELD;}",
+    " public static List<String> getFields(){if(FIELDS==null){FIELDS=new List<String>{'Id','Name'};}return new List<String>(FIELDS);}",
+    "}",
+  ].join("\n")]);
+  assert.equal(idx.resolve("Config.FIELD").kind,"unknown");
+  assert.equal(idx.resolve("Config.FIELDS").kind,"unknown");
+  assert.deepEqual(idx.resolveLazyGetter("Config","getField"),{kind:"text",values:["Name"]});
+  const first=idx.resolveLazyGetter("Config","getFields");
+  const second=idx.resolveLazyGetter("Config","getFields");
+  assert.deepEqual(first,{kind:"collection",items:["Id","Name"],unique:false});
+  assert.deepEqual(first,second);
+  assert.notEqual(first,second);
+});
+
+test("lazy getters with additional writes, runtime initializers or escaping collections do not qualify",()=>{
+  const idx=index(["Config.cls",[
+    "public class Config {",
+    " static String FIELD;",
+    " static String OTHER;",
+    " static List<String> FIELDS;",
+    " public static String getField(){if(FIELD==null){FIELD='Name';}return FIELD;}",
+    " public static String getOther(){if(OTHER==null){OTHER=load();}return OTHER;}",
+    " public static List<String> getFields(){if(FIELDS==null){FIELDS=new List<String>{'Id'};}return FIELDS;}",
+    " public static void reset(){FIELD='Phone';}",
+    "}",
+  ].join("\n")]);
+  for(const name of ["getField","getOther","getFields"])assert.equal(idx.resolveLazyGetter("Config",name),undefined,name);
 });
