@@ -280,22 +280,38 @@ function freezeMethods(methods:IndexedApexMethod[]):IndexedApexMethod[]{
  * indexes are constructed; method trees are retained by the graph owners.
  * No evaluated values, metadata or permissions enter this inventory. */
 export class ApexRepositorySyntaxInventory{
-  private readonly entries=new Map<string,{masked:string;methods?:IndexedApexMethod[]}>();
+  private readonly methodsBySource=new Map<string,IndexedApexMethod[]>();
+  private readonly masks=new Map<string,string>();
+  private maskChars=0;
+  // Only transient masks are capped here; parsed trees are already retained
+  // by the repository graph. This prevents a large repo from pinning every
+  // masked copy in addition to its source and method trees.
+  private readonly maxMaskChars=24_000_000;
   masked(source:string):string{
-    const entry=this.entries.get(source);
-    if(entry){countApex("syntax.inventory_mask_hit");return entry.masked;}
+    const existing=this.masks.get(source);
+    if(existing!==undefined){
+      this.masks.delete(source);this.masks.set(source,existing);
+      countApex("syntax.inventory_mask_hit");return existing;
+    }
     const masked=maskUncached(source);
-    this.entries.set(source,{masked});return masked;
+    if(masked.length<=this.maxMaskChars){
+      while(this.masks.size&&this.maskChars+masked.length>this.maxMaskChars){
+        const first=this.masks.keys().next().value!;
+        this.maskChars-=this.masks.get(first)!.length;this.masks.delete(first);
+      }
+      this.masks.set(source,masked);this.maskChars+=masked.length;
+    }
+    return masked;
   }
   methods(source:string):IndexedApexMethod[]{
+    const existing=this.methodsBySource.get(source);
+    if(existing){countApex("syntax.method_cache_hit");return existing;}
     const masked=this.masked(source);
-    const entry=this.entries.get(source)!;
-    if(entry.methods){countApex("syntax.method_cache_hit");return entry.methods;}
     countApex("syntax.method_cache_miss");
-    entry.methods=freezeMethods(timeApex("syntax.parse_ms",()=>indexMethodsUncached(source,masked)));
-    return entry.methods;
+    const methods=freezeMethods(timeApex("syntax.parse_ms",()=>indexMethodsUncached(source,masked)));
+    this.methodsBySource.set(source,methods);return methods;
   }
-  clear():void{this.entries.clear();}
+  clear():void{this.methodsBySource.clear();this.masks.clear();this.maskChars=0;}
 }
 
 function indexMethodsUncached(source: string,masked=maskApexSource(source)): IndexedApexMethod[] {
