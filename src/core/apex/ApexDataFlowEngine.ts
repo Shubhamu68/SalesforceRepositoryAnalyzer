@@ -1,3 +1,4 @@
+import {countApex,timeApex} from "./ApexPerformance.js";
 import {
   indexApexMethods, maskApexSource, matchingPair, sourceLine, splitApexTopLevel,
   type IndexedApexMethod, type SourceNode,
@@ -120,6 +121,7 @@ export class ApexDataFlowEngine {
   private readonly className:string|undefined;
   private currentMethod:IndexedApexMethod|undefined;
   constructor(readonly source:string,options:ApexFlowOptions={}) {
+    countApex("engine.instances");
     this.options={maxPaths:options.maxPaths??DEFAULT_PATHS,
       maxOperations:options.maxOperations??DEFAULT_OPERATIONS,
       maxDepth:options.maxDepth??DEFAULT_DEPTH,...options};
@@ -187,7 +189,8 @@ export class ApexDataFlowEngine {
         if(this.activeCalls.has(key))return unknown("Recursive Apex helper call.");
         const cacheable=args.every(v=>v.kind==="text"||v.kind==="number"||v.kind==="null"||v.kind==="unknown");
         const cached=cacheable?this.summaries.get(key):undefined;
-        if(cached)return cached;
+        if(cached){countApex("helper.local_cache_hit");return cached;}
+        countApex("helper.local_evaluations");
         this.activeCalls.add(key);
         const env=new Map<string,ApexValue>();
         candidates[0].parameters.forEach((p,i)=>env.set(p,args[i]));
@@ -740,7 +743,7 @@ export class ApexDataFlowEngine {
         ?callerArgs[index] : runtimeParameter(name,method.parameterTypes?.[index],"Runtime caller parameter: "+name)));
     const previousMethod=this.currentMethod;
     this.currentMethod=method;
-    try{this.execute(method.body,[{values:env}],0);}
+    try{countApex("caller.argument_probes");timeApex("caller.argument_probe_ms",()=>this.execute(method.body,[{values:env}],0));}
     finally{this.currentMethod=previousMethod;}
     const result=this.argumentProbe.results;
     this.argumentProbe=undefined;
@@ -785,6 +788,7 @@ export class ApexDataFlowEngine {
     exceeded:boolean;
     failures:Map<number,string>;
   } {
+    countApex("invocation.sites",this.sites.length);
     let anyExceeded=false;
     const unreachable=new Set<number>();
     for(const site of this.sites){
