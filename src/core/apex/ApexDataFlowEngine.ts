@@ -178,10 +178,15 @@ export class ApexDataFlowEngine {
         const candidates=this.methods.filter(m=>m.name.toLowerCase()===sameClass.toLowerCase()
           && m.parameters.length===args.length);
         if(candidates.length!==1)return undefined;
+        if(!args.length&&candidates[0].isStatic&&this.className){
+          const lazy=this.options.resolveExternal?.("Apex.lazyGetter",[textValue(this.className),textValue(sameClass)]);
+          if(lazy!==undefined)return lazy;
+        }
         if(depth>=this.options.maxDepth)return unknown("Apex helper recursion depth exceeded.");
-        const key=candidates[0].start+"|"+JSON.stringify(args);
+        const key=candidates[0].start+"|"+apexStateIdentity(new Map(args.map((v,i)=>[String(i),v])),false);
         if(this.activeCalls.has(key))return unknown("Recursive Apex helper call.");
-        const cached=this.summaries.get(key);
+        const cacheable=args.every(v=>v.kind==="text"||v.kind==="number"||v.kind==="null"||v.kind==="unknown");
+        const cached=cacheable?this.summaries.get(key):undefined;
         if(cached)return cached;
         this.activeCalls.add(key);
         const env=new Map<string,ApexValue>();
@@ -213,7 +218,7 @@ export class ApexDataFlowEngine {
             unknown("Helper returns incompatible collection or numeric alternatives: "+ownName);
         }
         if(value.kind==="instance"||value.kind==="instanceList")return unknown("Instance-return alias transfer is not yet proven.");
-        this.summaries.set(key,value);
+        if(cacheable&&(value.kind==="text"||value.kind==="number"||value.kind==="null"||value.kind==="unknown"))this.summaries.set(key,value);
         return value;
       }};
     return evaluateApexExpression(expr,context);
