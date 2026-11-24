@@ -80,22 +80,33 @@ export class ApexRepositoryMethodIndex {
     }
     for(const owner of indexed) {
       const masked=maskApexSource(owner.source);
-      const expression=/\b([A-Za-z_]\w*)\s*\.\s*([A-Za-z_]\w*)\s*\(/g;
+      const expression=/\b([A-Za-z_]\w*)(?:\s*\.\s*([A-Za-z_]\w*))?\s*\(/g;
       let match:RegExpExecArray|null;
       while((match=expression.exec(masked))!==null) {
-        const candidate=this.classes.get(match[1].toLowerCase());
-        if(!candidate || candidate.length!==1)continue;
-        // Class-qualified calls cannot be nested under an instance/member.
-        if(/\.\s*$/.test(masked.slice(Math.max(0,match.index-3),match.index)))continue;
+        if(/\.\s*$/.test(masked.slice(Math.max(0,match.index-12),match.index)))continue;
+        const receiver=match[2]?match[1]:undefined;
+        const name=match[2]??match[1];
+        if(!match[2]&&/\bnew\s*$/i.test(masked.slice(Math.max(0,match.index-20),match.index)))continue;
+        const candidate=receiver&&receiver.toLowerCase()!=="this"
+          ?this.classes.get(receiver.toLowerCase()):[owner];
+        if(!candidate||candidate.length!==1)continue;
         const opening=masked.indexOf("(",match.index);
         const close=matchingPair(masked,opening);
         if(close<0)continue;
         const sourceMethods=owner.methods.filter(m=>m.start<=match!.index&&match!.index<m.end)
           .sort((a,b)=>(a.end-a.start)-(b.end-b.start));
         if(!sourceMethods.length)continue;
+        // If a class qualifier also appears as a variable/parameter name,
+        // dispatch is ambiguous. Err on the side of omitting the evidence.
+        if(receiver&&receiver.toLowerCase()!=="this"){
+          const shadow=new RegExp("\\b[A-Za-z_]\\w*(?:\\s*<[\\w\\s,.<>]+>)?(?:\\[\\])?\\s+"+receiver+"\\s*(?:[=;,)\\[])", "i");
+          if(shadow.test(masked))continue;
+        }
         const expressions=owner.source.slice(opening+1,close).trim();
         const args=expressions?splitApexTopLevel(expressions,","):[];
-        const key=this.methodKey(candidate[0].className,match[2],args.length);
+        const key=this.methodKey(candidate[0].className,name,args.length);
+        const targets=this.findMethods(candidate[0].className,name,args.length);
+        if(targets.length!==1)continue;
         const callers=this.callers.get(key)??[];
         callers.push({caller:owner,method:sourceMethods[0],offset:match.index,expressions:args});
         this.callers.set(key,callers);
