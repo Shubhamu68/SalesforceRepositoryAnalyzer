@@ -3,8 +3,8 @@ import {maskApexSource,type IndexedApexMethod,type SourceNode} from "./ApexSourc
 
 /**
  * Conservative liveness for immutable scalar locals at method-root statement
- * boundaries. No field, parameter, collection, reference or nested local is
- * eligible. Raw source references (including strings/comments) are counted
+ * boundaries. Declared scalar parameters are also eligible after their
+ * last lexical reference. Fields, collections, references and nested locals are not. Raw source references (including strings/comments) are counted
  * conservatively, so bind tokens and unsupported syntax cannot be discarded.
  *
  * Not a general control-flow liveness proof. In particular, never run this
@@ -15,6 +15,9 @@ export class ApexLocalLiveness {
   constructor(source:string,method:IndexedApexMethod,stopOffset?:number){
     const names=new Set<string>();
     const parameters=new Set(method.parameters.map(p=>p.toLowerCase()));
+    method.parameters.forEach((name,i)=>{
+      if(/^(?:String|Boolean|Integer|Long|Decimal|Double|Id|Date|Datetime)$/i.test(method.parameterTypes?.[i]??""))names.add(name.toLowerCase());
+    });
     for(const node of method.body){
       if(node.kind!=="statement")continue;
       const declaration=/^(?:final\s+)?(?:String|Boolean|Integer|Long|Decimal|Double|Id)\s+([A-Za-z_]\w*)\s*(?:=|;)/i
@@ -32,7 +35,7 @@ export class ApexLocalLiveness {
     }
   }
 
-  /** Values no longer lexically reachable from a subsequent statement cannot
+  /** Local/parameter scalar values no longer lexically reachable from a subsequent statement cannot
    * distinguish the remaining method execution. Leave all alias-bearing state
    * and unknown ownership alone. */
   discardDeadScalars(values:ApexEnvironment,statementEnd:number):void {
