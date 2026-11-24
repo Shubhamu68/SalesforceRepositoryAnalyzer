@@ -27,6 +27,8 @@ interface Caller {
 }
 export interface ApexCallerContexts {
   readonly known:ApexValue[][];
+  /** Explicit caller contexts with at least one known and one unknown input. */
+  readonly partial:ApexValue[][];
   readonly unknownCalls:number;
   readonly candidateCalls:number;
   readonly externallyCallable:boolean;
@@ -317,7 +319,7 @@ export class ApexRepositoryMethodIndex {
     resolveExternal?: (name:string,args:ApexValue[])=>ApexValue|undefined,
     stack:ReadonlySet<string>=new Set(),work={remaining:64}):ApexCallerContexts {
     const owner=this.paths.get(path.resolve(filePath));
-    const empty:ApexCallerContexts={known:[],unknownCalls:0,candidateCalls:0,
+    const empty:ApexCallerContexts={known:[],partial:[],unknownCalls:0,candidateCalls:0,
       externallyCallable:target.visibility!=="private",bounded:false};
     if(!owner)return empty;
     const key=owner.filePath+"|"+target.start+"|"+this.scopeId(resolveExternal);
@@ -330,6 +332,7 @@ export class ApexRepositoryMethodIndex {
       this.findMethods(owner.className,target.name,target.parameters.length).length!==1)
       return {...empty,candidateCalls:candidates.length,unknownCalls:candidates.length,bounded:true};
     const known=new Map<string,ApexValue[]>();
+    const partial=new Map<string,ApexValue[]>();
     let unknownCalls=0,bounded=false;
     for(const call of candidates){
       // A variable shadowing a class name or an instance-qualified call
@@ -340,7 +343,7 @@ export class ApexRepositoryMethodIndex {
       const upstream=closed?.length?undefined:
         this.resolveCallerContexts(call.caller.filePath,call.method,resolveExternal,nextStack,work);
       const seeds:(ApexValue[]|undefined)[]=closed?.length?closed:
-        [undefined,...(upstream?.known??[])];
+        [undefined,...(upstream?.known??[]),...(upstream?.partial??[])];
       let unproven=false;
       for(const seed of seeds){
         if(work.remaining--<=0){bounded=true;break;}
@@ -350,18 +353,24 @@ export class ApexRepositoryMethodIndex {
         });
         const contexts=engine.evaluateArgumentsAt(call.method,call.offset,call.expressions,seed);
         for(const args of contexts){
-          if(args.length!==target.parameters.length||args.some(v=>v.kind==="unknown")){
-            unproven=true;continue;
-          }
-          known.set(JSON.stringify(args),args);
-          if(known.size>=MAX_CALL_CONTEXTS){bounded=true;break;}
+          if(args.length!==target.parameters.length){unproven=true;continue;}
+          const incomplete=args.some(v=>v.kind==="unknown");
+          if(incomplete){
+            unproven=true;
+            // Keep a runtime bind unknown rather than discarding the other
+            // proven inputs. Only the selected invocation arguments need to
+            // become complete later; no unknown placeholder becomes a grant.
+            if(args.every(v=>v.kind==="unknown"))continue;
+            partial.set(JSON.stringify(args),args);
+          }else known.set(JSON.stringify(args),args);
+          if(known.size+partial.size>=MAX_CALL_CONTEXTS){bounded=true;break;}
         }
         if(bounded)break;
       }
       if(unproven||upstream?.bounded)unknownCalls++;
       if(bounded)break;
     }
-    const result:ApexCallerContexts={known:[...known.values()],unknownCalls,
+    const result:ApexCallerContexts={known:[...known.values()],partial:[...partial.values()],unknownCalls,
       candidateCalls:candidates.length,externallyCallable:target.visibility!=="private",bounded};
     // Recursive calls can encounter a shallower cycle/budget cut. Cache only
     // root results; never persist an incomplete nested traversal as exhaustive.
@@ -385,8 +394,9 @@ export class ApexRepositoryMethodIndex {
     const contexts=this.resolveCallerContexts(filePath,method,resolveExternal);
     const argumentsByValue=new Map<string,ApexValue[]>();
     const maxSeeds=8;
-    let bounded=contexts.bounded||contexts.known.length>maxSeeds;
-    for(const seed of contexts.known.slice(0,maxSeeds)){
+    const seeds=[...contexts.known,...contexts.partial];
+    let bounded=contexts.bounded||seeds.length>maxSeeds;
+    for(const seed of seeds.slice(0,maxSeeds)){
       const engine=new ApexDataFlowEngine(owner.source,{maxOperations:2000,
         resolveExternal:(name,args)=>resolveExternal?.(name,args) ??
           this.evaluateReturn(owner.filePath,name,args,resolveExternal)});
