@@ -218,3 +218,38 @@ test("non-primitive or unsupported declarations never become scalar constants",(
   expectUnknown(idx,"NonScalars.ALIASES",/no supported static scalar initializer/i);
   expectUnknown(idx,"NonScalars.PROPERTY",/no supported static scalar initializer/i);
 });
+
+test("@TestVisible exposes otherwise private static member to tests, so nonfinal value is not proven",()=>{
+  const idx=index(["TestVisibleFields.cls",[
+    "public class TestVisibleFields {",
+    " @TestVisible",
+    " private static String OVERRIDABLE = 'Name';",
+    " @TestVisible private static final String IMMUTABLE = 'Id';",
+    " private static String INTERNAL = 'CreatedDate';",
+    "}",
+  ].join("\n")]);
+  expectUnknown(idx,"TestVisibleFields.OVERRIDABLE",/externally mutable/i);
+  expectText(idx,"TestVisibleFields.IMMUTABLE","Id");
+  expectText(idx,"TestVisibleFields.INTERNAL","CreatedDate");
+});
+
+test("unqualified references respect static and instance member scope",()=>{
+  const idx=index(["ScopedFields.cls",[
+    "public class ScopedFields {",
+    " static final String STATIC_FIELD = 'Id';",
+    " public final String INSTANCE_FIELD = 'Name';",
+    " public String MUTABLE_INSTANCE = 'Phone';",
+    "}",
+  ].join("\n")]);
+  assert.deepEqual(idx.resolveUnqualified("ScopedFields","STATIC_FIELD",true),
+    {kind:"text",values:["Id"]});
+  assert.deepEqual(idx.resolveUnqualified("ScopedFields","INSTANCE_FIELD",false),
+    {kind:"text",values:["Name"]});
+  const invalid=idx.resolveUnqualified("ScopedFields","INSTANCE_FIELD",true);
+  assert.equal(invalid?.kind,"unknown");
+  if(invalid?.kind==="unknown")assert.match(invalid.reason,/instance member.*static/i);
+  const variable=idx.resolveUnqualified("ScopedFields","MUTABLE_INSTANCE",false);
+  assert.equal(variable?.kind,"unknown");
+  if(variable?.kind==="unknown")assert.match(variable.reason,/not final/i);
+  assert.equal(idx.resolveUnqualified("ScopedFields","NO_SUCH_FIELD",false),undefined);
+});
