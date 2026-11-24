@@ -1,4 +1,4 @@
-import type { ApexMetadataProvider, MetadataResult } from "../core/metadata/ApexMetadataProvider.js";
+import type { ApexMetadataProvider, MetadataResult, CustomMetadataFilter } from "../core/metadata/ApexMetadataProvider.js";
 import type { SalesforceOrgConnection } from "./SalesforceOrgConnection.js";
 
 const VALID_NAME=/^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -123,15 +123,29 @@ export class SalesforceApexMetadataProvider implements ApexMetadataProvider {
     }
   }
 
-  async getCustomMetadataRecords(objectApiName:string,fields:readonly string[]):
+  async getCustomMetadataRecords(objectApiName:string,fields:readonly string[],filters:readonly CustomMetadataFilter[]=[]):
     Promise<MetadataResult<Array<Record<string,unknown>>>>{
     if(!VALID_NAME.test(objectApiName)||!/__mdt$/i.test(objectApiName) ||
-       !fields.length||fields.some(field=>!VALID_NAME.test(field)))return {
+       !fields.length||fields.some(field=>!VALID_NAME.test(field))||filters.length>20||
+       filters.some(filter=>!VALID_NAME.test(filter.field)||
+         (typeof filter.value!=="string"&&typeof filter.value!=="boolean"&&
+           !(typeof filter.value==="number"&&Number.isFinite(filter.value)))))return {
       complete:false,source:"LIVE_ORG",reason:"Custom Metadata query object or fields invalid.",
     };
-    const selected=[...new Set(["DeveloperName",...fields])].sort();
+    const fieldMap=new Map<string,string>();
+    for(const field of ["DeveloperName",...fields,...filters.map(filter=>filter.field)])
+      fieldMap.set(field.toLowerCase(),field);
+    const selected=[...fieldMap.values()].sort();
     try{
-      const query="SELECT "+selected.join(",")+" FROM "+objectApiName;
+      const literal=(value:CustomMetadataFilter["value"]):string=>{
+        if(typeof value!=="string")return String(value);
+        // Escape SOQL string delimiters; control characters are serialized,
+        // never inserted as raw query syntax.
+        return "'"+value.replace(/\\/g,"\\\\").replace(/'/g,"\\'")
+          .replace(/\r/g,"\\r").replace(/\n/g,"\\n").replace(/\t/g,"\\t")+"'";
+      };
+      const where=filters.length?" WHERE "+filters.map(f=>f.field+" = "+literal(f.value)).join(" AND "):"";
+      const query="SELECT "+selected.join(",")+" FROM "+objectApiName+where;
       const data=await this.connection.queryAll<Record<string,unknown>>(query,"data",MAX_RECORDS);
       // Salesforce can return canonical field casing even when the Apex
       // query uses a different case (e.g. type__c versus Type__c).
