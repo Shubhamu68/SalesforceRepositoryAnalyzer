@@ -244,7 +244,7 @@ async function scanDynamicSource(source:string,filePath:string,
       ...(canReadObjects?objects.map(async object=>describeSnapshots.set(object,
         await memoRead(reads.describes,object,()=>metadata.getObjectFieldNames(object)))):[]),
       ...(canReadMetadata?mdts.map(async request=>metadataInventories.set(request.key,
-        await memoRead(reads.customMetadata,request.key,()=>metadata.getCustomMetadataRecords(request.type,request.selected)))):[]),
+        await memoRead(reads.customMetadata,request.key,()=>metadata.getCustomMetadataRecords(request.type,request.selected,request.filters)))):[]),
     ]);
   }
 }
