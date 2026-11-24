@@ -2,7 +2,7 @@ import {analyzeApexInvocations,inspectApexInvocationContexts} from "../core/apex
 import {dynamicDatabaseQuerySelector,type ApexCallSite} from "../core/apex/ApexInvocationModel.js";
 import {explainUncapturedApexQuery} from "../core/apex/ApexExecutionPathDiagnostics.js";
 import type { ApexRepositoryMethodIndex } from "../core/apex/ApexRepositoryMethodIndex.js";
-import type { ApexValue } from "../core/apex/ApexValueEvaluator.js";
+import {describePartialApexText,type ApexValue} from "../core/apex/ApexValueEvaluator.js";
 import {describeMalformedSoql} from "../analyzer/soqlReconstructionDiagnostics.js";
 import { classifySoqlMode } from "../analyzer/soqlExecutionMode.js";
 import { extractSoqlExpressionFields } from "../analyzer/soqlExpressionInventory.js";
@@ -104,7 +104,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
     let reason:string|undefined;
     for(const capture of captures){
       if(capture.query.kind!=="text"){
-        reason=capture.query.kind==="unknown"?capture.query.reason:"Database query argument was not a String.";
+        reason=capture.query.kind==="unknown"?capture.query.reason+describePartialApexText(capture.query):"Database query argument was not a String.";
         break;
       }
       strings.push(...capture.query.values);
