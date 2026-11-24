@@ -997,3 +997,32 @@ test("v0.1.1 missing AdvantageConstants source yields explicit missing-class dia
     assert.match(result.unresolvedDynamic[0].reason,/AdvantageConstants.*missing/i);
   }finally{await rm(dir,{recursive:true,force:true});}
 });
+
+test("actual mutable AdvantageConstants Product Selector map key preserves rejection reason",async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),"v011-real-advantage-"));
+  try {
+    await writeFile(path.join(dir,"AdvantageConstants.cls"),[
+      "public class AdvantageConstants {",
+      " public static String PRODUCT_APINAME='Product2';",
+      " public static String AUTHORIZED_PRODUCT_APINAME='Authorized_Product__c';",
+      " public static final String TRX_SET_945 = '945';",
+      "}",
+    ].join("\n"));
+    await writeFile(path.join(dir,"MutableProductSelector.cls"),[
+      "public class MutableProductSelector {",
+      " public static void run(){",
+      "   Map<String, List<String>> fieldConfig = new Map<String, List<String>>{",
+      "     AdvantageConstants.PRODUCT_APINAME => new List<String>{'Id','Name'}",
+      "   };",
+      "   List<String> fields = fieldConfig.get('Product2');",
+      "   Database.query('SELECT '+String.join(fields,',')+' FROM Product2');",
+      " }",
+      "}",
+    ].join("\n"));
+    const result=await scanApexSoqlWithUnresolved(dir);
+    assert.equal(result.queries.filter(x=>x.dynamicOrigin).length,0);
+    assert.equal(result.unresolvedDynamic.length,1);
+    assert.match(result.unresolvedDynamic[0].reason,/AdvantageConstants\.PRODUCT_APINAME/i);
+    assert.match(result.unresolvedDynamic[0].reason,/externally mutable/i);
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
