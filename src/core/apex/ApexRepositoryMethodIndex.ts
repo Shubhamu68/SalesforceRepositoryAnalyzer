@@ -24,6 +24,13 @@ interface Caller {
   offset: number;
   expressions: string[];
 }
+export interface ApexCallerContexts {
+  readonly known:ApexValue[][];
+  readonly unknownCalls:number;
+  readonly candidateCalls:number;
+  readonly externallyCallable:boolean;
+  readonly bounded:boolean;
+}
 export interface ApexCallerEvidence {
   knownCalls: number;
   unknownCalls: number;
@@ -49,6 +56,7 @@ export class ApexRepositoryMethodIndex {
   private readonly paths=new Map<string,IndexedSource>();
   private readonly staticValues:ApexStaticValueIndex;
   private readonly callerEvidence=new Map<string,ApexCallerEvidence>();
+  private readonly contextualEvidence=new Map<string,ApexCallerContexts>();
   private readonly privateContexts=new Map<string,ApexValue[][] | null>();
   private readonly privateContextStack=new Set<string>();
   private readonly active=new Set<string>();
@@ -278,6 +286,70 @@ export class ApexRepositoryMethodIndex {
       .sort((a,b)=>(a.end-a.start)-(b.end-b.start))[0];
     return owner?{className:source.className,methodName:owner.name,
       arity:owner.parameters.length,visibility:owner.visibility}:undefined;
+  }
+
+  /**
+   * Bounded incoming argument propagation across explicit indexed calls.
+   * Known contexts are evidence only for externally callable methods.
+   * Keep the unknown external entry seed even when every repository caller
+   * happens to pass literal values. Do not narrow open dispatch to known calls.
+   */
+  resolveCallerContexts(filePath:string,target:IndexedApexMethod,
+    resolveExternal?: (name:string,args:ApexValue[])=>ApexValue|undefined,
+    stack:ReadonlySet<string>=new Set()):ApexCallerContexts {
+    const owner=this.paths.get(path.resolve(filePath));
+    const empty:ApexCallerContexts={known:[],unknownCalls:0,candidateCalls:0,
+      externallyCallable:target.visibility!=="private",bounded:false};
+    if(!owner)return empty;
+    const key=owner.filePath+"|"+target.start+"|"+this.scopeId(resolveExternal);
+    const cached=this.contextualEvidence.get(key);
+    if(cached)return cached;
+    if(stack.has(key)||stack.size>=MAX_METHOD_DEPTH)return {...empty,bounded:true};
+    const nextStack=new Set(stack);nextStack.add(key);
+    const candidates=this.callers.get(this.methodKey(owner.className,target.name,target.parameters.length))??[];
+    if(candidates.length>MAX_CALL_CONTEXTS||
+      this.findMethods(owner.className,target.name,target.parameters.length).length!==1)
+      return {...empty,candidateCalls:candidates.length,unknownCalls:candidates.length,bounded:true};
+    const known=new Map<string,ApexValue[]>();
+    let unknownCalls=0,bounded=false;
+    for(const call of candidates){
+      // A variable shadowing a class name or an instance-qualified call
+      // cannot establish static dispatch. Only explicit static targets qualify.
+      if(!target.isStatic){unknownCalls++;continue;}
+      const closed=call.method.visibility==="private"
+        ?this.resolvePrivateContexts(call.caller.filePath,call.method,resolveExternal):undefined;
+      const upstream=closed?.length?undefined:
+        this.resolveCallerContexts(call.caller.filePath,call.method,resolveExternal,nextStack);
+      const seeds:(ApexValue[]|undefined)[]=closed?.length?closed:
+        [undefined,...(upstream?.known??[])];
+      let unproven=false;
+      for(const seed of seeds){
+        const engine=new ApexDataFlowEngine(call.caller.source,{
+          resolveExternal:(name,args)=>resolveExternal?.(name,args) ??
+            this.evaluateReturn(call.caller.filePath,name,args,resolveExternal),
+        });
+        const contexts=engine.evaluateArgumentsAt(call.method,call.offset,call.expressions,seed);
+        for(const args of contexts){
+          if(args.length!==target.parameters.length||args.some(v=>v.kind==="unknown")){
+            unproven=true;continue;
+          }
+          known.set(JSON.stringify(args),args);
+          if(known.size>=MAX_CALL_CONTEXTS){bounded=true;break;}
+        }
+        if(bounded)break;
+      }
+      if(unproven||upstream?.bounded)unknownCalls++;
+      if(bounded)break;
+    }
+    const result:ApexCallerContexts={known:[...known.values()],unknownCalls,
+      candidateCalls:candidates.length,externallyCallable:target.visibility!=="private",bounded};
+    // Recursive calls can encounter a shallower cycle/budget cut. Cache only
+    // root results; never persist an incomplete nested traversal as exhaustive.
+    if(stack.size===0){
+      if(this.contextualEvidence.size>=MAX_CACHED_SUMMARIES)this.contextualEvidence.clear();
+      this.contextualEvidence.set(key,result);
+    }
+    return result;
   }
 
   /**
