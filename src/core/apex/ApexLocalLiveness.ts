@@ -41,7 +41,7 @@ export class ApexLocalLiveness {
   discardDeadScalars(values:ApexEnvironment,statementEnd:number):void {
     for(const [name,value] of values){
       if(value.kind!=="text"&&value.kind!=="number"&&value.kind!=="unknown"&&value.kind!=="null")continue;
-      const last=this.lastReference.get(name.toLowerCase());
+      const last=this.lastReference.get(name.toLowerCase().replace(/^#predicate:/,""));
       if(last!==undefined&&last<=statementEnd)values.delete(name);
     }
   }
