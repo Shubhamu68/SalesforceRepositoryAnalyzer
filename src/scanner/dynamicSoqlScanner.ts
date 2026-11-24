@@ -15,6 +15,8 @@ export interface UnresolvedDynamicSoql {
   /** Immutable call-site identity, even if two sites share a source line. */
   siteId?: string;
   reason: string;
+  /** Known variants coexist with this unresolved execution site. */
+  knownVariants?: number;
 }
 export interface DynamicSoqlScanResult {
   queries: SoqlQuery[];
@@ -29,8 +31,8 @@ function explicitMode(site:ApexCallSite):"USER_MODE"|"SYSTEM_MODE"|undefined|nul
 
 /**
  * A thin, SOQL-specific adapter over the reusable Apex data-flow engine.
- * All paths at a site must yield complete valid SOQL; otherwise one REVIEW
- * is emitted for the site. No partial resolved results are ever published.
+ * Complete coverage requires all paths to resolve. Explicitly proven caller
+ * variants can also be analyzed, but retain the site REVIEW and coverage tag.
  */
 export function extractDynamicSoqlQueries(source:string,filePath:string,
   resolveExternal?: (name:string,args:ApexValue[])=>ApexValue|undefined,
@@ -44,7 +46,9 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
     const siteId=filePath+"@"+site.offset;
     const fail=(reason:string)=>{
       let explanation=reason;
+      let knownVariants=0;
       const owner=repositoryIndex?.methodAt(filePath,site.offset);
+      const mode=explicitMode(site);
       if(owner?.arity && /dependency|runtime|symbol|join|parameter|helper|unsupported/i.test(reason)){
         const evidence=repositoryIndex!.inspectCallers(owner.className,owner.methodName,owner.arity);
         if(evidence.candidateCalls)explanation +=
@@ -56,24 +60,35 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
         const scoped=inspectApexInvocationContexts(filePath,site.offset,site.arguments,resolveExternal,repositoryIndex);
         if(scoped?.contexts.known.length){
           const variants=new Set<string>();
-          for(const args of scoped.arguments){
+          // Do not publish a guessed security mode, even if SELECT is valid.
+          if(mode!==null)for(const args of scoped.arguments){
             const query=args[0];
             if(query?.kind!=="text")continue;
             for(const value of query.values){
               const text=value.trim();
-              if(!/^SELECT\b/i.test(text))continue;
+              if(!/^SELECT\b/i.test(text)||variants.has(text)||variants.size>=MAX_VARIANTS)continue;
               const parsed=parseNestedSoql(text,site.line);
               const fields=extractSoqlExpressionFields(text);
-              if(parsed&&fields.parsed&&!fields.limitations.length)variants.add(text);
+              const declared=classifySoqlMode(text);
+              if(!parsed||!fields.parsed||fields.limitations.length||
+                (mode&&declared!=="UNSPECIFIED"&&declared!==mode))continue;
+              variants.add(text);
+              queries.push({filePath,lineNumber:site.line,query:text,object:parsed.fromName,
+                fields:parsed.fields,subqueries:parsed.subqueries,
+                withUserMode:declared==="USER_MODE"||mode==="USER_MODE",securityMode:declared,
+                dynamicOrigin:true,querySiteId:siteId,queryVariantId:siteId+"#known-"+(variants.size-1),
+                coverage:"KNOWN_CALLER_CONTEXT",...(mode?{dynamicAccessLevel:mode}:{})});
             }
           }
+          knownVariants=variants.size;
           explanation+=" Known repository contexts: "+scoped.contexts.known.length+
-            "; structurally valid query variants in probed contexts: "+variants.size+
+            "; structurally valid query variants in probed contexts: "+knownVariants+
             (scoped.bounded?" (bounded sample).":"." )+
-            " Context evidence only; complete execution coverage is not proven.";
+            (knownVariants?" Known variants are submitted for separate access analysis;":" Context evidence only;")+
+            " complete execution coverage is not proven.";
         }
       }
-      unresolved.push({filePath,lineNumber:site.line,siteId,reason:explanation});
+      unresolved.push({filePath,lineNumber:site.line,siteId,reason:explanation,...(knownVariants?{knownVariants}:{})});
     };
     const failure=flow.failures.get(site.offset);
     if(failure){fail(failure);continue;}
