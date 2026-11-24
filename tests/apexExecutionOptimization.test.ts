@@ -132,3 +132,21 @@ test("terminated paths do not consume the live frontier budget or lose return al
   assert.equal(result.kind,"text");
   if(result.kind==="text")assert.deepEqual(result.values.sort(),["SELECT Id FROM Account","SELECT Id FROM Contact"]);
 });
+
+
+test("repeated immutable Boolean guards preserve correlated paths without increasing the path budget",()=>{
+  const code="public class Builder { public static String build(Boolean full){ String fields='Id'; String obj='Account'; if(full){fields='Name';} if(full){obj='Contact';} return 'SELECT '+fields+' FROM '+obj; } }";
+  const engine=new ApexDataFlowEngine(code,{maxPaths:2});
+  const method=indexApexMethods(code)[0];
+  const result=engine.summarizeMethodReturn(method,[unknown("runtime")]);
+  assert.equal(result.kind,"text");
+  if(result.kind==="text")assert.deepEqual(result.values.sort(),["SELECT Id FROM Account","SELECT Name FROM Contact"]);
+});
+
+test("guard refinement is not reused when a parameter is reassigned",()=>{
+  const code="public class Builder { public static String build(Boolean full){ String fields='Id'; if(full){fields='Name';} full=false; if(full){fields='Email';} return 'SELECT '+fields+' FROM Account'; } }";
+  const engine=new ApexDataFlowEngine(code,{maxPaths:2});
+  const result=engine.summarizeMethodReturn(indexApexMethods(code)[0],[unknown("runtime")]);
+  assert.equal(result.kind,"text");
+  if(result.kind==="text")assert.deepEqual(result.values.sort(),["SELECT Id FROM Account","SELECT Name FROM Account"]);
+});
