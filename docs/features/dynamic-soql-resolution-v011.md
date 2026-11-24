@@ -292,3 +292,14 @@ Member lookup uses the source method's static/instance classification, the centr
 Recognition of a declaration does not imply its runtime value is proven. Instance-field reads through arbitrary object references, constructor-assigned final fields, static initializer blocks, properties/getters, inherited members, incomplete repositories, reflection, and mutable runtime fields remain unproven without dedicated object and control-flow analysis.
 
 Regression tests: tests/apexStaticValueIndex.test.ts (modifier matrix, scope, @TestVisible, blank fields, mutations, cycles) and tests/dynamicSoqlIntegration.test.ts (end-to-end static, final instance and shadowed local SOQL construction).
+
+## Revised value-certainty policy — declared initializer snapshot
+
+**This policy supersedes the earlier mutability restrictions above.** At the user's direction, a class-level scalar field with an evaluable declaration initializer is treated as fixed at its repository-declared value, regardless of final, static-field visibility, TestVisible or possible later reassignment. No class-name whitelist or hardcoded object names are used. This is a deliberate repository-analysis assumption, not a statement of Apex runtime immutability.
+
+- Class-qualified static scalar references and valid this/unqualified instance scalar references use the same policy. Constant aliases and supported scalar expressions are evaluated recursively.
+- Missing, null, ambiguous, cyclic, or unsupported initializers remain unresolved. Static and instance scoping is retained. Constructor-only initialization, arbitrary instance objects, collection members, and unsupported metadata/runtime inputs remain separate analysis cases.
+- Method-local assignment and query construction still follow the actual tracked execution path; the snapshot policy does not freeze local variables or their collections.
+- The analyzer does not reject a declaration initializer merely because repository code might subsequently write to the field. As an intentional trade-off, later writes can produce runtime query variants not represented by the snapshot. Reports disclose this limitation, including the all-personas High report. This policy does not relax OLS/FLS or change permission grants.
+
+Regression fixtures use the actual nonfinal PRODUCT_APINAME and AUTHORIZED_PRODUCT_APINAME declarations, the nested Product Selector JSON mapping pipeline, mutable and final aliases in unrelated classes, the OTC mapping names, and local reassignment. Re-run the full repository with the same persona/org against the 522 analyzed / 76 unresolved baseline; check individual sites and preserve existing permission findings. Stage 4 remains on hold until this validation.
