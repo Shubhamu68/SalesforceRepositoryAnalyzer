@@ -35,25 +35,25 @@ test("v0.1.1 constant chain: static final aliases, cross-class members, derived 
   assert.deepEqual(idx.resolve("Objects.LIMIT"),{kind:"number",value:12});
 });
 
-test("v0.1.1 private static initializer is provable only if no class code writes it",()=>{
+test("v0.1.1 declared initializer snapshot intentionally uses initial values even with later writes",()=>{
   const idx=index(["PrivateConsts.cls","public class PrivateConsts {\n"+
     " private static String STABLE = 'Id';\n"+
     " private static String LATER = 'Name';\n"+
     " private static String INCREMENTED = 'Phone';\n"+
     " public static void update(){LATER = 'Phone'; INCREMENTED += 'more';}\n}"]);
   expectText(idx,"PrivateConsts.STABLE","Id");
-  expectUnknown(idx,"PrivateConsts.LATER",/assigned after initialization/i);
-  expectUnknown(idx,"PrivateConsts.INCREMENTED",/assigned after initialization/i);
+  expectText(idx,"PrivateConsts.LATER","Name");
+  expectText(idx,"PrivateConsts.INCREMENTED","Phone");
 });
 
-test("v0.1.1 public or protected mutable static fields do not become query constants",()=>{
+test("v0.1.1 public or protected initialized scalar fields participate in the snapshot",()=>{
   const idx=index(["AdvantageConstants.cls","public class AdvantageConstants {\n"+
     " public static String PRODUCT_APINAME = 'Product2';\n"+
     " protected static String ORDER_SUMMARY = 'OrderSummary';\n"+
     " private static final String SECRET = 'Id';\n"+
     " public static final String VERIFIED = 'OrderSummary';\n}"]);
-  expectUnknown(idx,"AdvantageConstants.PRODUCT_APINAME",/externally mutable/i);
-  expectUnknown(idx,"AdvantageConstants.ORDER_SUMMARY",/externally mutable/i);
+  expectText(idx,"AdvantageConstants.PRODUCT_APINAME","Product2");
+  expectText(idx,"AdvantageConstants.ORDER_SUMMARY","OrderSummary");
   expectText(idx,"AdvantageConstants.SECRET","Id");
   expectText(idx,"AdvantageConstants.VERIFIED","OrderSummary");
 });
@@ -71,12 +71,12 @@ test("v0.1.1 pure scalar initializers support String/Integer.valueOf chains",()=
   expectText(idx,"NumericCodes.FULL","TRX_945");
 });
 
-test("v0.1.1 null initializers and prefix increments cannot prove static query fields",()=>{
+test("v0.1.1 snapshot ignores later prefix increments but null initializer stays unknown",()=>{
   const idx=index(["MutableConfig.cls","public class MutableConfig {\n"+
     " private static Integer COUNT = 1;\n"+
     " public static final String FIELD = null;\n"+
     " public static void update(){++COUNT;}\n}"]);
-  expectUnknown(idx,"MutableConfig.COUNT",/assigned after initialization/i);
+  assert.deepEqual(idx.resolve("MutableConfig.COUNT"),{kind:"number",value:1});
   expectUnknown(idx,"MutableConfig.FIELD",/null initializer/i);
 });
 
@@ -114,7 +114,7 @@ test("v0.1.1 missing source, ambiguous class and unsupported initializer are exp
   expectUnknown(only,"Config.FIELD",/label|unsupported/i);
 });
 
-test("real AdvantageConstants declarations: public mutable product names stay unknown but final OTC selectors resolve",()=>{
+test("real AdvantageConstants declarations: initialized nonfinal product names and final OTC selectors resolve",()=>{
   const idx=index(["AdvantageConstants.cls",[
     "public class AdvantageConstants {",
     " public static String AUTHORIZED_PRODUCT_APINAME='Authorized_Product__c';",
@@ -124,14 +124,14 @@ test("real AdvantageConstants declarations: public mutable product names stay un
     " public static final String OTC_DRAFT_INVOICE_CREATION = 'OTC Draft Invoice Creation';",
     "}",
   ].join("\n")]);
-  expectUnknown(idx,"AdvantageConstants.PRODUCT_APINAME",/externally mutable/i);
-  expectUnknown(idx,"AdvantageConstants.AUTHORIZED_PRODUCT_APINAME",/externally mutable/i);
-  expectUnknown(idx,"AdvantageConstants.BILL_ONLY",/externally mutable/i);
+  expectText(idx,"AdvantageConstants.PRODUCT_APINAME","Product2");
+  expectText(idx,"AdvantageConstants.AUTHORIZED_PRODUCT_APINAME","Authorized_Product__c");
+  expectText(idx,"AdvantageConstants.BILL_ONLY","Bill Only");
   expectText(idx,"AdvantageConstants.TRX_SET_945","945");
   expectText(idx,"AdvantageConstants.OTC_DRAFT_INVOICE_CREATION","OTC Draft Invoice Creation");
 });
 
-test("real OTC object mapping constants: Shipment mappings final, OS and ODGS mappings mutable",()=>{
+test("real OTC object mapping constants: all initialized scalar names resolve",()=>{
   const idx=index(["AdvantageConstants.cls",[
     "public class AdvantageConstants {",
     " public static String ORDER_SUMMARY = 'OrderSummary';",
@@ -144,8 +144,8 @@ test("real OTC object mapping constants: Shipment mappings final, OS and ODGS ma
     " public static final String OTC_DRAFT_INVOICE_CREATION = 'OTC Draft Invoice Creation';",
     "}",
   ].join("\n")]);
-  for(const field of ["ORDER_SUMMARY","ORDER_DELIVERY_GROUP_SUMMARY"])
-    expectUnknown(idx,"AdvantageConstants."+field,/externally mutable/i);
+  expectText(idx,"AdvantageConstants.ORDER_SUMMARY","OrderSummary");
+  expectText(idx,"AdvantageConstants.ORDER_DELIVERY_GROUP_SUMMARY","OrderDeliveryGroupSummary");
   expectText(idx,"AdvantageConstants.SHIPMENT","Shipment__c");
   expectText(idx,"AdvantageConstants.SHIPMENT_LINE","ShipmentLine__c");
   expectText(idx,"AdvantageConstants.INVOICE","Invoice__c");
@@ -195,7 +195,7 @@ test("all modifier and scope variants are classified without treating instance f
   }))expectText({resolve:(name:string)=>idx.resolveInstance("ModifierMatrix",name.split(".")[1])} as ApexStaticValueIndex,"ModifierMatrix."+field,expected);
   expectUnknown(idx,"ModifierMatrix.K",/no declaration initializer/i);
   expectUnknown(idx,"ModifierMatrix.L",/no declaration initializer/i);
-  expectUnknown(idx,"ModifierMatrix.M",/externally mutable/i);
+  expectText(idx,"ModifierMatrix.M","Description");
   expectUnknown(idx,"ModifierMatrix.J",/instance field/i);
   const incomplete=idx.resolveInstance("ModifierMatrix","J");
   assert.equal(incomplete.kind,"unknown");
@@ -219,7 +219,7 @@ test("non-primitive or unsupported declarations never become scalar constants",(
   expectUnknown(idx,"NonScalars.PROPERTY",/no supported static scalar initializer/i);
 });
 
-test("@TestVisible exposes otherwise private static member to tests, so nonfinal value is not proven",()=>{
+test("TestVisible and other annotations do not change the initializer snapshot policy",()=>{
   const idx=index(["TestVisibleFields.cls",[
     "public class TestVisibleFields {",
     " @TestVisible",
@@ -228,7 +228,7 @@ test("@TestVisible exposes otherwise private static member to tests, so nonfinal
     " private static String INTERNAL = 'CreatedDate';",
     "}",
   ].join("\n")]);
-  expectUnknown(idx,"TestVisibleFields.OVERRIDABLE",/externally mutable/i);
+  expectText(idx,"TestVisibleFields.OVERRIDABLE","Name");
   expectText(idx,"TestVisibleFields.IMMUTABLE","Id");
   expectText(idx,"TestVisibleFields.INTERNAL","CreatedDate");
 });
@@ -249,7 +249,17 @@ test("unqualified references respect static and instance member scope",()=>{
   assert.equal(invalid?.kind,"unknown");
   if(invalid?.kind==="unknown")assert.match(invalid.reason,/instance member.*static/i);
   const variable=idx.resolveUnqualified("ScopedFields","MUTABLE_INSTANCE",false);
-  assert.equal(variable?.kind,"unknown");
-  if(variable?.kind==="unknown")assert.match(variable.reason,/not final/i);
+  assert.deepEqual(variable,{kind:"text",values:["Phone"]});
   assert.equal(idx.resolveUnqualified("ScopedFields","NO_SUCH_FIELD",false),undefined);
+});
+
+test("snapshot policy resolves mutable aliases across unrelated classes without naming conventions",()=>{
+  const idx=index(
+    ["Names.cls","public class Names { global static String PREFIX = 'Order'; private static String SUFFIX = 'Summary'; public static String API = PREFIX + SUFFIX; }"],
+    ["Settings.cls","public class Settings { public static String TARGET = Names.API; public String FIELD = 'Id'; public String MISSING; public String EMPTY = null; }"],
+  );
+  expectText(idx,"Settings.TARGET","OrderSummary");
+  assert.deepEqual(idx.resolveInstance("Settings","FIELD"),{kind:"text",values:["Id"]});
+  assert.equal(idx.resolveInstance("Settings","MISSING").kind,"unknown");
+  assert.equal(idx.resolveInstance("Settings","EMPTY").kind,"unknown");
 });
