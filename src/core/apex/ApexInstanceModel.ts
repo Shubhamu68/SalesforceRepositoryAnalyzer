@@ -1,4 +1,4 @@
-import {maskApexSource,matchingPair,splitApexTopLevel,parseApexStatements,stripApexComments,type SourceNode} from "./ApexSourceModel.js";
+import {maskApexSource,matchingPair,splitApexTopLevel,parseApexStatements,stripApexComments,type SourceNode,type ApexRepositorySyntaxInventory} from "./ApexSourceModel.js";
 import {evaluateApexExpression,addApexValues,unknown,type ApexValue} from "./ApexValueEvaluator.js";
 import {knownBoolean} from "./ApexScalarOperators.js";
 
@@ -19,9 +19,9 @@ const scalar=/^(?:(?:public|private|protected|global|final|transient)\s+)*(?:Str
  * modeled. No guessed inheritance, properties, dynamic dispatch or effects. */
 export class ApexInstanceIndex {
   private readonly shapes=new Map<string,ClassShape[]>();
-  constructor(files:readonly {filePath:string;source:string}[]){
+  constructor(files:readonly {filePath:string;source:string}[],syntax?:ApexRepositorySyntaxInventory){
     for(const file of files){
-      const source=file.source,masked=maskApexSource(source);
+      const source=file.source,masked=syntax?.masked(source)??maskApexSource(source);
       const classes:Array<{name:string;start:number;end:number}>=[];
       for(const hit of masked.matchAll(/\bclass\s+([A-Za-z_]\w*)\s*([^{;]*)\{/gi)){
         const open=hit.index!+hit[0].length-1,close=matchingPair(masked,open,"{","}");
