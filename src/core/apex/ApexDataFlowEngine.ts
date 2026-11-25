@@ -690,6 +690,7 @@ export class ApexDataFlowEngine {
       // captured a known value at the same invocation.
       for(const site of this.sites){
         if(site.offset<node.start||site.offset>=node.end||
+          (node.loopVariable!==undefined&&site.offset<headEnd)||
           (this.activeQueryOffset!==undefined&&site.offset!==this.activeQueryOffset))continue;
         const prior=this.captures.get(site.offset)??[];
         if(prior.some(item=>item.query.kind==="unknown"))continue;
