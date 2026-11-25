@@ -1,3 +1,4 @@
+import {apexMapKey} from "./ApexValueEvaluator.js";
 import {collectApexReferences,isApexReference,referenceMember,replaceApexReferences} from "./ApexReferenceState.js";
 import {proveInstanceArgumentEffects} from "./ApexInstanceEffects.js";
 import {apexSymbols,type ApexSymbolTable} from "./ApexSymbolTable.js";
@@ -414,14 +415,14 @@ export class ApexDataFlowEngine {
         else if(action==="set"&&args.length===2&&arg.kind==="number"&&Number.isInteger(arg.value)&&arg.value>=0&&arg.value<existing.items.length&&matches(args[1]))next={...existing,items:existing.items.map((item,i)=>i===arg.value?args[1]:item)};
         else next=unknown("Unsupported custom Apex list mutation: "+operation);
       }else if(existing.kind==="map"){
-        const key=arg?asText(arg):undefined;
-        if(action==="clear"&&args.length===0)next={kind:"map",entries:[]};
-        else if(action==="put"&&args.length===2&&key!==undefined&&args[1].kind!=="unknown")
-          next={kind:"map",entries:[...existing.entries.filter(([k])=>k!==key),[key,args[1]]]};
-        else if(action==="remove"&&args.length===1&&key!==undefined)
-          next={kind:"map",entries:existing.entries.filter(([k])=>k!==key)};
-        else if(action==="putall"&&args.length===1&&arg?.kind==="map")
-          next={kind:"map",entries:[...existing.entries.filter(([k])=>!arg.entries.some(([other])=>other===k)),...arg.entries]};
+        const key=arg?apexMapKey(existing,arg):null;
+        if(action==="clear"&&args.length===0)next={...existing,entries:[]};
+        else if(action==="put"&&args.length===2&&key!==null&&args[1].kind!=="unknown")
+          next={...existing,entries:[...existing.entries.filter(([k])=>k!==key),[key,args[1]]]};
+        else if(action==="remove"&&args.length===1&&key!==null)
+          next={...existing,entries:existing.entries.filter(([k])=>k!==key)};
+        else if(action==="putall"&&args.length===1&&arg?.kind==="map"&&existing.keyType===arg.keyType)
+          next={...existing,entries:[...existing.entries.filter(([k])=>!arg.entries.some(([other])=>other===k)),...arg.entries]};
         else next=unknown("Map."+operation+" has an unproven key/value or unsupported mutation: "+
           (args.find(v=>v.kind==="unknown")?.kind==="unknown"?cause(args.find(v=>v.kind==="unknown")!):expr));
       }else{
