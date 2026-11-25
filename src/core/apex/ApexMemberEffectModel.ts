@@ -37,6 +37,7 @@ export class ApexMemberEffectModel{
       const end=hit[4]==="="?this.masked.indexOf(";",hit.index!+hit[0].length):hit.index!+hit[0].length-1;
       if(end<0||top[end-open]!==1)continue;
       const expression=source.slice(hit.index!+hit[0].length,end).trim();
+      if(hit[4]==="="&&!/^(?:'(?:\\.|[^'\\])*'|true|false|null|-?\d+(?:\.\d+)?)$/i.test(expression))continue;
       const initial=hit[4]===";"?{kind:"null"} as ApexValue:evaluateApexExpression(expression,{values:new Map()});
       if(!["text","number","null"].includes(initial.kind))continue;
       const name=hit[3].toLowerCase();
@@ -167,7 +168,7 @@ export class ApexMemberEffectModel{
     this.safe.set(method,false);
     if(!this.outerMethods.has(method)||!method.isStatic||method.visibility!=="private")return false;
     const types=this.types(method);
-    const check=(source:string):boolean=>{
+    const check=(source:string,statement=false):boolean=>{
       let visible=maskApexSource(source);
       if(/\b(?:insert|update|upsert|delete|undelete|merge|throw|switch|try|while|do)\b/i.test(visible))return false;
       // Recognize only platform constructors and independently proven inert
@@ -188,6 +189,8 @@ export class ApexMemberEffectModel{
       visible=visible.replace(/\bJSON\.serialize\s*\(\s*([A-Za-z_]\w*)\s*\)\s*\.\s*removeEnd\s*\(\s*\)/gi,(all,receiver:string)=>
         this.inertDtos.has((types.get(receiver.toLowerCase())??"").toLowerCase())?"JSON.serialize("+receiver+")":all);
       if(/\+\+|--|\[[^\]]*\]\s*(?:=|\+=)|(?:[-*/%&|^]=)/.test(visible))return false;
+      const assignments=[...visible.matchAll(/(?:^|[^=!<>])(?:\+=|=(?!=|>))/g)];
+      if(assignments.length>(statement?1:0))return false;
       const write=/^\s*(?:[\w.]+(?:\s*<[\w\s,.<>]+>)?\s+)?((?:[A-Za-z_]\w*\s*\.\s*)?[A-Za-z_]\w*)\s*(?:=(?!=|>)|\+=|[-*/%&|^]=|\+\+|--)/i.exec(visible);
       if(write&&!this.key(method,write[1].replace(/\s/g,""))&&!types.has(write[1].toLowerCase())){
         const [receiver,property]=write[1].replace(/\s/g,"").toLowerCase().split(".");
@@ -224,7 +227,7 @@ export class ApexMemberEffectModel{
       node.kind!=="opaque"&&!(node.kind==="for"&&!node.loopVariable)&&
       node.condition!=="__apex_exception_path_unknown__"&&
       !(node.kind==="statement"&&!/^\s*(?:return\b|break\s*;|continue\s*;|(?:[\w.]+(?:\s*<[\w\s,.<>]+>)?\s+)?[\w.]+\s*(?:=(?!=|>)|\+=|;)|[\w.]+\s*\()/i.test(maskApexSource(node.text??"")))&&
-      check(node.text??"")&&check(node.condition??"")&&check(node.iterable??"")&&
+      check(node.text??"",node.kind==="statement")&&check(node.condition??"")&&check(node.iterable??"")&&
       visit(node.body??[])&&visit(node.otherwise??[]));
     const result=visit(method.body);
     this.safe.set(method,result);return result;
