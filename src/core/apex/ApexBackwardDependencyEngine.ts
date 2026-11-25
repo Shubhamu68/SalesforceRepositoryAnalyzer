@@ -613,6 +613,13 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
             }else if(n.kind==="block"){
               if(!visit(n.body??[],conditional,bindings))return false;
             }else if(n.kind==="for"){
+              // A completed loop that only reads an outer scalar does not
+              // change its reaching value. Reuse the lexical proof used
+              // when resolving arguments inside an active iteration.
+              if(!collection&&apexSymbols(frame.source,frame.methods).isReadOnlyOuterScalar(frame.method,name,n,offset)){
+                note(frame,n.start,"LOOP_OUTER_SCALAR_READ_PROVEN",name);
+                continue;
+              }
               if(!collection||!n.loopVariable||!n.iterable||rx(name).test(maskApexSource(n.iterable)))return blocked("LOOP_SHAPE_UNSUPPORTED");
               const iterable=resolve(frame,n.iterable,n.start,bindings);
               const items=apexIterationValues(iterable.value,MAX_COLLECTION_ITEMS)??(iterable.value.kind==="unknown"&&iterable.runtimeMembers?[]:undefined);

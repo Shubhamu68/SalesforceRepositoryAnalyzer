@@ -74,7 +74,7 @@ export class ApexSymbolTable{
    * This is a source proof, not a runtime-value or collection-alias proof. */
   isReadOnlyOuterScalar(method:IndexedApexMethod,name:string,loop:SourceNode,offset:number):boolean{
     if(loop.kind!=="for"||!loop.loopVariable||!loop.iterable||
-      !/^[A-Za-z_]\w*$/.test(name)||offset<=loop.start||offset>=loop.end)return false;
+      !/^[A-Za-z_]\w*$/.test(name)||offset<=loop.start)return false;
     const key=name.toLowerCase();
     const bindings=this.bindings(method).filter(b=>b.name===key);
     const atEntry=bindings.filter(b=>b.start<=loop.start&&b.end>=loop.end).sort((a,b)=>b.depth-a.depth);
@@ -86,7 +86,7 @@ export class ApexSymbolTable{
       bindings.some(b=>b.start>loop.start&&b.start<loop.end))return false;
     const visible=maskApexSource(this.source.slice(loop.start,loop.end));
     const writes=new RegExp("\\b"+name+"\\s*(?:=(?!=|>)|(?:[+\\-*/%&|^]|<<|>>>?)=|\\+\\+|--)|(?:\\+\\+|--)\\s*"+name+"\\b","i");
-    if(writes.test(visible))return false;
+    if(writes.test(visible)||/\b(?:return|throw|break|continue)\b/i.test(visible))return false;
     const safe=(nodes:readonly SourceNode[]):boolean=>nodes.every(n=>{
       if(n.kind==="opaque"||n.condition==="__apex_exception_path_unknown__"||
         (n.kind==="for"&&!n.loopVariable))return false;

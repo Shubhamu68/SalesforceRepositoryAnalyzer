@@ -294,8 +294,8 @@ test("outer scalar loop reads retain correlated metadata and Field Set candidate
   const result=await new ApexAnalysisEngine(index,metadata).analyze(filePath,ctx=>
     backtrackSoqlPermissionShapes(source,filePath,site,index,ctx.resolveExternal,e=>events.push(e.code)));
   const account=result.queries.filter(q=>q.includes("FROM Account")),contact=result.queries.filter(q=>q.includes("FROM Contact"));
-  assert.deepEqual(fields(account),new Set(["SELECT:Id","SELECT:Industry"]),JSON.stringify(result));
-  assert.deepEqual(fields(contact),new Set(["SELECT:Id","SELECT:Email"]),JSON.stringify(result));
+  assert.deepEqual(fields(account),new Set(["SELECT:Id","SELECT:Industry"]),JSON.stringify({result,events}));
+  assert.deepEqual(fields(contact),new Set(["SELECT:Id","SELECT:Email"]),JSON.stringify({result,events}));
   assert.ok(events.includes("LOOP_OUTER_SCALAR_READ_PROVEN"));
   assert.equal(result.bounded,false);
 });
