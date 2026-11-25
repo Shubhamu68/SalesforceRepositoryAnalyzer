@@ -1,3 +1,4 @@
+import type {ApexCallResolver,ApexArgumentTypes} from "./ApexTypeSystem.js";
 import {countApex,timeApex} from "./ApexPerformance.js";
 import {ApexDataFlowEngine,type ApexFlowOptions} from "./ApexDataFlowEngine.js";
 import type {ApexInvocationSelector} from "./ApexInvocationModel.js";
@@ -23,16 +24,16 @@ function memoRead<T>(cache:Map<string,Promise<T>>,key:string,read:()=>Promise<T>
   if(!pending){pending=read();cache.set(key,pending);}
   return pending;
 }
-export type ApexExternalResolver=(name:string,args:ApexValue[])=>ApexValue|undefined;
+export type ApexExternalResolver=ApexCallResolver;
 export type ApexInvocationAnalysis=ReturnType<ApexDataFlowEngine["analyze"]>&{sites:ApexDataFlowEngine["sites"]};
 /** Feature-independent synchronous invocation analysis using a supplied resolver. */
 export function analyzeApexInvocations(source:string,filePath:string,select:ApexInvocationSelector,
   resolveExternal?:ApexExternalResolver,repositoryIndex?:ApexRepositoryMethodIndex,
   limits?:Pick<ApexFlowOptions,"maxOperations"|"maxPaths"|"maxDepth">):ApexInvocationAnalysis{
-  const resolver:ApexExternalResolver=(name,args)=>{
+  const resolver:ApexExternalResolver=(name,args,types)=>{
     if(name==="Apex.construct"&&args[0]?.kind==="text"&&args[0].values.length===1)
-      return repositoryIndex?.constructInstance(filePath,args[0].values[0],args.slice(1),resolveExternal)??resolveExternal?.(name,args);
-    return resolveExternal?.(name,args);
+      return repositoryIndex?.constructInstance(filePath,args[0].values[0],args.slice(1),resolveExternal,types?.slice(1))??resolveExternal?.(name,args,types);
+    return resolveExternal?.(name,args,types);
   };
   const engine=new ApexDataFlowEngine(source,{...limits,sourceMethods:repositoryIndex?.indexedMethods(filePath,source),selectInvocation:select,resolveExternal:resolver,
     resolvePrivateContexts:owner=>repositoryIndex?.resolvePrivateContexts(filePath,owner,resolveExternal)});
@@ -78,7 +79,7 @@ export class ApexAnalysisEngine {
   const requestedMetadata=new Map<string,CustomMetadataRequest>();
   // A new resolver identity for each pass invalidates cached helper/member summaries.
   const makeResolver=()=>{
-  const baseResolver=(name:string,args:ApexValue[]):ApexValue|undefined=>{
+  const baseResolver=(name:string,args:ApexValue[],types?:ApexArgumentTypes):ApexValue|undefined=>{
     if(name==="System.Label"){
       if(args.length!==1||args[0].kind!=="text"||args[0].values.length!==1)
         return unknown("Custom Label identity is not proven.");
@@ -103,7 +104,7 @@ export class ApexAnalysisEngine {
     if(name==="Apex.construct"){
       const type=args[0];
       if(type?.kind!=="text"||type.values.length!==1)return unknown("Instance type is not proven.");
-      return repositoryIndex?.constructInstance(filePath,type.values[0],args.slice(1),baseResolver);
+      return repositoryIndex?.constructInstance(filePath,type.values[0],args.slice(1),baseResolver,types?.slice(1));
     }
     if(name==="Apex.lazyGetter"){
       if(args.length!==2||args[0].kind!=="text"||args[1].kind!=="text"||args[0].values.length!==1||args[1].values.length!==1)return undefined;
@@ -155,9 +156,9 @@ export class ApexAnalysisEngine {
     }
     return undefined;
   };
-  const resolver=(name:string,args:ApexValue[]):ApexValue|undefined=>
-    baseResolver(name,args) ??
-    repositoryIndex?.evaluateReturn(filePath,name,args,baseResolver);
+  const resolver:ApexExternalResolver=(name,args,types)=>
+    baseResolver(name,args,types) ??
+    repositoryIndex?.evaluateReturn(filePath,name,args,baseResolver,types);
     return {baseResolver,resolver};
   };
   // Bound metadata discovery by passes and distinct requests per query class.
