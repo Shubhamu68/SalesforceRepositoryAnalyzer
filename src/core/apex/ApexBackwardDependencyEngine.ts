@@ -3,7 +3,7 @@ import {apexSymbols} from "./ApexSymbolTable.js";
 import {canonicalApexType,parseApexDeclaration,selectApexOverload,type ApexCallResolver} from "./ApexTypeSystem.js";
 import {ApexDataFlowEngine} from "./ApexDataFlowEngine.js";
 import {directEffectInvocation,memberEffectModel} from "./ApexMemberEffectModel.js";
-import {addApexValues,evaluateApexExpression,listValue,runtimeParameter,textValue,unknown,type ApexValue} from "./ApexValueEvaluator.js";
+import {addApexValues,evaluateApexExpression,listValue,runtimeParameter,textValue,booleanValue,unknown,type ApexValue} from "./ApexValueEvaluator.js";
 import type {ApexRepositoryMethodIndex,ApexCallerSource} from "./ApexRepositoryMethodIndex.js";
 import {countApex} from "./ApexPerformance.js";
 import {readApexReadOperation} from "./ApexReadOperations.js";
@@ -11,7 +11,8 @@ import {evaluateApexReadOperation} from "./ApexValueEvaluator.js";
 import {applyApexStringCollectionMutation,apexIterationValues,mergeApexRuntimeMembers,proveApexAddOnlyIteration,evaluateApexCollectionGuard,isExactMetadataStringList,type ApexRuntimeCollectionMembers} from "./ApexCollectionOperations.js";
 import {knownBoolean,integerArithmetic,splitScalarOperator} from "./ApexScalarOperators.js";
 import {findApexTernary} from "./ApexConditionalInvocation.js";
-import {evaluateReadOnlyApexGuard} from "./ApexGuardModel.js";
+import {evaluateReadOnlyApexGuard,readApexFiniteMembershipGuard,readApexStringPredicate} from "./ApexGuardModel.js";
+import {apexStateIdentity} from "./ApexStateIdentity.js";
 import {evaluateSchemaExpression,evaluateSchemaGlobalGuard,schemaReceiverEligible,isSchemaFieldMap,mutateSchemaFieldMap,schemaEffectArgument,maskSchemaEffectReads} from "./ApexSchemaModel.js";
 import {metadataSelectorHelper} from "./ApexCustomMetadataQueryModel.js";
 import {reportApexDependency,type ApexDependencyObserver} from "./ApexDependencyDiagnostics.js";
@@ -71,7 +72,7 @@ export interface ApexDependencyTrace<A=never>{
 }
 interface Frame {filePath:string;source:string;methods:readonly IndexedApexMethod[];method:IndexedApexMethod;key:string;depth:number;ancestors:readonly string[]}
 type Row=Array<[string,ApexValue]>;
-type Choice={kind:"caller";edge:ApexCallerSource}|{kind:"row";row:Row}|{kind:"branch";truth:boolean};
+type Choice={kind:"caller";edge:ApexCallerSource}|{kind:"row";row:Row}|{kind:"branch";truth:boolean}|{kind:"scalar";value?:string;excluded?:readonly string[]}|{kind:"predicate";predicate:string;truth:boolean};
 class Expand {constructor(readonly key:string,readonly choices:readonly Choice[]){}}
 class Bounded extends Error{}
 
@@ -115,6 +116,7 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
   const root:Frame={filePath,source,methods,method,key:"root",depth:0,ancestors:[]};
   let work=0,edges=0,metadataRows=0,branchEdges=0,bounded=false,effectSummaries=0;
   const effectEngines=new Map<string,ApexDataFlowEngine>();
+  const effectSummariesCache=new Map<string,ApexValue>();
   const found=new Map<string,Evidence>();
   const note=(frame:Frame,offset:number,code:string,symbol?:string,count?:number)=>
     reportApexDependency(policy.observe,code,frame,offset,symbol,count);
@@ -133,6 +135,63 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
       if(prior?.kind==="branch")return prior.truth;
       throw new Expand(key,[{kind:"branch",truth:true},{kind:"branch",truth:false}]);
     };
+    const immutableParameter=(frame:Frame,name:string,type:string):boolean=>{
+      const at=frame.method.parameters.findIndex(p=>p.toLowerCase()===name.toLowerCase());
+      if(at<0||canonicalApexType(frame.method.parameterTypes?.[at])!==type)return false;
+      const body=maskApexSource(frame.source.slice(frame.method.start,frame.method.end));
+      const write=new RegExp("\\b"+name+"\\s*(?:=(?!=|>)|[+\\-*/%&|^]=|\\+\\+|--)|(?:\\+\\+|--)\\s*"+name+"\\b|\\b(?:Boolean|String)\\s+"+name+"\\b","i");
+      return !write.test(body);
+    };
+    const guardAt=(frame:Frame,condition:string,offset:number,locals:Locals,current?:{key:string;evidence:Evidence}):boolean|undefined=>{
+      const symbols=apexSymbols(frame.source,frame.methods);
+      const stringPlatformAllowed=!symbols.hasLocalBinding(frame.method,"String",offset)&&!index?.hasSourceClass("String");
+      const seen=new Map<string,Evidence>();
+      const proof=(id:string):Evidence=>{
+        const key=id.toLowerCase();
+        if(current?.key===key)return current.evidence;
+        const old=seen.get(key);if(old)return old;
+        const next=resolve(frame,id,offset,locals);seen.set(key,next);return next;
+      };
+      const guard=evaluateReadOnlyApexGuard(condition,{
+        typeOf:id=>symbols.lookup(frame.method,id,offset),
+        valueOf:id=>{
+          const p=proof(id);
+          if(exactValue(p)||exact(p))return p.value;
+          if(policy.allowConditionalScalarCandidates&&p.value.kind==="unknown"&&immutableParameter(frame,id,"boolean"))
+            return booleanValue(chooseBranch(frame.key+"|parameter|"+id.toLowerCase()));
+          return stop("Conditional input not exact");
+        },
+        stringPlatformAllowed
+      });
+      if(guard===undefined)return undefined;
+      const known=knownBoolean(guard);
+      if(known!==undefined||!policy.allowConditionalScalarCandidates)return known;
+      const membership=readApexFiniteMembershipGuard(condition,stringPlatformAllowed);
+      if(membership&&immutableParameter(frame,membership.parameter,"string")){
+        const receiver=proof(membership.receiver);
+        if(exact(receiver)&&receiver.value.kind==="collection"){
+          const domain=[...new Set(receiver.value.items)].sort();
+          const key=frame.key+"|parameter|"+membership.parameter.toLowerCase();
+          const choice=choices.get(key);
+          const predicate=choices.get(frame.key+"|predicate|"+membership.parameter.toLowerCase());
+          if(!domain.length)return membership.negated;
+          if(choice?.kind==="scalar"&&choice.value===undefined&&domain.every(v=>choice.excluded?.includes(v)))return membership.negated;
+          if(!choice&&!predicate&&domain.length<=24&&proof(membership.parameter).value.kind==="unknown"){
+            note(frame,offset,"SCALAR_MEMBERSHIP_CANDIDATES",membership.parameter,domain.length);
+            throw new Expand(key,[...domain.map(value=>({kind:"scalar" as const,value})),{kind:"scalar",excluded:domain}]);
+          }
+        }
+      }
+      const predicate=readApexStringPredicate(condition,stringPlatformAllowed);
+      if(predicate&&immutableParameter(frame,predicate.parameter,"string")&&
+         !choices.has(frame.key+"|parameter|"+predicate.parameter.toLowerCase())&&
+         proof(predicate.parameter).value.kind==="unknown"){
+        const key=frame.key+"|predicate|"+predicate.parameter.toLowerCase(),prior=choices.get(key);
+        if(prior?.kind==="predicate")return prior.predicate===predicate.predicate?(prior.truth!==predicate.negated):undefined;
+        throw new Expand(key,[{kind:"predicate",predicate:predicate.predicate,truth:true},{kind:"predicate",predicate:predicate.predicate,truth:false}]);
+      }
+      return undefined;
+    };
     const resolve=(frame:Frame,expression:string,offset:number,locals:Locals=new Map(),members:readonly string[]=[]):Evidence=>{
       tick();
       const expr=clean(expression);
@@ -150,16 +209,8 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
       }
       const ternary=findApexTernary(maskApexSource(expr));
       if(ternary){
-        const symbols=apexSymbols(frame.source,frame.methods);
-        const guard=evaluateReadOnlyApexGuard(expr.slice(0,ternary.question),{
-          typeOf:n=>symbols.lookup(frame.method,n,offset),
-          valueOf:n=>{const proof=resolve(frame,n,offset,locals);return exactValue(proof)||exact(proof)?proof.value:stop("Conditional input not exact");},
-          stringPlatformAllowed:!symbols.hasLocalBinding(frame.method,"String",offset)&&!index?.hasSourceClass("String")
-        });
-        if(guard!==undefined){
-          const truth=knownBoolean(guard)??(policy.allowConditionalScalarCandidates?chooseBranch(frame.key+"|ternary|"+offset+"|"+expr):undefined);
-          if(truth!==undefined)return resolve(frame,truth?expr.slice(ternary.question+1,ternary.colon):expr.slice(ternary.colon+1),offset,locals,members);
-        }
+        const truth=guardAt(frame,expr.slice(0,ternary.question),offset,locals);
+        if(truth!==undefined)return resolve(frame,truth?expr.slice(ternary.question+1,ternary.colon):expr.slice(ternary.colon+1),offset,locals,members);
         return ev(reject("conditional expression is not proven","TERNARY_UNPROVEN"));
       }
       const terms=splitApexTopLevel(expr,"+");
@@ -498,12 +549,17 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
           if(schemaReferenceList||schemaFieldMap)return ev(reject("Schema collection caller alias not proven","SCHEMA_COLLECTION_ALIAS_OR_WRITE"));
           note(frame,offset,"PARAMETER_USE",name,param);
           const choice=choices.get(frame.key+"|caller");
+          const parameterChoice=choices.get(frame.key+"|parameter|"+key);
           if(choice?.kind==="caller"){
             const edge=choice.edge;
             const parent:Frame={filePath:edge.filePath,source:edge.source,methods:edge.methods,method:edge.method,key:frame.key+"|"+edge.filePath+"@"+edge.offset,
               depth:frame.depth+1,ancestors:[...frame.ancestors,frameIdentity(frame)]};
             note(parent,edge.offset,"CALLER_ARGUMENT",name,param);
             base=resolve(parent,edge.expressions[param],edge.offset,new Map(),members);
+          }else if(parameterChoice?.kind==="branch"&&type==="boolean"&&immutableParameter(frame,name,"boolean")){
+            base=ev(booleanValue(parameterChoice.truth));
+          }else if(parameterChoice?.kind==="scalar"&&parameterChoice.value!==undefined&&type==="string"&&immutableParameter(frame,name,"string")){
+            base=ev(textValue(parameterChoice.value));
           }else if(scalar.test(type??"")){
             note(frame,offset,"TYPED_RUNTIME_SCALAR",name);
             base=ev(runtimeParameter(name,type,"Runtime scalar parameter"));
@@ -623,26 +679,15 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
               // only for an explicit inventory consumer.
               const scalarWrites=new RegExp("\\b"+name+"\\s*=(?!=|>)","i");
               if(type==="string"&&!conditional&&scalarWrites.test(visible)&&!additions.some(a=>a.conditional)){
-                const symbols=apexSymbols(frame.source,frame.methods);
                 let reaching=current;
                 for(const a of additions)reaching=concat(reaching,a.evidence);
-                const guard=evaluateReadOnlyApexGuard(n.condition??"",{
-                  typeOf:id=>symbols.lookup(frame.method,id,n.start),
-                  valueOf:id=>{
-                    const proof=id.toLowerCase()===key?reaching:resolve(frame,id,n.start,bindings);
-                    return exactValue(proof)||exact(proof)?proof.value:stop("Scalar guard input not exact");
-                  },
-                  stringPlatformAllowed:!symbols.hasLocalBinding(frame.method,"String",n.start)&&!index?.hasSourceClass("String")
-                });
-                if(guard!==undefined){
-                  const truth=knownBoolean(guard)??(policy.allowConditionalScalarCandidates?chooseBranch(frame.key+"|if|"+n.start):undefined);
-                  if(truth!==undefined){
-                    const chosen=truth?n.body??[]:n.otherwise??[];
-                    if(chosen.some(child=>/\b(?:return|throw|break|continue)\b/i.test(maskApexSource(frame.source.slice(child.start,child.end)))))return blocked("SCALAR_GUARD_PATH_TERMINATES");
-                    note(frame,n.start,"SCALAR_GUARD_RESOLVED",name);
-                    if(!visit(chosen,conditional,bindings))return false;
-                    continue;
-                  }
+                const truth=guardAt(frame,n.condition??"",n.start,bindings,{key,evidence:reaching});
+                if(truth!==undefined){
+                  const chosen=truth?n.body??[]:n.otherwise??[];
+                  if(chosen.some(child=>/\b(?:return|throw|break|continue)\b/i.test(maskApexSource(frame.source.slice(child.start,child.end)))))return blocked("SCALAR_GUARD_PATH_TERMINATES");
+                  note(frame,n.start,"SCALAR_GUARD_RESOLVED",name);
+                  if(!visit(chosen,conditional,bindings))return false;
+                  continue;
                 }
               }
               if(collection&&rx(name).test(maskApexSource(n.condition??""))){
@@ -811,6 +856,15 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
                     if(args.some((v,i)=>!targetPositions.includes(i)&&!exactValue(v)&&
                       (v.annotations.length||v.runtimeMembers||!schemaEffectArgument(v.value,helper.parameterTypes?.[i])||
                        isSchemaFieldMap(v.value)&&!effects.schemaArgumentReadOnly(helper,i))))return blocked("SHARED_HELPER_EFFECT_UNPROVEN");
+                    const values=args.map(v=>v.value);
+                    const effectKey=frame.filePath+"|"+helper.start+"|"+targetPositions[0]+"|"+
+                      apexStateIdentity(new Map(values.map((v,i)=>[String(i),v])),false);
+                    const cached=effectSummariesCache.get(effectKey);
+                    if(cached?.kind==="collection"){
+                      current=ev(mark(listValue([...cached.items],cached.unique)));
+                      note(frame,n.start,"SHARED_HELPER_EFFECT_RESOLVED",helper.name);
+                      continue;
+                    }
                     if(++effectSummaries>MAX_EFFECT_SUMMARIES){note(frame,n.start,"WORK_LIMIT",helper.name);throw new Bounded("Helper effect summary limit");}
                     let engine=effectEngines.get(frame.filePath);
                     if(!engine){
@@ -824,8 +878,9 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
                           /^(?:Schema\.objectSchema|Schema\.fieldMap)$/.test(call)?resolveExternal?.(call,values,types,frame.filePath):undefined});
                       effectEngines.set(frame.filePath,engine);
                     }
-                    const updated=engine.summarizeArgumentEffects(helper,args.map(v=>v.value))?.[targetPositions[0]];
+                    const updated=engine.summarizeArgumentEffects(helper,values)?.[targetPositions[0]];
                     if(updated?.kind!=="collection"||updated.items.length>MAX_COLLECTION_ITEMS)return blocked("SHARED_HELPER_EFFECT_UNPROVEN");
+                    effectSummariesCache.set(effectKey,updated);
                     current=ev(mark(updated));
                     note(frame,n.start,"SHARED_HELPER_EFFECT_RESOLVED",helper.name);
                     continue;

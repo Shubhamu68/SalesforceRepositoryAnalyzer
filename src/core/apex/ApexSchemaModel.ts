@@ -86,6 +86,7 @@ export function evaluateSchemaRead(receiver:ApexValue,operation:string,args:read
   if(receiver.schemaType==="objectToken"||receiver.schemaType==="objectDescribe"){
     if(op==="getdescribe"&&receiver.schemaType==="objectToken")return {...receiver,schemaType:"objectDescribe"};
     if(op==="getname"&&receiver.schemaType==="objectDescribe")return text(receiver.objectApiName);
+    if(op==="getlabel"&&receiver.schemaType==="objectDescribe")return unknown("Localized object label is not a structural Schema fact.");
     if(op==="getsobjecttype"&&receiver.schemaType==="objectDescribe")return {...receiver,schemaType:"objectToken"};
     return unknown("Unsupported Schema object operation.");
   }
@@ -93,6 +94,7 @@ export function evaluateSchemaRead(receiver:ApexValue,operation:string,args:read
   if(receiver.schemaType!=="fieldDescribe")return unknown("Field Describe result is required.");
   const f=receiver.field;
   if(op==="getname")return text(f.name);
+  if(op==="getlabel")return unknown("Localized field label is not a structural Schema fact.");
   if(op==="getsobjectfield")return {...receiver,schemaType:"fieldToken"};
   if(op==="gettype"){
     const value=typeof f.type==="string"?displayType(f.type):undefined;
@@ -117,7 +119,7 @@ export function schemaReceiverEligible(expression:string,type?:string):boolean{
     /^list\s*<\s*schema\.sobjecttype\s*>$/i.test(type??"")||
     /^map\s*<\s*string\s*,\s*schema\.sobjectfield\s*>$/i.test(type??"");
 }
-const operations=new Set(["getdescribe","gettype","getname","getrelationshipname","getreferenceto","isnamefield","getsobjecttype","getsobjectfield","name"]);
+const operations=new Set(["getdescribe","gettype","getname","getlabel","getrelationshipname","getreferenceto","isnamefield","getsobjecttype","getsobjectfield","name"]);
 export const isSchemaReadOperation=(operation:string)=>operations.has(operation.toLowerCase());
 export interface SchemaExpressionContext {
   evaluate:(expression:string)=>ApexValue;
@@ -266,13 +268,13 @@ export function maskSchemaEffectReads(visible:string,types:ReadonlyMap<string,st
   if(schemaAllowed){
     result=result.replace(/\bSchema\s*\.\s*DisplayType\s*\.\s*([A-Za-z_]\w*)\b/gi,(all,kind:string)=>displayType(kind)?"0":all);
   }
-  const roots=/\b(?:Schema\s*\.\s*getGlobalDescribe\s*\(\s*\)\s*\.\s*get\s*\(\s*(?:[A-Za-z_]\w*)?\s*\)|[A-Za-z_]\w*(?=\s*\.))/gi;
+  const roots=/\b(?:Schema\s*\.\s*getGlobalDescribe\s*\(\s*\)\s*\.\s*get\s*\(\s*(?:[A-Za-z_]\w*)?\s*\)|[A-Za-z_]\w*(?=\s*(?:\.|\[)))/gi;
   const transitions:Record<string,Record<string,string>>={
     "schema.sobjecttype":{getdescribe:"schema.describesobjectresult"},
-    "schema.describesobjectresult":{getname:"string",getsobjecttype:"schema.sobjecttype"},
+    "schema.describesobjectresult":{getname:"string",getlabel:"string",getsobjecttype:"schema.sobjecttype"},
     [schemaMapType]:{get:"schema.sobjectfield",containskey:"boolean",size:"integer",isempty:"boolean",values:"list<schema.sobjectfield>"},
     "schema.sobjectfield":{getdescribe:"schema.describefieldresult"},
-    "schema.describefieldresult":{getname:"string",gettype:"schema.displaytype",getrelationshipname:"string",getreferenceto:"list<schema.sobjecttype>",isnamefield:"boolean",getsobjectfield:"schema.sobjectfield"},
+    "schema.describefieldresult":{getname:"string",getlabel:"string",gettype:"schema.displaytype",getrelationshipname:"string",getreferenceto:"list<schema.sobjecttype>",isnamefield:"boolean",getsobjectfield:"schema.sobjectfield"},
     "schema.displaytype":{name:"string"},
     "list<schema.sobjecttype>":{get:"schema.sobjecttype",size:"integer",isempty:"boolean"}
   };
@@ -282,7 +284,8 @@ export function maskSchemaEffectReads(visible:string,types:ReadonlyMap<string,st
     const start=hit.index!;if(start<cursor)continue;
     const root=hit[0];
     // A bare match following a dot is a member, not a typed lexical root.
-    if(/\.\s*$/.test(result.slice(0,start)))continue;
+    let previous=start-1;while(previous>=0&&/\s/.test(result[previous]))previous--;
+    if(result[previous]===".")continue;
     let type=/^Schema\s*\./i.test(root)?(schemaAllowed?"schema.sobjecttype":undefined):canonicalApexType(types.get(root.toLowerCase()));
     if(!type||!transitions[type])continue;
     let end=start+root.length,read=/^Schema\s*\./i.test(root);

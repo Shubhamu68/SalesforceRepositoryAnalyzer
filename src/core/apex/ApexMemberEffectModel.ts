@@ -90,6 +90,11 @@ export class ApexMemberEffectModel{
       body=body.replace(/(?:@\w+\s*)?(?:public|private|global)\s+(?:String|Boolean|Integer|Long|Decimal|Double|Id)\s+([A-Za-z_]\w*)\s*\{\s*get\s*;\s*set\s*;\s*\}/gi,(_all,prop:string)=>{
         props.add(prop.toLowerCase());return "";
       });
+      // Plain scalar UI DTO fields are inert too. Never admit Object,
+      // collection fields, property accessors or nonliteral initializers.
+      body=body.replace(/(?:@\w+\s*)?(?:public|private|global)\s+(?:String|Boolean|Integer|Long|Decimal|Double|Id)\s+([A-Za-z_]\w*)\s*;/gi,(_all,prop:string)=>{
+        props.add(prop.toLowerCase());return "";
+      });
       const constructor=new RegExp("^\\s*(?:public|private|global)\\s+"+name+"\\s*\\(([^()]*)\\)\\s*\\{([\\s\\S]*)\\}\\s*$","i").exec(body);
       if(constructor){
         const parameters=new Set<string>();
