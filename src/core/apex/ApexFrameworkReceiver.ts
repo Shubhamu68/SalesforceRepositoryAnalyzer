@@ -33,7 +33,11 @@ export function supportsReceiverPrefix(method:IndexedApexMethod,offset:number,re
         continue;
       }
       if(node.kind!=="statement")return false;
-      if(node.start<=offset&&offset<node.end)return true;
+      if(node.start<=offset&&offset<node.end){
+        // A selected invocation must be the first evaluated call in this
+        // statement; earlier effects in an argument list cannot be ignored.
+        return /^\s*(?:return\s*)?$/.test(maskApexSource((node.text??"").slice(0,offset-node.start)));
+      }
       const source=(node.text??"").trim().replace(/;\s*$/,"");
       if(/^return\b/i.test(source)){if(!expression(source.slice(6)))return false;continue;}
       const declaration=parseApexDeclaration(maskApexSource(source));
@@ -68,6 +72,13 @@ export function receiverMapSamples(method:IndexedApexMethod,receiver:Instance,li
   // Any ambiguous lexical shadow or write to the selector invalidates the
   // domain refinement. The receiver-prefix proof separately rejects effects.
   if(method.parameters.some(p=>p.toLowerCase()===match[2].toLowerCase()||p.toLowerCase()===match[1].toLowerCase()))return {receivers:[receiver],sampled:false,bounded:false};
+  const shadowed=(nodes:readonly SourceNode[]):boolean=>nodes.some(n=>{
+    const declaration=parseApexDeclaration(maskApexSource(n.text??""));
+    return !!declaration&&[match[1].toLowerCase(),match[2].toLowerCase()].includes(declaration.name.toLowerCase())||
+      !!n.loopVariable&&[match[1].toLowerCase(),match[2].toLowerCase()].includes(n.loopVariable.toLowerCase())||
+      shadowed(n.body??[])||shadowed(n.otherwise??[]);
+  });
+  if(shadowed(method.body))return {receivers:[receiver],sampled:false,bounded:false};
   const samples=keys.slice(0,limit).map(k=>({...receiver,entries:receiver.entries.map(([name,value]):[string,ApexValue]=>[name,name.toLowerCase()===match[2].toLowerCase()?{kind:"number",value:k}:value])}));
   return {receivers:[receiver,...samples],sampled:samples.length>0,bounded:keys.length>limit};
 }
