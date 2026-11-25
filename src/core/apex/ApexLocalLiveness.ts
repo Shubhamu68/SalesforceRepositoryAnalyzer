@@ -2,29 +2,42 @@ import type {ApexEnvironment} from "./ApexValueEvaluator.js";
 import {maskApexSource,type IndexedApexMethod,type SourceNode} from "./ApexSourceModel.js";
 
 /**
- * Conservative liveness for immutable scalar locals at method-root statement
- * boundaries. Declared scalar parameters are also eligible after their
- * last lexical reference. Fields, collections, references and nested locals are not. Raw source references (including strings/comments) are counted
- * conservatively, so bind tokens and unsupported syntax cannot be discarded.
- *
- * Not a general control-flow liveness proof. In particular, never run this
- * projection between loop iterations or inside a nested branch.
+ * Conservative lexical liveness for uniquely declared immutable scalar
+ * locals and parameters, including straight-line nested branch statements.
+ * Raw references include strings/comments and bind tokens. Never project
+ * within a loop: earlier lexical references may execute again.
  */
 export class ApexLocalLiveness {
   private readonly lastReference=new Map<string,number>();
+  private readonly loops:Array<{start:number;end:number}>=[];
   constructor(source:string,method:IndexedApexMethod,stopOffset?:number){
     const names=new Set<string>();
     const parameters=new Set(method.parameters.map(p=>p.toLowerCase()));
     method.parameters.forEach((name,i)=>{
       if(/^(?:String|Boolean|Integer|Long|Decimal|Double|Id|Date|Datetime)$/i.test(method.parameterTypes?.[i]??""))names.add(name.toLowerCase());
     });
-    for(const node of method.body){
-      if(node.kind!=="statement")continue;
-      const declaration=/^(?:final\s+)?(?:String|Boolean|Integer|Long|Decimal|Double|Id)\s+([A-Za-z_]\w*)\s*(?:=|;)/i
-        .exec(maskApexSource(node.text??"").trim());
-      if(declaration&&!parameters.has(declaration[1].toLowerCase()))
-        names.add(declaration[1].toLowerCase());
-    }
+    const declarations=new Map<string,number>();
+    const scalars=new Set<string>();
+    const visit=(nodes:readonly SourceNode[])=>{
+      for(const node of nodes){
+        if(node.kind==="for")this.loops.push({start:node.start,end:node.end});
+        if(node.kind==="statement"){
+          const visible=maskApexSource(node.text??"").trim();
+          const declaration=/^(?:final\s+)?[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*(?:\s*<[\w\s,.<>]+>)?(?:\[\])?\s+([A-Za-z_]\w*)\s*(?:=|;)/i.exec(visible);
+          if(declaration){
+            const name=declaration[1].toLowerCase();
+            declarations.set(name,(declarations.get(name)??0)+1);
+            if(/^(?:final\s+)?(?:String|Boolean|Integer|Long|Decimal|Double|Id|Date|Datetime)\s+/i.test(visible))scalars.add(name);
+          }
+        }
+        visit(node.body??[]);visit(node.otherwise??[]);
+      }
+    };
+    visit(method.body);
+    for(const name of scalars)if(declarations.get(name)===1&&!parameters.has(name))names.add(name);
+    // A declaration shadowing a parameter, including an unsupported local
+    // type, makes lexical ownership ambiguous.
+    for(const name of parameters)if(declarations.has(name))names.delete(name);
     // Include the complete root statement/block that contains the site. A
     // query in a loop can observe later lexical references on its next iteration.
     const root=stopOffset===undefined?undefined:method.body.find(node=>node.start<=stopOffset&&stopOffset<node.end);
@@ -38,7 +51,8 @@ export class ApexLocalLiveness {
   /** Local/parameter scalar values no longer lexically reachable from a subsequent statement cannot
    * distinguish the remaining method execution. Leave all alias-bearing state
    * and unknown ownership alone. */
-  discardDeadScalars(values:ApexEnvironment,statementEnd:number):void {
+  discardDeadScalars(values:ApexEnvironment,statementEnd:number,statementStart?:number):void {
+    if(statementStart!==undefined&&this.loops.some(loop=>loop.start<statementStart&&statementStart<loop.end))return;
     for(const [name,value] of values){
       if(value.kind!=="text"&&value.kind!=="number"&&value.kind!=="unknown"&&value.kind!=="null")continue;
       const last=this.lastReference.get(name.toLowerCase().replace(/^#predicate:/,""));
