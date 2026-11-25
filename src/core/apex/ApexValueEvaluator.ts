@@ -1,3 +1,4 @@
+import type {ApexArgumentTypes,ApexCallResolver} from "./ApexTypeSystem.js";
 import { splitApexTopLevel, stripApexComments, maskApexSource, matchingPair } from "./ApexSourceModel.js";
 import {compareScalars,integerArithmetic,knownBoolean,splitScalarOperator} from "./ApexScalarOperators.js";
 import {findApexTernary} from "./ApexConditionalInvocation.js";
@@ -102,7 +103,8 @@ const MAX_CHARS = 100_000;
 
 export interface ApexExpressionContext {
   values: ReadonlyMap<string,ApexValue>;
-  resolveCall?: (name: string, args: ApexValue[]) => ApexValue | undefined;
+  resolveCall?: ApexCallResolver;
+  argumentTypes?: (expressions:readonly string[])=>ApexArgumentTypes;
 }
 
 function unescapeApex(token: string): string | null {
@@ -348,8 +350,9 @@ export function evaluateApexExpression(
   }
   const allocation=/^new\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(([\s\S]*)\)$/i.exec(expr);
   if(allocation){
-    const args=allocation[2].trim()?splitApexTopLevel(allocation[2],",").map(x=>evaluateApexExpression(x,context,depth+1)):[];
-    return context.resolveCall?.("Apex.construct",[textValue(allocation[1]),...args])??
+    const pieces=allocation[2].trim()?splitApexTopLevel(allocation[2],","):[];
+    const args=pieces.map(x=>evaluateApexExpression(x,context,depth+1));
+    return context.resolveCall?.("Apex.construct",[textValue(allocation[1]),...args],[undefined,...(context.argumentTypes?.(pieces)??pieces.map(()=>undefined))])??
       unknown("Apex constructor "+allocation[1]+" is not proven.");
   }
   // Simple lexical list/index access. A metadata result without ORDER BY
@@ -397,7 +400,7 @@ export function evaluateApexExpression(
         // getFields is also a legitimate repository static helper name.
         // A known lexical receiver must still use the Field Set semantics.
         if(/^[A-Za-z_]\w*$/.test(qualifier)&&!context.values.has(qualifier)){
-          const helper=context.resolveCall?.(name,args);
+          const helper=context.resolveCall?.(name,args,context.argumentTypes?.(pieces));
           if(helper!==undefined)return helper;
         }
         return receiver;
@@ -539,7 +542,7 @@ export function evaluateApexExpression(
         return one!==null?listValue(one.split(argument)):unknown("Split has multiple possible inputs.");
       }
     }
-    return context.resolveCall?.(name,args)??unknown("Unsupported or external Apex method: "+name);
+    return context.resolveCall?.(name,args,context.argumentTypes?.(pieces))??unknown("Unsupported or external Apex method: "+name);
   }
   return unknown("Unsupported Apex expression: "+expr.slice(0,100));
 }
