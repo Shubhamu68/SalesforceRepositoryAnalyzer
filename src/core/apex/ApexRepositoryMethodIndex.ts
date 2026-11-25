@@ -241,7 +241,7 @@ export class ApexRepositoryMethodIndex {
   }
 
   private findMethods(cls:string,name:string,arity:number):IndexedMethod[] {
-    return this.methodsByKey.get(this.methodKey(cls,name,arity))??[];
+    return (this.methodsByKey.get(this.methodKey(cls,name,arity))??[]).filter(entry=>apexSymbols(entry.owner.source,entry.owner.methods).ownerAt(entry.method.start)?.toLowerCase()===cls.toLowerCase());
   }
 
   private scopeId(resolveExternal?: ApexCallResolver):number {
@@ -313,6 +313,8 @@ export class ApexRepositoryMethodIndex {
     if(target.visibility!=="private")return undefined;
     const owner=this.paths.get(path.resolve(filePath));
     if(!owner || !owner.methods.some(method=>method.start===target.start))return undefined;
+    const symbols=apexSymbols(owner.source,owner.methods);
+    if(symbols.ownerAt(target.start)?.toLowerCase()!==owner.className.toLowerCase())return undefined;
     const cacheKey=owner.filePath+"|"+target.start+"|"+this.scopeId(resolveExternal);
     if(this.privateContexts.has(cacheKey))
       return this.privateContexts.get(cacheKey)??undefined;
@@ -355,7 +357,7 @@ export class ApexRepositoryMethodIndex {
           continue;
         }
         const overloads=owner.methods.filter(method=>
-          method.name.toLowerCase()===target.name.toLowerCase()&&
+          symbols.sameOwner(target,method)&&method.name.toLowerCase()===target.name.toLowerCase()&&
           method.parameters.length===expressions.length);
         const selected=selectApexOverload(overloads,expressions.length,apexSymbols(owner.source,owner.methods).argumentTypes(containing,expressions,match.index));
         if(!selected){failed=true;break;}
