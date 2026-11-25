@@ -455,3 +455,18 @@ The live metadata provider now prefers the existing read-only Metadata API readM
 New counters: org.field_set.soap.calls, successes, failures, cumulative_ms; org.field_set.tooling_fallbacks, tooling_inventory.calls/failures, tooling_detail.calls/failures, tooling_fallback_successes, unresolved. SOAP calls are distinct from queryAll counts. Live validation must check both transports, not just a decrease in queryAll failures.
 
 No further speculative execution-engine changes in this patch. The actual Apex classes for the eight budget failures and remaining lost variant are required before source-backed P1 work.
+
+
+## Source-backed execution refinements
+
+Reviewed the six source files supplied with the 67.371 s live baseline. The previous report's exact UTF-16 source offsets match the uploaded source. Four sites at DynamicReportController lines 307, 318, 899, 958 fail at getReportData line 288 (pagination branch; 96/32 or 144/32 paths). The last two are private helper invocations whose caller reaches the budget before their own bodies. LookupFieldComponentController line 192 fails at line 165 (optional filters; 64/32). OMSPatchHandler line 116 fails at line 111 (trailing AND cleanup; 48/32). Both related-list sites fail at their ORDER BY branch (48/32). The OMSQueryService line 5687 SELECT-fragment caller is outside the supplied files. These are observed failure locations, not a claim that every branch contribution has been measured locally.
+
+Shared core changes (no business-specific execution rules):
+- Nested straight-line scalar liveness, preserving loop-carried values; unknown-provenance-only frontier compaction at path pressure keeps known values, distinct runtime symbols and alias topology. No increase to the 32-path/5,000-operation defaults.
+- Invocation-prefix reachability prunes only branches that cannot reach the selected lexical target, outside loops, and avoids retaining post-invocation continuations as live frontier states. Private caller fallback now uses the actual caller argument dependency slice. Selector-agnostic; no security-policy changes.
+- Unknown-loop effect summary recognizes indirect reference escapes (including helper parameters), direct/indexed/compound writes, lexical locals and unproven returns. Runtime while loops preserve their lexical boundaries and remain abstract; known enhanced-for iteration consumes nearest-loop break/continue. Full general traditional for/while/do/exception execution remains deferred.
+- Bounded exact string chains (substring, length, suffix/prefix checks, literal replace, etc.), integer min/max, and lexical indexed reads; unknown runtime strings remain unknown. Partial escapeSingleQuotes evidence is preserved without fabricating content.
+- Custom Metadata LIMIT 1 is supported only when the complete filtered inventory proves zero or one matching row; no arbitrary row selection. Singleton configuration fields can contain null or text templates; a known record can be read through singleton [0]. Unknown binds, ambiguous rows and unsupported query structure remain unresolved.
+- Synthetic regression fixtures mirror the source patterns and exercise non-SOQL invocation selectors. The supplied business classes are not committed.
+
+The Field Set SOAP-first patch has passed its prior CI. Final combined CI and live report comparison are required. Do not interpret a changed budget diagnostic as a fully resolved query; unknown runtime SELECT/object/filter values must still remain REVIEW. The caller of the SELECT-fragment method and actual wrapper type are needed to investigate the lost variant and date serialization precisely. Batch 3 broader language coverage and Stage 4 remain deferred.
