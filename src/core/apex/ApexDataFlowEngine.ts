@@ -1,4 +1,5 @@
 import {countApex,timeApex} from "./ApexPerformance.js";
+import {memberEffectModel,type ApexMemberEffectModel} from "./ApexMemberEffectModel.js";
 import {
   indexApexMethods, maskApexSource, matchingPair, sourceLine, splitApexTopLevel,
   type IndexedApexMethod, type SourceNode,
@@ -38,7 +39,7 @@ export interface ApexFlowOptions {
   maxOperations?: number;
   maxDepth?: number;
 }
-interface State { values: ApexEnvironment; stopped?: boolean; loopControl?:"break"|"continue" }
+interface State { values: ApexEnvironment; stopped?: boolean; loopControl?:"break"|"continue"; effectFrame?:boolean }
 interface FrameResult { states: State[]; returns: ApexValue[] }
 
 /** Identical symbolic states do not represent additional structural query variants. */
@@ -49,7 +50,7 @@ function mergeEquivalentStates(states:State[]):State[] {
     // Completed returns/throws never re-enter the current normal frame.
     // Their return values and invocation evidence have already been recorded
     // independently, so their obsolete environments need not multiply paths.
-    const key=state.stopped?"terminated":(state.loopControl??"normal")+"|"+apexStateIdentity(state.values,false);
+    const key=state.stopped&&!state.effectFrame?"terminated":(state.stopped?"returned|":"")+(state.loopControl??"normal")+"|"+apexStateIdentity(state.values,false);
     if(!distinct.has(key))distinct.set(key,state);
   }
   return [...distinct.values()];
@@ -58,7 +59,7 @@ function mergeEquivalentStates(states:State[]):State[] {
 const DEFAULT_PATHS = 32, DEFAULT_OPERATIONS = 5000, DEFAULT_DEPTH = 6;
 const MAX_LOOP_ITEMS = 100;
 
-function clone(state:State):State {return {values:new Map(state.values),stopped:state.stopped,loopControl:state.loopControl};}
+function clone(state:State):State {return {values:new Map(state.values),stopped:state.stopped,loopControl:state.loopControl,effectFrame:state.effectFrame};}
 /** Replace an abstract collection in this frame, including tracked aliases
  * and references stored in a bounded nested map. Never mutate snapshot objects. */
 function replaceCollectionAliases(state:State,existing:ApexValue,next:ApexValue):boolean{
@@ -125,6 +126,8 @@ export class ApexDataFlowEngine {
   private activeSlice:Set<SourceNode>|undefined;
   private readonly className:string|undefined;
   private currentMethod:IndexedApexMethod|undefined;
+  private readonly effects:ApexMemberEffectModel;
+  private provenEffectCall:string|undefined;
   constructor(readonly source:string,options:ApexFlowOptions={}) {
     countApex("engine.instances");
     this.options={maxPaths:options.maxPaths??DEFAULT_PATHS,
@@ -134,9 +137,10 @@ export class ApexDataFlowEngine {
     const masked=maskApexSource(source);
     this.className=/\bclass\s+([A-Za-z_]\w*)\b/i.exec(masked)?.[1];
     this.methods=options.sourceMethods??indexApexMethods(source);
+    this.effects=memberEffectModel(source,this.methods);
     this.sites=discoverApexInvocations(source,options.selectInvocation??dynamicDatabaseQuerySelector,this.methods);
   }
-  private evaluate(expr:string, state:State, depth:number):ApexValue {
+  private evaluate(expr:string, state:State, depth:number,allowEffects=false):ApexValue {
     const context:ApexExpressionContext={values:state.values,
       resolveCall:(name,args)=>{
         if(name==="Apex.thisField"||name==="Apex.unqualifiedField"){
@@ -195,21 +199,41 @@ export class ApexDataFlowEngine {
         // A target-bearing helper is an invocation probe, not a reusable
         // return summary. A cached return would also suppress captures.
         const capturesTarget=this.activeQueryOffset!==undefined&&candidates[0].start<=this.activeQueryOffset&&this.activeQueryOffset<candidates[0].end;
-        const cacheable=!capturesTarget&&args.every(v=>v.kind==="text"||v.kind==="number"||v.kind==="null"||v.kind==="unknown");
+        const replay=allowEffects&&!capturesTarget&&this.effects.replaySafe(candidates[0])&&
+          (this.effects.fields.size>0||args.some(v=>v.kind==="collection"||v.kind==="map"));
+        const cacheable=!replay&&!capturesTarget&&args.every(v=>v.kind==="text"||v.kind==="number"||v.kind==="null"||v.kind==="unknown");
         const cached=cacheable?this.summaries.get(key):undefined;
         if(cached){countApex("helper.local_cache_hit");return cached;}
         countApex("helper.local_evaluations");
         this.activeCalls.add(key);
         const env=new Map<string,ApexValue>();
         candidates[0].parameters.forEach((p,i)=>env.set(p,args[i]));
+        if(replay){
+          for(const {key} of this.effects.fields.values())env.set(key,state.values.get(key)??unknown("Incoming mutable static state is not proven."));
+          args.forEach((v,i)=>{if(v.kind==="collection"||v.kind==="map")env.set("#effect.arg."+i,v);});
+        }
         let result:FrameResult;
         const previousMethod:IndexedApexMethod|undefined=this.currentMethod;
         this.currentMethod=candidates[0];
         try {
-          result=this.execute(candidates[0].body,[{values:env}],depth+1);
+          result=this.execute(candidates[0].body,[{values:env,effectFrame:replay}],depth+1);
         }finally{
           this.currentMethod=previousMethod;
           this.activeCalls.delete(key);
+        }
+        if(replay){
+          const agreed=(key:string):ApexValue=>{
+            if(this.exceeded||!result.states.length||result.states.some(frame=>frame.loopControl))return unknown("Helper effect exceeds supported execution.");
+            const values=result.states.map(frame=>frame.values.get(key));
+            const first=values[0];
+            return first&&values.every(v=>JSON.stringify(v)===JSON.stringify(first))?first:unknown("Helper effects differ across feasible paths.");
+          };
+          for(const {key} of this.effects.fields.values())state.values.set(key,agreed(key));
+          args.forEach((v,i)=>{if(v.kind==="collection"||v.kind==="map")replaceCollectionAliases(state,v,agreed("#effect.arg."+i));});
+          this.provenEffectCall=name.toLowerCase();
+          countApex("helper.effects.transferred");
+        }else if(allowEffects&&this.effects.fields.size){
+          this.effects.unknownMembers(state.values,"Unproven helper effects on mutable static state.");
         }
         let value:ApexValue;
         if(result.returns.length===0||result.states.some(s=>!s.stopped))
@@ -239,7 +263,7 @@ export class ApexDataFlowEngine {
    * a call is side-effect free, a known List/Set used later in SELECT is no
    * longer a safe complete field inventory. Scalars remain immutable.
    */
-  private taintCollectionsPassedToUnknownCalls(source:string,state:State):void{
+  private taintCollectionsPassedToUnknownCalls(source:string,state:State,provenCall?:string):void{
     if(!source.includes("(") || ![...state.values.values()].some(v=>
       v.kind==="collection"||v.kind==="map"||v.kind==="instance"||v.kind==="instanceList"))return;
     const masked=maskApexSource(source);
@@ -250,7 +274,7 @@ export class ApexDataFlowEngine {
       const name=match[1], open=masked.indexOf("(",match.index);
       const close=matchingPair(masked,open);
       if(close<0)continue;
-      if(pure.test(name)){call.lastIndex=open+1;continue;}
+      if(pure.test(name)||name.toLowerCase()===provenCall){call.lastIndex=open+1;continue;}
       const receiver=name.includes(".")?name.slice(0,name.lastIndexOf(".")):"";
       // add/addAll/clear are handled explicitly as ordered mutations above.
       if(["add","addAll","clear"].includes(name.slice(name.lastIndexOf(".")+1)) &&
@@ -421,18 +445,23 @@ export class ApexDataFlowEngine {
     const validPrefix=!prefix || /^(?:(?:final|static|public|private|protected|global)\s+)*(?:[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*(?:\s*<[\w\s,.<>?]+>)?(?:\[\])?)$/.test(prefix);
     if(assignment&&validPrefix){
       const [,name,operator,rhs]=assignment;
-      const value=this.evaluate(rhs,state,depth);
-      if(operator==="=")state.values.set(name,value);
+      const key=!prefix?this.effects.key(this.currentMethod,name)??name:name;
+      this.provenEffectCall=undefined;
+      const direct=/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\s*\(/.test(rhs.trim())&&matchingPair(maskApexSource(rhs),maskApexSource(rhs).indexOf("("))===rhs.length-1;
+      const value=this.evaluate(rhs,state,depth,direct);
+      const proven=this.provenEffectCall;
+      this.provenEffectCall=undefined;
+      if(operator==="=")state.values.set(key,value);
       else {
-        const former=state.values.get(name);
+        const former=state.values.get(key)??(key!==name?unknown("Incoming mutable static state is not proven."):undefined);
         const added=former?addApexValues(former,value):unknown("No proven previous assignment.");
         if(added.kind==="text"&&added.values.length>this.options.maxPaths)
-          state.values.set(name,unknown("Too many += alternatives for "+name));
+          state.values.set(key,unknown("Too many += alternatives for "+name));
         else if(added.kind==="unknown")
-          state.values.set(name,{...added,reason:"Cannot determine += value of "+name+": "+added.reason});
-        else state.values.set(name,added);
+          state.values.set(key,{...added,reason:"Cannot determine += value of "+name+": "+added.reason});
+        else state.values.set(key,added);
       }
-      this.taintCollectionsPassedToUnknownCalls(rhs,state);
+      this.taintCollectionsPassedToUnknownCalls(rhs,state,proven);
       return;
     }
     // Retained unfamiliar compound assignments/increments must not leave
@@ -455,8 +484,10 @@ export class ApexDataFlowEngine {
     // Standalone same-class helper calls may contain a Database.query() inside
     // their body. Evaluate their arguments without executing arbitrary Apex.
     if(/^(?:(?:this|[A-Za-z_]\w*)\.)?[A-Za-z_]\w*\s*\(/.test(original)){
-      this.evaluate(original,state,depth);
-      this.taintCollectionsPassedToUnknownCalls(original,state);
+      this.provenEffectCall=undefined;
+      this.evaluate(original,state,depth,true);
+      const proven=this.provenEffectCall;this.provenEffectCall=undefined;
+      this.taintCollectionsPassedToUnknownCalls(original,state,proven);
     }
   }
   /** Restrict refinement to immutable parameter usage solely in repeated
@@ -718,8 +749,8 @@ export class ApexDataFlowEngine {
         const receiver=variable.split(".")[0];
         if(effects.locals.has(receiver.toLowerCase())&&
           ![...state.values.keys()].some(key=>key.toLowerCase()===receiver.toLowerCase()))continue;
-        const target=variable.includes(".")?variable.toLowerCase():
-          [...changed.values.keys()].find(key=>key.toLowerCase()===variable.toLowerCase())??variable;
+        const target=this.effects.key(this.currentMethod,variable)??(variable.includes(".")?variable.toLowerCase():
+          [...changed.values.keys()].find(key=>key.toLowerCase()===variable.toLowerCase())??variable);
         const replacement=unknown("Loop may change "+variable+" using runtime values. Iterable "+
           (node.iterable??"(unsupported header)")+": "+(iterable.kind==="unknown"?iterable.reason:
             "iteration count or value shape exceeds supported bounds."));
@@ -793,7 +824,7 @@ export class ApexDataFlowEngine {
         distinct=compactUnknownStates(distinct);
         if(distinct.length<before)countApex("paths.unknown_provenance_compacted",before-distinct.length);
       }
-      if(!this.budget.checkPaths(distinct.filter(frame=>!frame.stopped).length,node.start,owner?.name??"(unknown method)")){
+      if(!this.budget.checkPaths(distinct.filter(frame=>!frame.stopped||frame.effectFrame).length,node.start,owner?.name??"(unknown method)")){
         states=[{values:new Map([...distinct[0].values.keys()].map((k):[string,ApexValue]=>[k,
           unknown("Query path enumeration budget exceeded.")]))}];
       }else states=distinct;
@@ -843,7 +874,7 @@ export class ApexDataFlowEngine {
    * seeded as unknown; the repository cannot infer external runtime callers.
    */
   evaluateArgumentsAt(method:IndexedApexMethod,offset:number,
-    expressions:readonly string[],callerArgs?:readonly ApexValue[]):ApexValue[][] {
+    expressions:readonly string[],callerArgs?:readonly ApexValue[],freshFrameworkEntry=false):ApexValue[][] {
     this.budget.reset();
     this.activeQueryOffset=undefined;
     this.activeStopOffset=offset;
@@ -851,7 +882,9 @@ export class ApexDataFlowEngine {
     this.summaries.clear();
     this.activeSlice=invocationDependencySlice(method.body,offset,expressions.join(" + "));
     this.argumentProbe={offset,expressions:[...expressions],results:[]};
-    const env=new Map<string,ApexValue>();
+    const fresh=freshFrameworkEntry?this.effects.freshEntry(method):undefined;
+    const env=new Map<string,ApexValue>(fresh);
+    if(fresh)countApex("caller.fresh_framework_entry_probes");
     method.parameters.forEach((name,index)=>env.set(name,
       callerArgs?.length===method.parameters.length
         ?callerArgs[index] : runtimeParameter(name,method.parameterTypes?.[index],"Runtime caller parameter: "+name)));
