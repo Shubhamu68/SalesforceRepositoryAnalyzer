@@ -357,8 +357,11 @@ export class SoqlSecurityAnalyzer {
     // and parser diagnostics). The distinct site-level REVIEW remains.
     for(const finding of findings){
       const variant=finding.queryVariantId;
-      if(variant&&queryByLocation.get(variant)?.query.coverage==="KNOWN_CALLER_CONTEXT")
+      const coverage=variant?queryByLocation.get(variant)?.query.coverage:undefined;
+      if(coverage==="KNOWN_CALLER_CONTEXT")
         finding.reason += " Coverage: known repository caller variant only; other execution contexts remain unverified.";
+      if(coverage==="PROVEN_PARTIAL_STRUCTURE")
+        finding.reason += " Coverage: proven partial SOQL structure only; numeric placeholders are synthetic, not runtime values. Other execution contexts remain unverified.";
     }
     return findings;
   }
