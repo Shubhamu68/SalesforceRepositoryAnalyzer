@@ -88,7 +88,9 @@ test("typed symbolic concatenation retains ordered fragments but never becomes e
 test("symbolic runtime pagination and structural inputs retain REVIEW and mask literal contents",()=>{
   const code="public class QueryService { public static void run(Integer pageSize){String q='SELECT Id FROM Account'; q+=' LIMIT '+pageSize; Database.query(q);} }";
   const result=extractDynamicSoqlQueries(code,"QueryService.cls");
-  assert.equal(result.queries.length,0);
+  assert.equal(result.queries.length,1);
+  assert.equal(result.queries[0].coverage,"PROVEN_PARTIAL_STRUCTURE");
+  assert.equal(result.unresolved[0].partialStructureVariants,1);
   assert.equal(result.unresolved.length,1);
   assert.match(result.unresolved[0].reason,/Partial expression evidence.*integer/);
 });
