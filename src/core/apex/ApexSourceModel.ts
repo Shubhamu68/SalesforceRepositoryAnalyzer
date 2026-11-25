@@ -23,6 +23,7 @@ export interface IndexedApexMethod {
   parameters: string[];
   /** Scalar parameter types are retained for bounded symbolic evaluation. */
   parameterTypes?: string[];
+  returnType?:string;
   /** Static methods have no instance-this context. */
   isStatic?:boolean;
   /** Only explicitly private methods permit exhaustive same-class caller tracing. */
@@ -350,7 +351,8 @@ function indexMethodsUncached(source: string,masked=maskApexSource(source)): Ind
     const args=parameters.map((v,i)=>v?.[2]??rawParameters[i].trim().match(/([A-Za-z_]\w*)\s*$/)?.[1]??"").filter(Boolean);
     const parameterTypes=parameters.length===args.length?parameters.map(v=>v?.[1].trim()??""):[];
     const visibility=/\b(private|public|protected|global)\b/i.exec(prefix);
-    methods.push({name:match[1],start:brace+1,end:closeBrace,parameters:args,parameterTypes,
+    const returnType=/([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*(?:\s*<[\w\s,.<>\[\]]+>)?(?:\s*\[\s*\])*)\s*$/.exec(prefix)?.[1];
+    methods.push({name:match[1],start:brace+1,end:closeBrace,parameters:args,parameterTypes,returnType,
       visibility:(visibility?.[1].toLowerCase()??"unspecified") as IndexedApexMethod["visibility"],
       isStatic:/\bstatic\b/i.test(prefix),
       body:parseApexStatements(source,brace+1,closeBrace,masked)});
