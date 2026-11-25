@@ -30,12 +30,47 @@ export function resolveSchemaSnapshot(result:MetadataResult<ApexObjectSchema>|un
   const match=snapshot.fields.find(f=>f.name.toLowerCase()===field.toLowerCase());
   if(!match)return unknown("Schema field "+object+"."+field+" was not established.");
   // Copy only supported structural facts. No FLS or user-specific attributes.
+  return schemaFieldToken(snapshot.name,match);
+}
+
+function schemaFieldToken(objectApiName:string,match:ApexSchemaField):ApexValue{
   const details:ApexSchemaField={name:match.name,
     ...(typeof match.type==="string"?{type:match.type}:{}),
     ...(typeof match.relationshipName==="string"||match.relationshipName===null?{relationshipName:match.relationshipName}:{}),
     ...(Array.isArray(match.referenceTo)&&match.referenceTo.every((v:unknown)=>typeof v==="string"&&name.test(v))?{referenceTo:[...match.referenceTo]}:{}),
     ...(typeof match.nameField==="boolean"?{nameField:match.nameField}:{})};
-  return {kind:"schema",schemaType:"fieldToken",objectApiName:snapshot.name,field:details};
+  return {kind:"schema",schemaType:"fieldToken",objectApiName,field:details};
+}
+
+/** A fresh map per getMap() evaluation; the shared metadata snapshot itself
+ * remains immutable. Describe maps use case-insensitive field-name keys. */
+export function resolveSchemaFieldMap(result:MetadataResult<ApexObjectSchema>|undefined,object:string):ApexValue{
+  const token=resolveSchemaSnapshot(result,object);
+  if(token.kind!=="schema"||token.schemaType!=="objectToken")return token;
+  const fields=result!.value!.fields;
+  if(fields.length>2000)return unknown("Schema field-map inventory exceeds the supported bound.");
+  return {kind:"map",keyType:"schemaField",entries:fields.map(f=>[f.name.toLowerCase(),schemaFieldToken(token.objectApiName,f)])};
+}
+export type ApexSchemaFieldMap=Extract<ApexValue,{kind:"map"}>&{keyType:"schemaField"};
+export function isSchemaFieldMap(value:ApexValue):value is ApexSchemaFieldMap{
+  return value.kind==="map"&&value.keyType==="schemaField";
+}
+/** Only proven direct mutations; do not assume case-folding behavior for
+ * writes to Salesforce's special Describe map or arbitrary putAll sources. */
+export function mutateSchemaFieldMap(map:ApexSchemaFieldMap,operation:string,args:readonly ApexValue[]):ApexValue{
+  const action=operation.toLowerCase();
+  if(action==="clear"&&args.length===0)return {...map,entries:[]};
+  const key=args.length?one(args[0]):undefined;
+  if(key===undefined||key!==key.toLowerCase()||!name.test(key))
+    return unknown("Schema field-map mutation key is not a proven normalized field name.");
+  if(action==="remove"&&args.length===1)return {...map,entries:map.entries.filter(([k])=>k!==key)};
+  const value=args[1];
+  if(action==="put"&&args.length===2&&value?.kind==="schema"&&value.schemaType==="fieldToken"){
+    const entries=map.entries.filter(([k])=>k!==key);
+    if(entries.length>=2000)return unknown("Schema field-map mutation exceeds the supported bound.");
+    return {...map,entries:[...entries,[key,value]]};
+  }
+  return unknown("Schema field-map mutation is unsupported or not proven.");
 }
 
 export function evaluateSchemaRead(receiver:ApexValue,operation:string,args:readonly ApexValue[]):ApexValue|undefined{
@@ -77,7 +112,8 @@ export function evaluateSchemaRead(receiver:ApexValue,operation:string,args:read
 export function schemaReceiverEligible(expression:string,type?:string):boolean{
   return /^Schema\s*\.|\.SObjectType\b|\.getDescribe\s*\(|\.getReferenceTo\s*\(/i.test(expression)||
     /^schema\.(?:sobjecttype|sobjectfield|describesobjectresult|describefieldresult|displaytype)$/i.test(type??"")||
-    /^list\s*<\s*schema\.sobjecttype\s*>$/i.test(type??"");
+    /^list\s*<\s*schema\.sobjecttype\s*>$/i.test(type??"")||
+    /^map\s*<\s*string\s*,\s*schema\.sobjectfield\s*>$/i.test(type??"");
 }
 const operations=new Set(["getdescribe","gettype","getname","getrelationshipname","getreferenceto","isnamefield","getsobjecttype","getsobjectfield","name"]);
 export const isSchemaReadOperation=(operation:string)=>operations.has(operation.toLowerCase());
@@ -131,6 +167,13 @@ export function evaluateSchemaExpression(expr:string,ctx:SchemaExpressionContext
     if(!allowed(direct[1]))return unknown("Schema field token is shadowed.");
     const token=lookup(direct[1],direct[2]);
     return evaluateSchemaRead(token,"getDescribe",[])??token;
+  }
+  const fieldMap=/^([\s\S]+)\.\s*fields\s*\.\s*getMap\s*\(\s*\)$/i.exec(expr);
+  if(fieldMap&&eligible(fieldMap[1].trim())){
+    const object=ctx.evaluate(fieldMap[1]);
+    if(object.kind==="schema"&&(object.schemaType==="objectDescribe"||object.schemaType==="objectToken"))
+      return ctx.resolveCall?.("Schema.fieldMap",[text(object.objectApiName)])??unknown("Typed Schema field map unavailable.");
+    if(object.kind==="unknown")return object;
   }
   const fieldLookup=readApexMemberOperation(expr,n=>/^get$/i.test(n));
   if(fieldLookup&&/^Schema\s*\.\s*getGlobalDescribe\s*\(\s*\)$/i.test(fieldLookup.receiver)){

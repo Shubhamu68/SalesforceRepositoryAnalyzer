@@ -215,8 +215,11 @@ export function evaluateApexExpression(
     evaluate:(part:string)=>evaluateApexExpression(part,context,depth+1),
     resolveCall:context.resolveCall,
     shadowed:(root:string)=>lexicalValue(context.values,root)!==undefined||!!context.schemaShadowed?.(root),
-    receiverEligible:(part:string)=>lexicalValue(context.values,part)?.kind==="schema"||
-      schemaReceiverEligible(part,context.argumentTypes?.([part])?.[0])
+    receiverEligible:(part:string)=>{
+      const value=lexicalValue(context.values,part);
+      return value?.kind==="schema"||!!value&&isSchemaFieldMap(value)||
+        schemaReceiverEligible(part,context.argumentTypes?.([part])?.[0]);
+    }
   };
   if(/^[A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)+$/.test(expr)){
     const schema=evaluateSchemaExpression(expr,schemaContext);if(schema!==undefined)return schema;
@@ -341,11 +344,20 @@ export function evaluateApexExpression(
   // Schema Describe is a metadata dependency, not a method to execute.
   // A caller-supplied read-only snapshot must prove the complete field list.
   const directDescribe=/^([A-Za-z_]\w*)\.SObjectType\.getDescribe\(\)\.fields\.getMap\(\)$/i.exec(expr);
-  if(directDescribe)return context.resolveCall?.("Schema.describeFields",[textValue(directDescribe[1])]) ??
-    unknown("Schema Describe fields are unavailable for "+directDescribe[1]+".");
+  if(directDescribe){
+    if(schemaContext.shadowed(directDescribe[1]))return unknown("Schema Describe object is shadowed.");
+    const object=textValue(directDescribe[1]);
+    const typed=context.resolveCall?.("Schema.fieldMap",[object]);
+    if(typed&&isSchemaFieldMap(typed))return typed;
+    return context.resolveCall?.("Schema.describeFields",[object])??
+      unknown("Schema Describe fields are unavailable for "+directDescribe[1]+".");
+  }
   const describe=/^Schema\.getGlobalDescribe\(\)\.get\(([^)]*)\)\.getDescribe\(\)\.fields\.getMap\(\)$/i.exec(expr);
   if(describe){
     const object=evaluateApexExpression(describe[1],context,depth+1);
+    if(schemaContext.shadowed("Schema"))return unknown("Schema is shadowed.");
+    const typed=context.resolveCall?.("Schema.fieldMap",[object]);
+    if(typed&&isSchemaFieldMap(typed))return typed;
     return context.resolveCall?.("Schema.describeFields",[object]) ??
       unknown("Schema Describe fields are unavailable for the target object.");
   }
@@ -495,7 +507,7 @@ export function evaluateApexExpression(
         if(key===null)return unknown("Map.get key depends on runtime or incompatible input: "+
           (args[0].kind==="unknown"?args[0].reason:"key is not a single scalar."));
         return receiver.entries.find(([item])=>item===key)?.[1] ??
-          unknown("Map.get key "+key+" absent from proven configuration.");
+          (isSchemaFieldMap(receiver)?{kind:"null"}:unknown("Map.get key "+key+" absent from proven configuration."));
       }
     }
     // Pure scalar conversions used by immutable static initializers and

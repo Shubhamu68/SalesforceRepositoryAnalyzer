@@ -3,7 +3,7 @@ import {test} from "node:test";
 import {ApexAnalysisEngine,analyzeApexInvocations} from "../src/core/apex/ApexAnalysisEngine.js";
 import {ApexRepositoryMethodIndex} from "../src/core/apex/ApexRepositoryMethodIndex.js";
 import {evaluateApexExpression,textValue,unknown,listValue,booleanValue,type ApexValue} from "../src/core/apex/ApexValueEvaluator.js";
-import {resolveSchemaSnapshot} from "../src/core/apex/ApexSchemaModel.js";
+import {resolveSchemaSnapshot,resolveSchemaFieldMap} from "../src/core/apex/ApexSchemaModel.js";
 import {traceApexDependencies} from "../src/core/apex/ApexBackwardDependencyEngine.js";
 import type {ApexObjectSchema} from "../src/core/metadata/ApexMetadataProvider.js";
 import {planCustomMetadataRequest,resolveCustomMetadataRows} from "../src/core/apex/ApexCustomMetadataQueries.js";
@@ -218,9 +218,10 @@ const schemaFixture:Record<string,ApexObjectSchema>={
     {name:"ParentId",type:"reference",relationshipName:"Parent",referenceTo:["Account"],nameField:false}]}
 };
 const schemaResolver=(method:string,args:ApexValue[])=>{
-  if(method!=="Schema.objectSchema"||args.some(a=>a.kind!=="text"||a.values.length!==1))return undefined;
+  if((method!=="Schema.objectSchema"&&method!=="Schema.fieldMap")||args.some(a=>a.kind!=="text"||a.values.length!==1))return undefined;
   const [object,field]=args.map(a=>a.kind==="text"?a.values[0]:"");
-  return resolveSchemaSnapshot({complete:true,source:"LIVE_ORG",value:schemaFixture[object.toLowerCase()]},object,field);
+  const result={complete:true,source:"LIVE_ORG" as const,value:schemaFixture[object.toLowerCase()]};
+  return method==="Schema.fieldMap"?resolveSchemaFieldMap(result,object):resolveSchemaSnapshot(result,object,field);
 };
 test("typed Schema field reads preserve enum equality, relationship names, singleton reference tokens and name fields",()=>{
   const context={values:new Map<string,ApexValue>(),resolveCall:schemaResolver};
@@ -291,5 +292,31 @@ test("backward Schema traversal follows a local reference list and rejects a mut
     const back=traceApexDependencies(source,filePath,{expression:"refs[0].getDescribe().getName()",offset:source.indexOf("Inspector.consume")},index,schemaResolver);
     if(mutation)assert.ok(back.candidates.every(c=>c.value.kind==="unknown"),JSON.stringify(back));
     else assert.deepEqual(back.candidates.map(c=>c.value),[textValue("Account")],JSON.stringify(back));
+  }
+});
+
+test("typed Describe maps retain field tokens and case-insensitive keys; ordinary Maps remain case-sensitive",()=>{
+  const context={values:new Map<string,ApexValue>(),resolveCall:schemaResolver};
+  const fields=evaluateApexExpression("Contact.SObjectType.getDescribe().fields.getMap()",context);
+  assert.equal(fields.kind,"map");
+  const local={...context,values:new Map<string,ApexValue>([["fields",fields]])};
+  assert.deepEqual(evaluateApexExpression("fields.get('BIRTHDATE').getDescribe().getName()",local),textValue("Birthdate"));
+  assert.deepEqual(evaluateApexExpression("fields.containsKey('ACCOUNTID')",local),booleanValue(true));
+  assert.deepEqual(evaluateApexExpression("fields.get('Missing__c')",local),{kind:"null"});
+  const regular=evaluateApexExpression("new Map<String,String>{'Name'=>'Name'}",context);
+  assert.deepEqual(evaluateApexExpression("fields.containsKey('NAME')",{...context,values:new Map([["fields",regular]])}),booleanValue(false));
+});
+test("typed field maps use existing forward alias handling and isolate fresh Describe snapshots",()=>{
+  const source="public class Inspector {public static void run(){Map<String,Schema.SObjectField> fields=Contact.SObjectType.getDescribe().fields.getMap();Map<String,Schema.SObjectField> alias=fields;Map<String,Schema.SObjectField> fresh=Contact.SObjectType.getDescribe().fields.getMap();alias.remove('birthdate');fields.put('custom',Schema.SObjectType.Contact.fields.AccountId);Inspector.consume(fields.containsKey('Birthdate'),fresh.containsKey('Birthdate'),alias.get('CUSTOM').getDescribe().getName());}}";
+  const report=analyzeApexInvocations(source,"Inspector.cls",name=>name==="Inspector.consume"?{method:name,argumentIndices:[0,1,2]}:undefined,schemaResolver);
+  assert.deepEqual(report.captures.get(report.sites[0].offset)?.[0]?.arguments,[booleanValue(false),booleanValue(true),textValue("AccountId")],JSON.stringify([...report.failures]));
+});
+test("backward typed map reads replay exact local mutations but reject alias escape",()=>{
+  for(const middle of ["","fields.remove('birthdate');","Map<String,Schema.SObjectField> alias=fields;alias.clear();"]){
+    const source="public class Inspector {public static void run(){Map<String,Schema.SObjectField> fields=Contact.SObjectType.getDescribe().fields.getMap();"+middle+"Inspector.consume(fields.containsKey('Birthdate'));}}";
+    const filePath="Inspector.cls",index=new ApexRepositoryMethodIndex([{filePath,source}]);
+    const back=traceApexDependencies(source,filePath,{expression:"fields.containsKey('Birthdate')",offset:source.indexOf("Inspector.consume")},index,schemaResolver);
+    if(middle.includes("alias"))assert.ok(back.candidates.every(c=>c.value.kind==="unknown"),JSON.stringify(back));
+    else assert.deepEqual(back.candidates.map(c=>c.value),[booleanValue(!middle)],JSON.stringify(back));
   }
 });

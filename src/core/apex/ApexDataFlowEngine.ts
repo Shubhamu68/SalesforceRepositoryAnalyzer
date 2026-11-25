@@ -1,4 +1,5 @@
 import {apexMapKey} from "./ApexValueEvaluator.js";
+import {isSchemaFieldMap,mutateSchemaFieldMap} from "./ApexSchemaModel.js";
 import {applyApexStringCollectionMutation,apexIterationValues} from "./ApexCollectionOperations.js";
 import {collectApexReferences,isApexReference,referenceMember,replaceApexReferences} from "./ApexReferenceState.js";
 import {proveInstanceArgumentEffects} from "./ApexInstanceEffects.js";
@@ -450,6 +451,8 @@ export class ApexDataFlowEngine {
         else if(action==="addall"&&args.length===1&&arg.kind==="instanceList"&&arg.items.every(matches))next={...existing,items:[...existing.items,...arg.items]};
         else if(action==="set"&&args.length===2&&arg.kind==="number"&&Number.isInteger(arg.value)&&arg.value>=0&&arg.value<existing.items.length&&matches(args[1]))next={...existing,items:existing.items.map((item,i)=>i===arg.value?args[1]:item)};
         else next=unknown("Unsupported custom Apex list mutation: "+operation);
+      }else if(isSchemaFieldMap(existing)){
+        next=mutateSchemaFieldMap(existing,operation,args);
       }else if(existing.kind==="map"){
         const key=arg?apexMapKey(existing,arg):null;
         if(action==="clear"&&args.length===0)next={...existing,entries:[]};
@@ -466,7 +469,7 @@ export class ApexDataFlowEngine {
       }
       if(existing.kind==="instanceList"&&[...state.values].some(([key,value])=>key.startsWith("#iterator:")&&value===existing))
         next=unknown("Custom Apex list structure changed during iteration.");
-      if(next.kind==="collection"&&next.items.length>2000||next.kind==="map"&&next.entries.length>200||next.kind==="instanceList"&&next.items.length>100)
+      if(next.kind==="collection"&&next.items.length>2000||next.kind==="map"&&next.entries.length>(isSchemaFieldMap(next)?2000:200)||next.kind==="instanceList"&&next.items.length>100)
         next=unknown("Collection mutation exceeded the bounded inventory size.");
       if(!replaceCollectionAliases(state,existing,next))
         state.values.set(name.includes(".")?name.toLowerCase():name,next);

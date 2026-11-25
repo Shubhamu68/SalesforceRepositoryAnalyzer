@@ -10,7 +10,7 @@ import {readApexReadOperation} from "./ApexReadOperations.js";
 import {evaluateApexReadOperation} from "./ApexValueEvaluator.js";
 import {applyApexStringCollectionMutation,apexIterationValues,mergeApexRuntimeMembers,proveApexAddOnlyIteration,type ApexRuntimeCollectionMembers} from "./ApexCollectionOperations.js";
 import {knownBoolean} from "./ApexScalarOperators.js";
-import {evaluateSchemaExpression,schemaReceiverEligible} from "./ApexSchemaModel.js";
+import {evaluateSchemaExpression,schemaReceiverEligible,isSchemaFieldMap,mutateSchemaFieldMap} from "./ApexSchemaModel.js";
 import {reportApexDependency,type ApexDependencyObserver} from "./ApexDependencyDiagnostics.js";
 
 const clean=(s:string)=>stripApexComments(s).trim();
@@ -188,8 +188,9 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
         if(apexSymbols(frame.source,frame.methods).hasLocalBinding(frame.method,describe[1],offset))
           return ev(reject("shadowed Describe object","DESCRIBE_OBJECT_UNPROVEN"));
         const value=evaluateApexExpression(expr,{values:new Map(),resolveCall:resolveExternal});
-        note(frame,offset,value.kind==="collection"?"DESCRIBE_RESOLVED":"DESCRIBE_UNAVAILABLE");
-        return ev(value,[],value.kind==="collection"?{describeObject:describe[1]}:{});
+        const established=value.kind==="collection"||isSchemaFieldMap(value);
+        note(frame,offset,established?"DESCRIBE_RESOLVED":"DESCRIBE_UNAVAILABLE");
+        return ev(value,[],established?{describeObject:describe[1]}:{});
       }
       // Schema reads share the forward evaluator's typed metadata semantics.
       // Candidate unions, synthetic fragments and runtime collections never
@@ -198,7 +199,7 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
       const schema=evaluateSchemaExpression(expr,{
         evaluate:part=>{
           const v=resolve(frame,part,offset,locals);
-          return v.annotations.length||v.runtimeMembers||v.describeObject?stop("Schema input is not exact"):v.value;
+          return v.annotations.length||v.runtimeMembers||v.describeObject&&!isSchemaFieldMap(v.value)?stop("Schema input is not exact"):v.value;
         },
         resolveCall:resolveExternal,
         shadowed:root=>!!locals.get(root.toLowerCase())||symbolsForSchema.hasLocalBinding(frame.method,root,offset)||
@@ -384,6 +385,7 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
         const collection=/^(?:list|set)<string>$/i.test(type??"");
         const map=/^map</i.test(type??"");
         const schemaReferenceList=/^list<schema\.sobjecttype>$/i.test(type??"");
+        const schemaFieldMap=/^map<string,schema\.sobjectfield>$/i.test(type??"");
         if(defs.length){
           let def=defs[0];
           // Latest unconditional scalar assignment is the reaching
@@ -404,7 +406,7 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
           freshCollection=collection&&/^new\s+(?:List|Set)\s*</i.test(clean(def.expression))&&exact(base);
           after=prefix.slice(def.index+1);
         }else if(param>=0){
-          if(schemaReferenceList)return ev(reject("reference-list caller alias not proven","SCHEMA_REFERENCE_LIST_ALIAS_OR_WRITE"));
+          if(schemaReferenceList||schemaFieldMap)return ev(reject("Schema collection caller alias not proven","SCHEMA_COLLECTION_ALIAS_OR_WRITE"));
           note(frame,offset,"PARAMETER_USE",name,param);
           const choice=choices.get(frame.key+"|caller");
           if(choice?.kind==="caller"){
@@ -465,7 +467,22 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
             // intervening use can escape or change the positional snapshot.
             if(schemaReferenceList)return blocked("SCHEMA_REFERENCE_LIST_ALIAS_OR_WRITE");
             if(map){
-              // Map snapshots must stay immutable; no aliases or writes.
+              // Replay only exact, standalone mutations on a locally
+              // established typed map. Conditional paths and aliases are
+              // deliberately rejected rather than preserving stale fields.
+              if(schemaFieldMap&&isSchemaFieldMap(current.value)&&n.kind==="statement"&&!conditional&&!current.annotations.length&&!current.runtimeMembers){
+                const mutation=new RegExp("^"+name+"\\s*\\.\\s*(clear|remove|put)\\s*\\(([\\s\\S]*)\\)\\s*;$","i").exec(clean(n.text??""));
+                if(mutation){
+                  const args=mutation[2].trim()?splitApexTopLevel(mutation[2],",").map(p=>resolve(frame,p,n.start,bindings)):[];
+                  if(args.some(arg=>arg.annotations.length||arg.runtimeMembers||arg.describeObject||arg.value.kind==="unknown"))return blocked("SCHEMA_MAP_MUTATION_UNPROVEN");
+                  const updated=mutateSchemaFieldMap(current.value,mutation[1],args.map(arg=>arg.value));
+                  if(!isSchemaFieldMap(updated))return blocked("SCHEMA_MAP_MUTATION_UNPROVEN");
+                  current=ev(updated); // drop complete Describe provenance
+                  note(frame,n.start,"SCHEMA_MAP_MUTATION_RESOLVED",name);
+                  continue;
+                }
+              }
+              // Other map snapshots must stay immutable; no aliases or writes.
               if(!rx(name).test(visible.replace(new RegExp("\\b"+name+"\\s*\\.\\s*(?:containsKey|isEmpty|size)\\s*\\(","gi"),"(")))continue;
               return blocked("MAP_ALIAS_OR_WRITE");
             }
@@ -531,7 +548,7 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
                   let extra:ApexRuntimeCollectionMembers=effect.caseOnly?iterable.runtimeMembers:{};
                   if(effect.membership){
                     const receiver=resolve(frame,effect.membership.receiver,n.start,bindings);
-                    if(receiver.value.kind!=="collection"||!receiver.describeObject||receiver.runtimeMembers||
+                    if((receiver.value.kind!=="collection"&&!isSchemaFieldMap(receiver.value))||!receiver.describeObject||receiver.runtimeMembers||
                       !/^map<string,schema\.sobjectfield>$/i.test(apexSymbols(frame.source,frame.methods).lookup(frame.method,effect.membership.receiver,n.start)??""))
                       return blocked("RUNTIME_LOOP_DOMAIN_UNPROVEN");
                     extra={describeObject:receiver.describeObject};

@@ -6,7 +6,7 @@ import {listValue,textValue,unknown,type ApexValue} from "./ApexValueEvaluator.j
 import type {ApexRepositoryMethodIndex} from "./ApexRepositoryMethodIndex.js";
 import {planCustomMetadataRequest,resolveCustomMetadataRows,type CustomMetadataRequest,type CustomMetadataInventory} from "./ApexCustomMetadataQueries.js";
 import type {ApexMetadataProvider} from "../metadata/ApexMetadataProvider.js";
-import {resolveSchemaSnapshot} from "./ApexSchemaModel.js";
+import {resolveSchemaSnapshot,resolveSchemaFieldMap} from "./ApexSchemaModel.js";
 
 type LabelResult=Awaited<ReturnType<NonNullable<ApexMetadataProvider["getCustomLabelValue"]>>>;
 type FieldSetResult=Awaited<ReturnType<NonNullable<ApexMetadataProvider["getFieldSetFields"]>>>;
@@ -165,15 +165,15 @@ export class ApexAnalysisEngine {
       return unknown("Complete Custom Metadata "+request.type+
         (metadata?" rows have not been loaded for this filter context.":" requires a connected authoritative org."));
     }
-    if(name==="Schema.objectSchema"){
-      if((args.length!==1&&args.length!==2)||args.some(v=>v.kind!=="text"||v.scalarType||v.values.length!==1||!/^[A-Za-z_]\w*$/.test(v.values[0])))
+    if(name==="Schema.objectSchema"||name==="Schema.fieldMap"){
+      if((name==="Schema.fieldMap"?args.length!==1:args.length!==1&&args.length!==2)||args.some(v=>v.kind!=="text"||v.scalarType||v.values.length!==1||!/^[A-Za-z_]\w*$/.test(v.values[0])))
         return unknown("Schema object or field identity is not proven.");
       const [object,field]=args.map(v=>v.kind==="text"?v.values[0]:"");
       if(repositoryIndex?.hasSourceClass("Schema")||repositoryIndex?.hasSourceClass(object))
         return unknown("Schema token may be shadowed by repository Apex.");
       const key=object.toLowerCase();
       if(!schemaSnapshots.has(key))requestedSchemas.set(key,object);
-      return resolveSchemaSnapshot(schemaSnapshots.get(key),object,field);
+      return name==="Schema.fieldMap"?resolveSchemaFieldMap(schemaSnapshots.get(key),object):resolveSchemaSnapshot(schemaSnapshots.get(key),object,field);
     }
     if(name==="Schema.describeFields"){
       const object=args[0];
