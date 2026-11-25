@@ -1,7 +1,7 @@
 import type {ApexValue} from "../core/apex/ApexValueEvaluator.js";
 import {proveApexPartialStructure,type ApexPartialStructure} from "../core/apex/ApexPartialStructure.js";
 
-/** Only typed Integer/Long holes in complete numeric value positions.
+/** Only typed Integer/Long numeric slots and exact quoted Id slots.
  * Never assume that runtime String values, field lists, object names, sort
  * expressions, quoted fragments or arbitrary predicates are safe. */
 export function provePartialSoql(value:ApexValue):ApexPartialStructure|undefined{
@@ -16,7 +16,7 @@ export function provePartialSoql(value:ApexValue):ApexPartialStructure|undefined
     for(let i=0;i<prefix.length;i++){
       const ch=prefix[i];
       if(quoted&&ch==="\\"){i++;visible+="  ";continue;}
-      if(ch==="'"){quoted=!quoted;visible+=" ";continue;}
+      if(ch==="'"){quoted=!quoted;if(quoted)openingQuote=i;visible+=" ";continue;}
       if(!quoted&&((ch==="/"&&["/","*"].includes(prefix[i+1]))||(ch==="-"&&prefix[i+1]==="-")))return undefined;
       visible+=quoted?" ":ch;
     }
