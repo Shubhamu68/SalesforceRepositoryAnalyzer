@@ -4,7 +4,6 @@ import {explainUncapturedApexQuery} from "../core/apex/ApexExecutionPathDiagnost
 import type { ApexRepositoryMethodIndex } from "../core/apex/ApexRepositoryMethodIndex.js";
 import {provePartialSoql} from "../analyzer/soqlPartialStructure.js";
 import {proveLocalSoqlPermissionShape} from "../analyzer/soqlSourceStructuralEvidence.js";
-import {aggregatePermissionShapes,simplePermissionShape} from "../analyzer/soqlPermissionAggregation.js";
 import {describePartialApexText,type ApexValue} from "../core/apex/ApexValueEvaluator.js";
 import {describeMalformedSoql} from "../analyzer/soqlReconstructionDiagnostics.js";
 import { classifySoqlMode } from "../analyzer/soqlExecutionMode.js";
@@ -143,10 +142,9 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
       // evidence and its existing sampling budgets. Aggregate source-proven
       // root fields by usage and mode, not by runtime value combinations.
       if(mode!==null&&variants.size===0){
-        const shapes=partialEvidence.flatMap(value=>value.kind==="text"?value.values.flatMap(text=>{
-          const shape=simplePermissionShape(text,site.line);return shape?[shape]:[];
-        }):[]);
-        const texts=[...aggregatePermissionShapes(shapes),...proveLocalSoqlPermissionShape(source,site,repositoryIndex?.indexedMethods(filePath,source))];
+        // A known capture can be only the zero-iteration branch of an
+        // unknown structural loop. Do not use it as independent evidence.
+        const texts=proveLocalSoqlPermissionShape(source,site,repositoryIndex?.indexedMethods(filePath,source));
         for(const text of texts){
           if(variants.has(text)||variants.size>=MAX_VARIANTS)continue;
           const parsed=parseNestedSoql(text,site.line),declared=classifySoqlMode(text);

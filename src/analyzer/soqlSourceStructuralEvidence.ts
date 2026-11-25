@@ -115,6 +115,37 @@ export function proveLocalSoqlPermissionShape(source:string,site:ApexCallSite,me
   }
   const anchor=base.fields.find(f=>f.context==="SELECT")?.fieldPath;
   if(!anchor)return [];
+  // Changing one arm at a time is safe only for independent complete field
+  // list or predicate fragments. Correlated partial identifier pieces could
+  // otherwise manufacture combinations such as ShippingStreet from two
+  // branches that only ever produce BillingStreet or ShippingCity.
+  const key=(f:SoqlPermissionShape["fields"][number])=>f.context+"|"+f.fieldPath.toLowerCase();
+  const baseKeys=new Set(base.fields.map(key));
+  for(let i=0,j=1;i<options.length;i++)if(options[i].length>1){
+    const allowed=new Set<string>();
+    let kind:string|undefined;
+    for(const arm of options[i]){
+      const text=one(arm);
+      if(text===undefined)return [];
+      if(!text.trim())continue;
+      let category:string;
+      if(/^(?:\s*[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\s*,)+\s*$/.test(text)){
+        category="SELECT";
+        for(const field of text.split(",").map(s=>s.trim()).filter(Boolean))allowed.add("SELECT|"+field.toLowerCase());
+      }else if(/\bAND\s*$/i.test(maskSoqlStringsAndComments(text))){
+        category="WHERE";
+        const shape=simplePermissionShape("SELECT "+anchor+" FROM "+base.object+" WHERE "+removeTrailingAnd(text),site.line);
+        if(!shape||shape.mode!=="UNSPECIFIED"||!shape.fields.some(f=>f.context==="WHERE")||
+          shape.fields.some(f=>!["SELECT","WHERE"].includes(f.context)))return [];
+        for(const field of shape.fields.filter(f=>f.context==="WHERE"))allowed.add(key(field));
+      }else return [];
+      if(kind&&kind!==category)return [];
+      kind=category;
+    }
+    const changed=new Set(shapes[j++].fields.map(key));
+    if([...baseKeys].some(k=>!changed.has(k)&&!allowed.has(k))||
+      [...changed].some(k=>!baseKeys.has(k)&&!allowed.has(k)))return [];
+  }
   let count=0;
   const appendShape=(raw:string):boolean=>{
     const value=literal(raw);
@@ -166,7 +197,13 @@ export function proveLocalSoqlPermissionShape(source:string,site:ApexCallSite,me
   // Require no other reference in the target statement, which prevents a
   // nested callback from being mistaken for the selected query argument.
   const visible=maskApexSource(target.text??"");
-  const refs=[...visible.matchAll(new RegExp("\\b"+name+"\\b","gi"))];
+  const invocationStart=site.offset-target.start;
+  const opening=visible.indexOf("(",invocationStart);
+  if(opening<0)return [];
+  // The invocation name can itself be 'query', also a common local variable
+  // name. Exclude only that exact indexed name, not any operand/reference.
+  const withoutMethod=visible.slice(0,invocationStart)+visible.slice(opening);
+  const refs=[...withoutMethod.matchAll(new RegExp("\\b"+name+"\\b","gi"))];
   if(refs.length!==1)return [];
   return aggregatePermissionShapes(shapes);
 }

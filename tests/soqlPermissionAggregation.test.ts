@@ -81,3 +81,14 @@ test("arbitrary UI-selected field list remains a review, not invented fields",()
   assert.equal(result.queries.length,0,JSON.stringify(result));
   assert.equal(result.unresolved.length,1);
 });
+
+test("correlated incomplete identifier pieces cannot manufacture new field combinations",()=>{
+  const code="public class Builder { public static void run(Boolean flag,Date d){ String q='SELECT '+(flag?'Billing':'Shipping')+(flag?'Street':'City')+' FROM Account WHERE CreatedDate >= '+d; Database.query(q); } }";
+  assert.deepEqual(proof(code),[]);
+});
+test("unknown loop or opaque field source cannot be rescued by a known zero-iteration capture",()=>{
+  const code="public class Builder { public static void run(List<String> input){ String q='SELECT Id FROM Account'; for(String field:input){q+=' WHERE '+field+' != null';} Database.query(q); } }";
+  const result=extractDynamicSoqlQueries(code,"Builder.cls");
+  assert.equal(result.queries.length,0,JSON.stringify(result));
+  assert.equal(result.unresolved.length,1);
+});
