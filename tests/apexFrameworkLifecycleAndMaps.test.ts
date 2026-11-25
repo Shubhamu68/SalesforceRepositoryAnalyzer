@@ -98,3 +98,21 @@ test("an unknown declared Id assignment retains type without claiming a business
   assert.equal(result.unresolved.length,1);
   assert.equal(result.queries[0]?.coverage,"PROVEN_PARTIAL_STRUCTURE",JSON.stringify(result));
 });
+
+test("read-only private instance aliases preserve static configuration maps, but writes invalidate them",async()=>{
+  const config="public class Config {public class Item {public String objectName;public String typeName;public Item(String o,String t){objectName=o;typeName=t;}}public static Map<Integer,Item> M=new Map<Integer,Item>{1=>new Item('Account','None'),2=>new Item('Contact','None')};}";
+  const batch="public class Work implements Database.Batchable<SObject>,Database.Stateful{private Integer step;private Map<Integer,Config.Item> settings=Config.M;public Work(Integer step){this.step=step;}public Database.QueryLocator start(Database.BatchableContext bc){if(!settings.containsKey(step))return Database.getQueryLocator('SELECT Id FROM Case');Config.Item item=settings.get(step);String objectName=item.objectName;return Database.getQueryLocator('SELECT Id FROM '+objectName);}}";
+  const files=[{filePath:"Config.cls",source:config},{filePath:"Work.cls",source:batch}];
+  const result=await scan(files,"Work.cls");
+  assert.ok(result.queries.some(q=>q.query==="SELECT Id FROM Account"&&q.coverage==="CONDITIONAL_FRAMEWORK_CONTEXT"),JSON.stringify(result));
+  assert.ok(result.queries.some(q=>q.query==="SELECT Id FROM Contact"&&q.coverage==="CONDITIONAL_FRAMEWORK_CONTEXT"),JSON.stringify(result));
+  const mutated=batch.replace("String objectName=item.objectName;","item.objectName='Lead';String objectName=item.objectName;");
+  const unsafe=await scan([files[0],{filePath:"Work.cls",source:mutated}],"Work.cls");
+  assert.ok(!unsafe.queries.some(q=>q.coverage==="CONDITIONAL_FRAMEWORK_CONTEXT"),JSON.stringify(unsafe));
+});
+test("constructor normal-path scenario with business Id remains conditional and never queries business data",async()=>{
+  const batch="public class Work implements Database.Batchable<SObject>,Database.Stateful {private Id creator;public Work(String name){try{User u=[SELECT Id FROM User WHERE Name=:name LIMIT 1];this.creator=u.Id;}catch(QueryException e){this.creator=null;}}public Database.QueryLocator start(Database.BatchableContext bc){if(creator==null)return Database.getQueryLocator('SELECT Id FROM Case');return Database.getQueryLocator('SELECT Id FROM Account WHERE CreatedById = \\''+creator+'\\'');}}";
+  const result=await scan([{filePath:"Work.cls",source:batch}],"Work.cls");
+  assert.ok(result.queries.some(q=>q.query==="SELECT Id FROM Account WHERE CreatedById = '000000000000000'"&&q.coverage==="CONDITIONAL_FRAMEWORK_CONTEXT"),JSON.stringify(result));
+  assert.equal(result.unresolved.length,1);
+});
