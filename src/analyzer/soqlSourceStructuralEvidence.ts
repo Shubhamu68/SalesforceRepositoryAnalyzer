@@ -1,5 +1,6 @@
 import {indexApexMethods,maskApexSource,matchingPair,splitApexTopLevel,stripApexComments,type IndexedApexMethod,type SourceNode} from "../core/apex/ApexSourceModel.js";
 import {apexSymbols} from "../core/apex/ApexSymbolTable.js";
+import {resolveApexWrapperMemberType} from "../core/apex/ApexSourceValueProofs.js";
 import {findApexTernary} from "../core/apex/ApexConditionalInvocation.js";
 import {evaluateApexExpression,addApexValues,runtimeParameter,textValue,type ApexValue} from "../core/apex/ApexValueEvaluator.js";
 import type {ApexCallSite} from "../core/apex/ApexInvocationModel.js";
@@ -13,25 +14,6 @@ const one=(v:ApexValue):string|undefined=>v.kind==="text"&&v.values.length===1?v
 const literal=(s:string)=>/^'(?:\\.|[^'\\])*'$/s.test(clean(s))?one(evaluateApexExpression(clean(s),{values:new Map()})):undefined;
 const MAX_PIECES=64;
 const MAX_NODES=160;
-
-/** A typed field of a uniquely declared local wrapper. No guessed field type
- * based on a name like 'shipDate'; no inherited or external member lookup. */
-function wrapperFieldType(source:string,type:string,field:string):string|undefined{
-  if(!/^[a-z_]\w*$/i.test(type))return undefined;
-  const masked=maskApexSource(source);
-  const hits=[...masked.matchAll(new RegExp("\\bclass\\s+"+type+"\\s*\\{","gi"))];
-  if(hits.length!==1)return undefined;
-  const open=hits[0].index!+hits[0][0].length-1,end=matchingPair(masked,open,"{","}");
-  if(end<0)return undefined;
-  const inside=masked.slice(open+1,end);
-  const match=[...inside.matchAll(new RegExp("\\b(DateTime|Date|Integer|Long|Decimal|Double|Boolean|Id|String)\\s+"+field+"\\s*;","gi"))];
-  const direct=match.filter(m=>{
-    let depth=0;
-    for(const c of inside.slice(0,m.index)){if(c==="{")depth++;else if(c==="}")depth--;}
-    return depth===0;
-  });
-  return direct.length===1?direct[0][1].toLowerCase():undefined;
-}
 
 function removeTrailingAnd(text:string):string{
   const visible=maskSoqlStringsAndComments(text);
@@ -64,7 +46,7 @@ export function proveLocalSoqlPermissionShape(source:string,site:ApexCallSite,me
     if(/^[A-Za-z_]\w*$/.test(expr))return symbols.lookup(owner,expr,offset);
     const member=/^([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/.exec(expr);
     const type=member?symbols.lookup(owner,member[1],offset):undefined;
-    return type&&member?wrapperFieldType(source,type,member[2]):undefined;
+    return type&&member?resolveApexWrapperMemberType(source,type,member[2]):undefined;
   };
   // No shadowed platform String or ambiguous class declaration.
   if(symbols.lookup(owner,"String",def.n.start)||/\bclass\s+String\b/i.test(maskApexSource(source)))return [];
