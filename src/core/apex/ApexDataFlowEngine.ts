@@ -769,6 +769,11 @@ export class ApexDataFlowEngine {
       // Calls in an unknown-length loop may mutate an outer collection via
       // reference parameters even when no direct collection write is visible.
       for(const source of effects.callSources)this.taintCollectionsPassedToUnknownCalls(source,changed);
+      // Replay safety for an individual helper is not a proof of the number
+      // of times it is called in an unknown-length loop. Do not retain a
+      // static accumulator across an unenumerated callback sequence.
+      if(effects.callSources.length||effects.opaque)
+        this.effects.unknownMembers(changed.values,"Runtime loop may alter mutable static state through a helper.");
       for(const [name,value] of [...changed.values])if(effects.aliasSources.has(name.toLowerCase()))
         replaceCollectionAliases(changed,value,unknown("Runtime loop may transfer a mutable alias."));
       if(effects.opaque)for(const key of changed.values.keys())
