@@ -6,10 +6,10 @@ import {unknown,type ApexEnvironment,type ApexValue} from "./ApexValueEvaluator.
  * topology, including runtime symbol identities. If unknown evidence differs,
  * replace that leaf with an unknown rather than choose one path's evidence.
  * No known/unknown or known/known alternatives are merged by this operation. */
-export function compactUnknownStates<T extends {values:ApexEnvironment;stopped?:boolean}>(states:readonly T[]):T[]{
+export function compactUnknownStates<T extends {values:ApexEnvironment;stopped?:boolean;loopControl?:"break"|"continue"}>(states:readonly T[]):T[]{
   const groups=new Map<string,T[]>();
   for(const state of states){
-    const key=apexStateIdentity(state.values,!!state.stopped,true);
+    const key=(state.loopControl??"normal")+"|"+apexStateIdentity(state.values,!!state.stopped,true);
     const group=groups.get(key)??[];
     group.push(state);groups.set(key,group);
   }
