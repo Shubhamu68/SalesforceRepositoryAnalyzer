@@ -120,11 +120,14 @@ export class ApexMemberEffectModel{
         const dot=name.lastIndexOf(".");
         if(dot>0&&safeMember.test(name.slice(dot+1))){
           const type=types.get(name.slice(0,dot).toLowerCase())??"";
-          if(/^(?:String|List\s*<\s*String\s*>|Set\s*<\s*String\s*>|Map\s*<\s*String\s*,\s*String\s*>|Schema\.FieldSetMember)$/i.test(type))continue;
+          if(/^(?:String|List\s*<\s*String\s*>|Set\s*<\s*String\s*>|Map\s*<\s*String\s*,\s*String\s*>|Schema\.FieldSetMember)$/i.test(type)){
+            if(/^(?:add|addAll|clear|put|putAll|remove)$/i.test(name.slice(dot+1))&&directEffectCall(source.trim().replace(/;$/,""))!==name.toLowerCase())return false;
+            continue;
+          }
         }
         // Allow a uniquely resolved nested local private static helper.
         const candidates=this.methods.filter(m=>m.name.toLowerCase()===name.toLowerCase());
-        if(candidates.length===1&&this.replaySafe(candidates[0]))continue;
+        if(candidates.length===1&&directEffectCall(source.trim().replace(/;$/,""))===name.toLowerCase()&&this.replaySafe(candidates[0]))continue;
         return false;
       }
       return true;
@@ -132,6 +135,7 @@ export class ApexMemberEffectModel{
     const visit=(nodes:readonly SourceNode[]):boolean=>nodes.every(node=>
       node.kind!=="opaque"&&!(node.kind==="for"&&!node.loopVariable)&&
       node.condition!=="__apex_exception_path_unknown__"&&
+      !(node.kind==="statement"&&!/^\s*(?:return\b|break\s*;|continue\s*;|(?:[\w.]+(?:\s*<[\w\s,.<>]+>)?\s+)?[\w.]+\s*(?:=(?!=|>)|\+=|;)|[\w.]+\s*\()/i.test(maskApexSource(node.text??"")))&&
       check(node.text??"")&&check(node.condition??"")&&check(node.iterable??"")&&
       visit(node.body??[])&&visit(node.otherwise??[]));
     const result=visit(method.body);
