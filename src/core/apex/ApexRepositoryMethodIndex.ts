@@ -9,7 +9,7 @@ import { ApexDataFlowEngine } from "./ApexDataFlowEngine.js";
 import {memberEffectModel} from "./ApexMemberEffectModel.js";
 import { ApexRepositorySyntaxInventory, maskApexSource, matchingPair, splitApexTopLevel,
   type IndexedApexMethod } from "./ApexSourceModel.js";
-import { unknown, type ApexValue } from "./ApexValueEvaluator.js";
+import { unknown, runtimeParameter, type ApexValue } from "./ApexValueEvaluator.js";
 import {ApexInstanceIndex} from "./ApexInstanceModel.js";
 import { ApexStaticValueIndex } from "./ApexStaticValueIndex.js";
 import {discoverApexInvocations} from "./ApexInvocationModel.js";
@@ -575,8 +575,11 @@ export class ApexRepositoryMethodIndex {
     if(!candidates.length){
       // Explicitly separate a source-initialized scenario from an observed
       // submission. Public mutable fields may differ at runtime.
-      const value=this.constructInstance(owner.filePath,owner.className,[],resolveExternal,[]);
-      if(value?.kind==="instance")candidates.push({value,hypothetical:true});
+      for(const signature of this.instances.constructorSignatures(owner.className)){
+        const args=signature.parameters.map((name,i)=>runtimeParameter(name,signature.parameterTypes[i],"Conditional constructor input: "+name));
+        const value=this.constructInstance(owner.filePath,owner.className,args,resolveExternal,signature.parameterTypes);
+        if(value?.kind==="instance")candidates.push({value,hypothetical:true});
+      }
     }
     let samples=0,scenarioCount=0;
     for(const {value:original,hypothetical} of candidates){
