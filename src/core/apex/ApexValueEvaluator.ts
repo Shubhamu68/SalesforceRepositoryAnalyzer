@@ -13,7 +13,7 @@ export type ApexValue =
   | { kind: "map"; entries: Array<[string,ApexValue]>; keyType?:"integer"|"string" }
   | { kind: "instance"; className:string; entries: Array<[string,ApexValue]> }
   | { kind: "instanceList"; elementType:string; items:ApexValue[] }
-  | { kind: "record"; entries: Array<[string,ApexValue]> }
+  | { kind: "record"; entries: Array<[string,ApexValue]>; metadataIdentity?:{type:string;developerName:string} }
   | { kind: "records"; items: Array<Array<[string,ApexValue]>> }
   | { kind: "fieldSet"; objectApiName:string; developerName:string }
   | { kind: "null" }
@@ -201,6 +201,8 @@ export function evaluateApexExpression(
   }
   if(instanceMember && lexicalValue(context.values,instanceMember[1])?.kind==="record"){
     const record=lexicalValue(context.values,instanceMember[1])!;
+    if(record.kind==="record"&&record.metadataIdentity)
+      return context.resolveCall?.("Apex.metadataGetInstance",[textValue(record.metadataIdentity.type),textValue(record.metadataIdentity.developerName),textValue(instanceMember[2])])??unknown("Custom Metadata record field is not available.");
     if(record.kind==="record")
       return record.entries.find(([key])=>key.toLowerCase()===instanceMember[2].toLowerCase())?.[1] ??
         unknown("Metadata row field "+instanceMember[2]+" was not completely retrieved.");
@@ -404,6 +406,9 @@ export function evaluateApexExpression(
     const pieces=call[2].trim()?splitApexTopLevel(call[2],","):[];
     const args=pieces.map(x=>evaluateApexExpression(x,context,depth+1));
     const lname=name.toLowerCase();
+    const metadataInstance=/^([A-Za-z_]\w*__mdt)\.getInstance$/i.exec(name);
+    if(metadataInstance&&args.length===1)
+      return context.resolveCall?.("Apex.metadataGetInstance",[textValue(metadataInstance[1]),args[0]])??unknown("Custom Metadata getInstance identity is not proven.");
     if(lname.endsWith(".getfields")&&args.length===0){
       const receiver=evaluateApexExpression(name.slice(0,-10),context,depth+1);
       if(receiver.kind==="fieldSet")
