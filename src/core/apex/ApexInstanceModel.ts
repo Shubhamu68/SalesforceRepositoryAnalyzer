@@ -1,6 +1,6 @@
 import {parseApexClassDeclaration,supportsApexAllocation} from "./ApexClassModel.js";
 import {maskApexSource,matchingPair,splitApexTopLevel,parseApexStatements,stripApexComments,type SourceNode,type ApexRepositorySyntaxInventory} from "./ApexSourceModel.js";
-import {evaluateApexExpression,addApexValues,unknown,type ApexValue} from "./ApexValueEvaluator.js";
+import {evaluateApexExpression,addApexValues,unknown,runtimeParameter,type ApexValue} from "./ApexValueEvaluator.js";
 import {parseApexDeclaration,selectApexOverload,type ApexArgumentTypes,type ApexCallResolver} from "./ApexTypeSystem.js";
 import {knownBoolean} from "./ApexScalarOperators.js";
 
@@ -10,7 +10,7 @@ interface ClassShape {
   name:string;
   filePath:string;
   fields:Array<{name:string;type:string;initializer?:string}>;
-  constructors:Array<{parameters:string[];parameterTypes:string[];body:SourceNode[]}>;
+  constructors:Array<{parameters:string[];parameterTypes:string[];body:SourceNode[];externallyCallable:boolean}>;
   initializationOrder:Array<{field:string;initializer?:string}|{block:SourceNode[]}>;
   supported:boolean;
 }
@@ -73,7 +73,7 @@ export class ApexInstanceIndex {
           if(ctor){
             const params=ctor[1].trim()?splitApexTopLevel(ctor[1],",").map(p=>parseApexDeclaration(p)):[];
             if(params.some(p=>!p))shape.supported=false;
-            else shape.constructors.push({parameters:params.map(p=>p!.name),parameterTypes:params.map(p=>p!.type),body:parseApexStatements(source,boundary+1,end,masked)});
+            else shape.constructors.push({parameters:params.map(p=>p!.name),parameterTypes:params.map(p=>p!.type),externallyCallable:/^(?:public|global)\s+/i.test(visible),body:parseApexStatements(source,boundary+1,end,masked)});
           }else if(!visible){
             shape.initializationOrder.push({block:parseApexStatements(source,boundary+1,end,masked)});
           }else if(/^static$/i.test(visible)){
@@ -89,6 +89,13 @@ export class ApexInstanceIndex {
     }
   }
 
+  /** Source-initialization scenarios are not observed allocations. */
+  constructorSignatures(name:string):readonly {parameters:readonly string[];parameterTypes:readonly string[]}[]{
+    const shapes=this.shapes.get(name.toLowerCase())??[];
+    if(shapes.length!==1||!shapes[0].supported)return [];
+    const constructors=shapes[0].constructors;
+    return constructors.length?constructors.filter(c=>c.externallyCallable).slice(0,4):[{parameters:[],parameterTypes:[]}];
+  }
   construct(name:string,args:readonly ApexValue[],filePath:string,resolve?:Resolver,types?:ApexArgumentTypes):ApexValue|undefined{
     let candidates=this.shapes.get(name.toLowerCase())??[];
     if(!candidates.length&&!name.includes(".")){
@@ -175,7 +182,8 @@ export class ApexInstanceIndex {
         if(operator==="+=")next=previous?addApexValues(previous,next):unknown("Constructor assignment has no proven previous value.");
         if(localKey){parameters.set(localKey,next);continue;}
         if(!field)return false;
-        fields.set(field,next);
+        const type=shape.fields.find(f=>f.name===field)?.type;
+        fields.set(field,next.kind==="unknown"&&!next.fragments?runtimeParameter(shape.name+"."+field,type,next.reason):next);
       }
       return true;
     };
