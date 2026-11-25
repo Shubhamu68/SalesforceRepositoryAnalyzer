@@ -63,7 +63,7 @@ function unresolvedDynamicFindings(sites: readonly UnresolvedDynamicSoql[]): Soq
     declaredMode: "UNSPECIFIED",
     effectiveMode: "UNKNOWN",
     runtimeImpact: "Not assessed",
-    reason: site.knownVariants || site.partialStructureVariants ? `Dynamic SOQL execution coverage is incomplete: ${site.reason} OLS/FLS findings apply only to the proven caller variants or typed numeric-slot structures; unproven paths were not assessed.` : `Dynamic SOQL could not be parsed and verified because ${site.reason} OLS/FLS analysis was not performed for this query.`,
+    reason: site.knownVariants || site.partialStructureVariants || site.conditionalFrameworkVariants ? `Dynamic SOQL execution coverage is incomplete: ${site.reason} OLS/FLS findings apply only to the proven caller variants, conditional framework scenarios or proven partial structures; unproven paths were not assessed.` : `Dynamic SOQL could not be parsed and verified because ${site.reason} OLS/FLS analysis was not performed for this query.`,
   }));
 }
 
@@ -90,6 +90,7 @@ export class SoqlAnalysisService {
     recordSoqlCount("queries.partial_structure", queries.filter(q=>q.coverage==="PROVEN_PARTIAL_STRUCTURE").length);
     recordSoqlCount("queries.known_caller", queries.filter(q=>q.coverage==="KNOWN_CALLER_CONTEXT").length);
     recordSoqlCount("queries.complete", queries.filter(q=>!q.coverage).length);
+    recordSoqlCount("queries.conditional_framework", queries.filter(q=>q.coverage==="CONDITIONAL_FRAMEWORK_CONTEXT").length);
 
     // Keep the pre-existing analyzer path for callers without progress
     // (including CLI/tests). With progress, the SAME preparation/evaluation
@@ -187,6 +188,7 @@ export class SoqlAnalysisService {
     recordSoqlCount("queries.partial_structure", queries.filter(q=>q.coverage==="PROVEN_PARTIAL_STRUCTURE").length);
     recordSoqlCount("queries.known_caller", queries.filter(q=>q.coverage==="KNOWN_CALLER_CONTEXT").length);
     recordSoqlCount("queries.complete", queries.filter(q=>!q.coverage).length);
+    recordSoqlCount("queries.conditional_framework", queries.filter(q=>q.coverage==="CONDITIONAL_FRAMEWORK_CONTEXT").length);
       recordSoqlCount("personas.analyzed", personas.length);
 
       progress?.moveTo("preparing");
