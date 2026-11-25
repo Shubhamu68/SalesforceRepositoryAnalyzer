@@ -7,6 +7,11 @@ import {ApexRepositoryMethodIndex} from "../src/core/apex/ApexRepositoryMethodIn
 import {collectApexLiteralStringReturns} from "../src/core/apex/ApexLiteralReturnEvidence.js";
 import {indexApexMethods} from "../src/core/apex/ApexSourceModel.js";
 import {textValue,type ApexValue} from "../src/core/apex/ApexValueEvaluator.js";
+import {parseApexAccessLevel,defaultApexDatabaseAccessMode} from "../src/core/apex/ApexDatabaseAccessMode.js";
+import {readApexOperandBoundary} from "../src/core/apex/ApexOperandBoundary.js";
+import {maskApexSource} from "../src/core/apex/ApexSourceModel.js";
+import {OBJECT_PERMISSION_KEYS} from "../src/models/ObjectPrivilegeAccess.js";
+import {MATRIX_PERMISSION_KEYS} from "../src/models/ObjectAccessMatrixResult.js";
 
 test("shared backward engine traces non-SOQL collection dependency through callers and loop",()=>{
   const files=[
@@ -48,4 +53,17 @@ test("Apex core never imports SOQL analyzer, scanner, permission or report layer
     const imports=[...source.matchAll(/(?:\bfrom\s*|\bimport\s*\(\s*)['"]([^'"]+)['"]/g)].map(m=>m[1]);
     for(const target of imports)assert.doesNotMatch(target,/(?:^|\/)(?:analyzer|scanner|reporter|services|salesforce|config|models)\//i,name+": "+target);
   }
+});
+
+test("shared access mode and operand parsing do not depend on query grammar",()=>{
+  assert.equal(parseApexAccessLevel("AccessLevel.USER_MODE"),"USER_MODE");
+  assert.equal(parseApexAccessLevel("mode"),null);
+  assert.equal(parseApexAccessLevel(),undefined);
+  assert.equal(defaultApexDatabaseAccessMode(66),"SYSTEM_MODE");
+  assert.equal(defaultApexDatabaseAccessMode(67),"USER_MODE");
+  assert.equal(defaultApexDatabaseAccessMode(),undefined);
+  const input="new Map<String,List<String>>().get('x')[0], rest";
+  assert.equal(readApexOperandBoundary(maskApexSource(input),0)?.end,input.indexOf(", rest"));
+  assert.equal(readApexOperandBoundary("service.call(",0)?.malformed,true);
+  assert.equal(OBJECT_PERMISSION_KEYS,MATRIX_PERMISSION_KEYS);
 });

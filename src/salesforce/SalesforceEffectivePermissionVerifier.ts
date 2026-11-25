@@ -1,5 +1,5 @@
 import type { Persona } from "../models/Persona.js";
-import { MATRIX_PERMISSION_KEYS, type MatrixPermission } from "../models/ObjectAccessMatrixResult.js";
+import { OBJECT_PERMISSION_KEYS, type ObjectPermissionKey } from "../models/ObjectPrivilegeAccess.js";
 import type { SalesforceOrgConnection } from "./SalesforceOrgConnection.js";
 import type { SalesforcePersonaAccessVerifier } from "./SalesforcePersonaAccessVerifier.js";
 import { SalesforceUserFieldAccessGateway, uniformlyDeniedCompoundParent } from "./SalesforceUserFieldAccessGateway.js";
@@ -15,10 +15,10 @@ export interface OrgPermissionEvidence {
   deniedCompoundParent?: string;
 }
 
-type ObjectEvidence = Record<MatrixPermission, OrgPermissionEvidence>;
+type ObjectEvidence = Record<ObjectPermissionKey, OrgPermissionEvidence>;
 type FieldEvidence = Record<"read" | "edit", OrgPermissionEvidence>;
 type ActiveUser = { id: string; profileId: string };
-type PerUser = Record<MatrixPermission, boolean | null>;
+type PerUser = Record<ObjectPermissionKey, boolean | null>;
 type UserObjectAccess = {
   UserId: string;
   IsReadable?: boolean; IsCreatable?: boolean; IsEditable?: boolean; IsDeletable?: boolean;
@@ -139,7 +139,7 @@ export class SalesforceEffectivePermissionVerifier {
 
   private async loadObject(persona: Persona, object: string): Promise<ObjectEvidence> {
     const empty = (message: string): ObjectEvidence => Object.fromEntries(
-      MATRIX_PERMISSION_KEYS.map((permission) => [permission, failureEvidence(message, `${object} ${permission}`)])
+      OBJECT_PERMISSION_KEYS.map((permission) => [permission, failureEvidence(message, `${object} ${permission}`)])
     ) as ObjectEvidence;
     if (!NAME.test(object)) return empty("Invalid Salesforce object API name.");
     let users: ActiveUser[];
@@ -152,7 +152,7 @@ export class SalesforceEffectivePermissionVerifier {
       this.loadCrud(users, object),
       this.loadAdvanced(users, object),
     ]);
-    const permissionResults = Object.fromEntries(MATRIX_PERMISSION_KEYS.map((permission) => {
+    const permissionResults = Object.fromEntries(OBJECT_PERMISSION_KEYS.map((permission) => {
       const values = (OBJECT_CRUD as readonly string[]).includes(permission)
         ? crud.status === "fulfilled" ? crud.value[permission] : null
         : advanced.status === "fulfilled" ? advanced.value[permission] : null;
@@ -164,7 +164,7 @@ export class SalesforceEffectivePermissionVerifier {
     return permissionResults as ObjectEvidence;
   }
 
-  private async loadCrud(users: ActiveUser[], object: string): Promise<Partial<Record<MatrixPermission, (boolean | null)[]>>> {
+  private async loadCrud(users: ActiveUser[], object: string): Promise<Partial<Record<ObjectPermissionKey, (boolean | null)[]>>> {
     const perUser = await concurrently(users, async (user): Promise<Partial<PerUser>> => {
       try {
         const soql = `SELECT UserId, IsReadable, IsCreatable, IsEditable, IsDeletable FROM UserEntityAccess WHERE UserId = '${user.id}' AND EntityDefinition.QualifiedApiName = '${object}'`;
@@ -176,12 +176,12 @@ export class SalesforceEffectivePermissionVerifier {
         return {};
       }
     });
-    const result: Partial<Record<MatrixPermission, (boolean | null)[]>> = {};
+    const result: Partial<Record<ObjectPermissionKey, (boolean | null)[]>> = {};
     for (const permission of OBJECT_CRUD) result[permission] = perUser.map((entry) => entry[permission] ?? null);
     return result;
   }
 
-  private async loadAdvanced(users: ActiveUser[], object: string): Promise<Partial<Record<MatrixPermission, (boolean | null)[]>>> {
+  private async loadAdvanced(users: ActiveUser[], object: string): Promise<Partial<Record<ObjectPermissionKey, (boolean | null)[]>>> {
     const userIds = users.map((u) => u.id);
     const profiles = [...new Set(users.map((u) => u.profileId))];
     const assignments: Assignment[] = [];
@@ -253,7 +253,7 @@ export class SalesforceEffectivePermissionVerifier {
     }
     const byParent = new Map(baseGrants.map((g) => [key(g.ParentId), g]));
     const fieldByParent = new Map(fieldGrants.map((g) => [key(g.ParentId), g]));
-    const out: Partial<Record<MatrixPermission, (boolean | null)[]>> = {};
+    const out: Partial<Record<ObjectPermissionKey, (boolean | null)[]>> = {};
     for (const permission of ALL_RECORDS) out[permission] = users.map((user) => {
       const entries = perUserSets.get(key(user.id));
       if (!entries) return null;

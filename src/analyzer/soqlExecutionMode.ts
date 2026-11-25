@@ -1,3 +1,5 @@
+import { defaultApexDatabaseAccessMode } from "../core/apex/ApexDatabaseAccessMode.js";
+
 /**
  * Version-aware execution-mode model shared by SOQL Security Analysis and Stack Trace.
  *
@@ -96,7 +98,7 @@ export function resolveSoqlExecutionMode(declaredMode: DeclaredSoqlMode, apiVers
     ...base, effectiveMode: "UNKNOWN", enforcement: "UNKNOWN",
     description: "No explicit query mode and no Apex API version metadata; runtime enforcement is unknown.",
   };
-  return version >= 67 ? {
+  return defaultApexDatabaseAccessMode(version) === "USER_MODE" ? {
     ...base, effectiveMode: "USER_MODE", enforcement: "FULL",
     description: `Apex API ${version.toFixed(1)} defaults database queries to user mode.`,
   } : {

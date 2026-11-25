@@ -1,5 +1,6 @@
 import {analyzeApexInvocations,inspectApexInvocationContexts} from "../core/apex/ApexAnalysisEngine.js";
 import {dynamicDatabaseQuerySelector,type ApexCallSite} from "../core/apex/ApexInvocationModel.js";
+import {parseApexAccessLevel} from "../core/apex/ApexDatabaseAccessMode.js";
 import {explainUncapturedApexQuery} from "../core/apex/ApexExecutionPathDiagnostics.js";
 import type { ApexRepositoryMethodIndex } from "../core/apex/ApexRepositoryMethodIndex.js";
 import {provePartialSoql} from "../analyzer/soqlPartialStructure.js";
@@ -32,11 +33,7 @@ export interface DynamicSoqlScanResult {
   unresolved: UnresolvedDynamicSoql[];
 }
 const MAX_VARIANTS = 32;
-function explicitMode(site:ApexCallSite):"USER_MODE"|"SYSTEM_MODE"|undefined|null{
-  if(!site.accessLevelArgument)return undefined;
-  const mode=/^AccessLevel\.(USER_MODE|SYSTEM_MODE)$/i.exec(site.accessLevelArgument.trim());
-  return mode?mode[1].toUpperCase() as "USER_MODE"|"SYSTEM_MODE":null;
-}
+function explicitMode(site:ApexCallSite){return parseApexAccessLevel(site.accessLevelArgument);}
 
 /**
  * A thin, SOQL-specific adapter over the reusable Apex data-flow engine.
