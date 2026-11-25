@@ -568,3 +568,8 @@ Remaining source gaps: live confirmation of the five supplied batches, broader r
 ## Coverage-led milestone plan (2026-11-25)
 
 See [Milestone 2 coverage roadmap](milestone-2-coverage-roadmap.md) for the diagnostic-led audit, cross-consumer integration gate, prioritized increments and stopping criteria. This replaces further class-by-class speculative expansion as the immediate next step.
+
+
+## Scope decision — Stack Trace integration deferred (2026-11-25)
+
+Per the repository owner's direction, finish the current dynamic SOQL/Apex engine first. [Backlog #58](https://github.com/Shubhamu68/SalesforceRepositoryAnalyzer/issues/58) tracks integration of the finalized engine into Stack Trace Impact as a separate feature branch and PR. The capability-led roadmap now prioritizes caller/metadata context and return/loop state. New dynamic cross-consumer parity is not a blocker to PR #57; existing Stack Trace regression compatibility remains required.

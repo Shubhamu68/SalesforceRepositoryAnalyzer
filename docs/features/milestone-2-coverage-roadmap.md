@@ -35,39 +35,35 @@ Preserve shared type/symbol, expression, reference identity, metadata and bounde
 - `ApexRepositoryMethodIndex` owns caller/overload/receiver/context orchestration. Separate these responsibilities through tested interfaces incrementally, not via a rewrite.
 - `ApexInstanceModel`, `ApexConstructorUtility`, `ApexPureFactory`, `ApexFrameworkReceiver`, `ApexMemberEffectModel` and `ApexStaticValueIndex` contain specialized bounded proofs. Converge toward reusable effect and invocation-context contracts, preserving existing proof boundaries, alias handling and rejection reasons. A known return value alone does not establish purity.
 - `dynamicSoqlScanner` is the grammar-specific consumer: query parsing, mode validation and qualified coverage belong there, not in generic Apex execution.
-- At the baseline commit, `apexMethodScanner.ts` attaches static queries using `extractSoqlQueries`; `StackTraceImpactService.ts` builds its own method index and traverses `resolveMethodCalls`. Shared discovery and permission evaluation do not establish dynamic-query evidence parity. Dynamic integration is an explicit milestone gate, not an already delivered capability.
+- At the baseline commit, `apexMethodScanner.ts` attaches static queries using `extractSoqlQueries`; `StackTraceImpactService.ts` builds its own method index and traverses `resolveMethodCalls`. Shared discovery and permission evaluation do not establish dynamic-query evidence parity. Dynamic integration is deferred to [backlog #58](https://github.com/Shubhamu68/SalesforceRepositoryAnalyzer/issues/58) after the current engine is finalized. Preserve the shared engine boundaries now; do not change Stack Trace consumption in PR #57.
 
 ## Next increments, in order
 
-### A — Shared evidence contract and cross-consumer integration (P0)
-
-Smallest useful slice: define one persona-independent query evidence contract carrying site identity, variant identity, normalized query, access mode, coverage category, diagnostic, and provenance; adapt existing SOQL evidence without altering its semantics. Demonstrate Stack Trace consumption using reachable-method filtering against the same repository snapshot and metadata scope. Implement in bounded increments; no language expansion mixed into the first contract slice.
-
-Likely files: `src/models/SoqlQuery.ts`, `src/core/apex/ApexAnalysisEngine.ts`, `src/scanner/dynamicSoqlScanner.ts`, `src/scanner/apexSoqlScanner.ts`, `src/scanner/apexMethodScanner.ts`, `src/services/StackTraceImpactService.ts`, shared/stack regression tests. Confirm exact interfaces before changing them.
-
-Acceptance: fixtures for static and complete dynamic queries, known caller, conditional and partial structural evidence, unresolved REVIEW; compare shared identities and modes between consumers. A stack trace narrows reachable methods; it does not establish observed query execution or convert conditional evidence to complete. Preserve existing static behaviour, permissions and evidence labels. Live Stack Trace validation required before milestone merge.
-
-### B — Caller and metadata context (P1; highest coverage investigation)
+### A — Caller and metadata context (P0; highest coverage investigation)
 
 Investigate 16 uncovered runtime-input sites and five report/private-context sites using actual source and caller/configuration evidence. Prioritize explicit source-proven arguments or complete metadata, not arbitrary external inputs. Reuse the caller index, dependency slice, exact overload resolution, metadata boundary and shared expression/effect model. Unknown UI input, raw SELECT, field or WHERE strings stay unresolved when no proven context exists.
 
 Target: at least two previously uncovered sites in two source locations if proof supports it; this is a proposed acceptance target, not a prediction. If no such cohort is proven after source investigation, choose another evidenced cohort rather than adding speculative grammar or retrying individual patterns. Existing partial variants may be improved separately without forcing the site REVIEW count down.
 
-### C — Return and loop state (P1)
+### B — Return and loop state (P1)
 
 Review four return/path sites and three runtime-loop sites. Reuse shared statement/loop interpretation and conservative value/reference state. Preserve correlation across feasible branches, account for unknown mutations and early exits, and keep unknown runtime collection contents unknown. Do not union incompatible collections or raise execution budgets to make tests pass.
 
-### D — Focused lower-volume gaps (P2)
+### C — Focused lower-volume gaps (P2)
 
 Investigate malformed query reconstruction independently; never auto-repair a broken query. Retain constructor metadata and static/finish lifecycle capabilities as bounded work, each with one primary uncovered site in the snapshot. Extend only with source-backed evidence of benefit. The five configuration sites already have 73 conditional variants, so a remaining REVIEW alone is not a reason to expand their model. Field permission verification and the DEP0190 child-process warning are separate workstreams, not dynamic query coverage improvements.
 
+### Deferred — Stack Trace dynamic engine integration (backlog #58)
+
+Repository owner's scope decision, 2026-11-25: implement in a separate feature branch and PR after the current engine is finalized. Reuse the finalized persona-independent evidence contract, metadata scope and query/mode/coverage semantics; validate reachable-method filtering, static compatibility, and qualified evidence parity. See [issue #58](https://github.com/Shubhamu68/SalesforceRepositoryAnalyzer/issues/58) for detailed acceptance criteria. This is not a PR #57 merge gate. Existing Stack Trace regression tests still apply to changes touching shared foundations.
+
 ## Mandatory validation and stopping criteria
 
-- Compile backend, run Windows and Ubuntu regression suites and frontend build. Include negative proof/effect/alias tests and cross-consumer parity.
+- Compile backend, run Windows and Ubuntu regression suites and frontend build. Include negative proof/effect/alias tests and preserve existing Stack Trace regression behavior; new dynamic cross-consumer parity is deferred.
 - Compare same source snapshot, persona, org, metadata context and discovery policy. Preserve existing application query/finding identities wherever evidence permits. Compare full per-site/variant inventories rather than counts alone; the current workbook does not expose every query string. Explain legitimate deduplication and metadata changes. Investigate any removed baseline high finding; newly verified highs may be correct.
 - Track new covered sites, existing covered sites, variants by evidence kind, review sites, permission finding identities and budget failures. No fabricated objects/fields/grants, no unjustified complete labels or hidden budget increases.
 - For each increment, record the source-backed cohort, positive/negative tests, measurable acceptance outcome and live evidence. Stop a speculative thread after one targeted source investigation without a useful proof. No requirement for zero unresolved queries.
 - Proposed performance gate: three comparable cold scans and one warm scan, with API counts/latency and local phase timings. Investigate sustained median wall-clock regression above 15% under comparable conditions; do not infer a regression from one noisy API run. No new budget failures in comparable live output.
-- Validate live SOQL and Stack Trace before merging PR #57 to the integration branch, or record a user-approved deferral. No direct merge to main.
+- Validate live SOQL before merging PR #57 to the integration branch. Preserve existing Stack Trace automated regressions. New live dynamic Stack Trace integration/validation is explicitly deferred by the owner to issue #58. No direct merge to main.
 
-This is an assessment and delivery-plan checkpoint, not an engine feature implementation. No application-source details from the workbook have been committed. Exact business source for some blocked sites is unavailable to the assessment; recover it before selecting a concrete language expansion.
+This is an assessment and delivery-plan checkpoint, updated for the owner's explicit integration deferral; it does not change engine behavior. No application-source details from the workbook have been committed. Exact business source for some blocked sites is unavailable to the assessment; recover it before selecting a concrete language expansion.
