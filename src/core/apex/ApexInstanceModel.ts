@@ -1,14 +1,15 @@
 import {maskApexSource,matchingPair,splitApexTopLevel,parseApexStatements,stripApexComments,type SourceNode,type ApexRepositorySyntaxInventory} from "./ApexSourceModel.js";
 import {evaluateApexExpression,addApexValues,unknown,type ApexValue} from "./ApexValueEvaluator.js";
+import {parseApexDeclaration,selectApexOverload,type ApexArgumentTypes,type ApexCallResolver} from "./ApexTypeSystem.js";
 import {knownBoolean} from "./ApexScalarOperators.js";
 
 type Instance=Extract<ApexValue,{kind:"instance"}>;
-type Resolver=(name:string,args:ApexValue[])=>ApexValue|undefined;
+type Resolver=ApexCallResolver;
 interface ClassShape {
   name:string;
   filePath:string;
   fields:Array<{name:string;initializer?:string}>;
-  constructors:Array<{parameters:string[];body:SourceNode[]}>;
+  constructors:Array<{parameters:string[];parameterTypes:string[];body:SourceNode[]}>;
   initializationOrder:Array<{field:string;initializer?:string}|{block:SourceNode[]}>;
   supported:boolean;
 }
@@ -61,9 +62,9 @@ export class ApexInstanceIndex {
           const simple=hit[1];
           const ctor=new RegExp("^(?:(?:public|private|protected|global)\\s+)*"+simple+"\\s*\\(([\\s\\S]*)\\)$","i").exec(visible);
           if(ctor){
-            const parameters=ctor[1].trim()?splitApexTopLevel(ctor[1],",").map(p=>p.trim().match(/([A-Za-z_]\w*)$/)?.[1]??""):[];
-            if(parameters.some(p=>!p))shape.supported=false;
-            else shape.constructors.push({parameters,body:parseApexStatements(source,boundary+1,end,masked)});
+            const params=ctor[1].trim()?splitApexTopLevel(ctor[1],",").map(p=>parseApexDeclaration(p)):[];
+            if(params.some(p=>!p))shape.supported=false;
+            else shape.constructors.push({parameters:params.map(p=>p!.name),parameterTypes:params.map(p=>p!.type),body:parseApexStatements(source,boundary+1,end,masked)});
           }else if(!visible){
             shape.initializationOrder.push({block:parseApexStatements(source,boundary+1,end,masked)});
           }else if(/^static$/i.test(visible)){
@@ -79,7 +80,7 @@ export class ApexInstanceIndex {
     }
   }
 
-  construct(name:string,args:readonly ApexValue[],filePath:string,resolve?:Resolver):ApexValue|undefined{
+  construct(name:string,args:readonly ApexValue[],filePath:string,resolve?:Resolver,types?:ApexArgumentTypes):ApexValue|undefined{
     let candidates=this.shapes.get(name.toLowerCase())??[];
     if(!candidates.length&&!name.includes(".")){
       candidates=[...this.shapes.values()].flat().filter(c=>
@@ -90,8 +91,8 @@ export class ApexInstanceIndex {
     const shape=candidates[0];
     if(!shape.supported||shape.fields.length>100)
       return unknown("Unsupported instance declarations or initialization for "+name+".");
-    const constructors=shape.constructors.filter(c=>c.parameters.length===args.length);
-    if(constructors.length!==1&&(shape.constructors.length||args.length))
+    const constructor=selectApexOverload(shape.constructors,args.length,types);
+    if(!constructor&&(shape.constructors.length||args.length))
       return unknown("Constructor overload is not uniquely proven for "+name+".");
     const fields=new Map<string,ApexValue>();
     const fieldNames=new Map(shape.fields.map(f=>[f.name.toLowerCase(),f.name]));
@@ -154,9 +155,9 @@ export class ApexInstanceIndex {
       if("block" in step){if(!execute(step.block,new Map()))return unknown("Instance initializer has unsupported effects for "+name+".");}
       else if(step.initializer)fields.set(step.field,evaluate(step.initializer,new Map()));
     }
-    if(constructors.length){
-      const active=new Set<typeof constructors[number]>();
-      const invoke=(ctor:typeof constructors[number],inputs:readonly ApexValue[]):boolean=>{
+    if(constructor){
+      const active=new Set<typeof constructor>();
+      const invoke=(ctor:typeof constructor,inputs:readonly ApexValue[]):boolean=>{
         if(active.has(ctor)||active.size>=8)return false;
         active.add(ctor);
         try{
@@ -166,15 +167,25 @@ export class ApexInstanceIndex {
             ?/^\s*this\s*\(([\s\S]*)\)\s*;\s*$/i.exec(stripApexComments(first.text??""))
             :null;
           if(delegation){
-            const delegated=delegation[1].trim()?splitApexTopLevel(delegation[1],",").map(expr=>evaluate(expr,parameters)):[];
-            const matches=shape.constructors.filter(c=>c.parameters.length===delegated.length);
-            if(matches.length!==1||delegated.some(value=>value.kind==="unknown")||!invoke(matches[0],delegated))return false;
+            const expressions=delegation[1].trim()?splitApexTopLevel(delegation[1],","):[];
+            const delegated=expressions.map(expr=>evaluate(expr,parameters));
+            const delegatedTypes=expressions.map(expr=>{
+              const index=ctor.parameters.findIndex(p=>p.toLowerCase()===expr.trim().toLowerCase());
+              if(index>=0)return ctor.parameterTypes[index];
+              if(/^\x27(?:\\.|[^\x27\\])*\x27$/s.test(expr.trim()))return "string";
+              if(/^(?:true|false)$/i.test(expr.trim()))return "boolean";
+              if(/^-?\d+$/.test(expr.trim())&&Math.abs(Number(expr))<=2147483647)return "integer";
+              if(/^null$/i.test(expr.trim()))return "null";
+              return undefined;
+            });
+            const selected=selectApexOverload(shape.constructors,delegated.length,delegatedTypes);
+            if(!selected||delegated.some(value=>value.kind==="unknown")||!invoke(selected,delegated))return false;
             return execute(ctor.body.slice(1),parameters);
           }
           return execute(ctor.body,parameters);
         }finally{active.delete(ctor);}
       };
-      if(!invoke(constructors[0],args))return unknown("Constructor has unsupported effects or delegation for "+name+".");
+      if(!invoke(constructor,args))return unknown("Constructor has unsupported effects or delegation for "+name+".");
     }
     if(unsupportedEffect)return unknown("Constructor or initializer contains unproven effects for "+name+".");
     return {kind:"instance",className:shape.name,entries:[...fields]} satisfies Instance;
