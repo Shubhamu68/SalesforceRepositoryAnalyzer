@@ -266,7 +266,7 @@ export function maskSchemaEffectReads(visible:string,types:ReadonlyMap<string,st
   if(schemaAllowed){
     result=result.replace(/\bSchema\s*\.\s*DisplayType\s*\.\s*([A-Za-z_]\w*)\b/gi,(all,kind:string)=>displayType(kind)?"0":all);
   }
-  const roots=/\b(?:Schema\s*\.\s*getGlobalDescribe\s*\(\s*\)\s*\.\s*get\s*\(\s*(?:[A-Za-z_]\w*)?\s*\)|[A-Za-z_]\w*)(?=\s*\.)/gi;
+  const roots=/\b(?:Schema\s*\.\s*getGlobalDescribe\s*\(\s*\)\s*\.\s*get\s*\(\s*(?:[A-Za-z_]\w*)?\s*\)|[A-Za-z_]\w*(?=\s*\.))/gi;
   const transitions:Record<string,Record<string,string>>={
     "schema.sobjecttype":{getdescribe:"schema.describesobjectresult"},
     "schema.describesobjectresult":{getname:"string",getsobjecttype:"schema.sobjecttype"},
@@ -300,7 +300,7 @@ export function maskSchemaEffectReads(visible:string,types:ReadonlyMap<string,st
       if(type==="list<schema.sobjecttype>"&&op==="get"&&operation[2]!=="0")break;
       type=next;end+=operation[0].length;read=true;
     }
-    if(!read)continue;
+    if(!read||/^\s*(?:\.|\[)/.test(result.slice(end)))continue;
     out+=result.slice(cursor,start)+"0";cursor=end;
   }
   return out+result.slice(cursor);

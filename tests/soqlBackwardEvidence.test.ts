@@ -220,3 +220,24 @@ test("parser-only formatted SELECT field aggregation preserves underlying permis
   assert.deepEqual(fields(aggregatePermissionShapes([shape!])),new Set(["SELECT:Id","SELECT:CreatedDate","ORDER_BY:Name"]));
   assert.equal(simplePermissionShape("SELECT SUM(AnnualRevenue) FROM Account"),undefined);
 });
+
+test("conditional scalar replacements and reverse sort helpers reconstruct both query sites without guessing runtime fields",()=>{
+  const source="public class Selector {public static void run(Boolean sortByName,Integer pageSize){String ordering='Id ASC';if(sortByName){ordering='Name ASC';}else{ordering='CreatedDate DESC';}String base='SELECT Id, FORMAT(CreatedDate) FROM Account';String q=base+' ORDER BY '+ordering+' LIMIT '+pageSize;Database.query(q);String rev=base+' ORDER BY '+reverse(ordering)+' LIMIT '+pageSize;Database.query(rev);}private static String reverse(String ordering){if(ordering.endsWith(' ASC')){return ordering.replace(' ASC',' DESC');}return ordering.replace(' DESC',' ASC');}}";
+  const filePath="Selector.cls",index=new ApexRepositoryMethodIndex([{filePath,source}]);
+  const sites=discoverApexInvocations(source,dynamicDatabaseQuerySelector);
+  for(const site of sites){
+    const result=backtrackSoqlPermissionShapes(source,filePath,site,index);
+    assert.deepEqual(fields(result.queries),new Set(["SELECT:Id","SELECT:CreatedDate","ORDER_BY:Name","ORDER_BY:CreatedDate"]),JSON.stringify(result));
+    assert.equal(result.queries.length,2);
+  }
+});
+test("runtime structural sort or unknown mutation is not fabricated",()=>{
+  const filePath="Selector.cls";
+  for(const assignment of ["ordering=runtimeField+' ASC';","ordering=Other.rewrite(ordering);"]){
+    const source="public class Selector {public static void run(Boolean flag,String runtimeField){String ordering='Id ASC';if(flag){"+assignment+"}String q='SELECT Id FROM Account ORDER BY '+ordering;Database.query(q);}}";
+    const index=new ApexRepositoryMethodIndex([{source,filePath}]);
+    const site=discoverApexInvocations(source,dynamicDatabaseQuerySelector)[0];
+    const result=backtrackSoqlPermissionShapes(source,filePath,site,index);
+    assert.ok(result.queries.every(q=>q==="SELECT Id FROM Account ORDER BY Id ASC"),JSON.stringify(result));
+  }
+});

@@ -9,7 +9,9 @@ import {countApex} from "./ApexPerformance.js";
 import {readApexReadOperation} from "./ApexReadOperations.js";
 import {evaluateApexReadOperation} from "./ApexValueEvaluator.js";
 import {applyApexStringCollectionMutation,apexIterationValues,mergeApexRuntimeMembers,proveApexAddOnlyIteration,evaluateApexCollectionGuard,isExactMetadataStringList,type ApexRuntimeCollectionMembers} from "./ApexCollectionOperations.js";
-import {knownBoolean} from "./ApexScalarOperators.js";
+import {knownBoolean,integerArithmetic,splitScalarOperator} from "./ApexScalarOperators.js";
+import {findApexTernary} from "./ApexConditionalInvocation.js";
+import {evaluateReadOnlyApexGuard} from "./ApexGuardModel.js";
 import {evaluateSchemaExpression,evaluateSchemaGlobalGuard,schemaReceiverEligible,isSchemaFieldMap,mutateSchemaFieldMap,schemaEffectArgument,maskSchemaEffectReads} from "./ApexSchemaModel.js";
 import {metadataSelectorHelper} from "./ApexCustomMetadataQueryModel.js";
 import {reportApexDependency,type ApexDependencyObserver} from "./ApexDependencyDiagnostics.js";
@@ -55,6 +57,8 @@ export interface ApexDependencyPolicy<A=never>{
   join?(collection:ApexDependencyEvidence<A>,separator:string):ApexDependencyEvidence<A>|undefined;
   mergeConditionalAppends?(base:ApexDependencyEvidence<A>,additions:readonly ApexDependencyAppend<A>[]):ApexDependencyEvidence<A>|undefined;
   allowMetadataCandidateRows?:boolean;
+  /** Consumer opt-in for bounded permission candidates, not runtime certainty. */
+  allowConditionalScalarCandidates?:boolean;
   /** Diagnostic-only observer; not consulted by any proof or selection rule. */
   observe?:ApexDependencyObserver;
 }
@@ -67,7 +71,7 @@ export interface ApexDependencyTrace<A=never>{
 }
 interface Frame {filePath:string;source:string;methods:readonly IndexedApexMethod[];method:IndexedApexMethod;key:string;depth:number;ancestors:readonly string[]}
 type Row=Array<[string,ApexValue]>;
-type Choice={kind:"caller";edge:ApexCallerSource}|{kind:"row";row:Row};
+type Choice={kind:"caller";edge:ApexCallerSource}|{kind:"row";row:Row}|{kind:"branch";truth:boolean};
 class Expand {constructor(readonly key:string,readonly choices:readonly Choice[]){}}
 class Bounded extends Error{}
 
@@ -109,7 +113,7 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
     return empty;
   }
   const root:Frame={filePath,source,methods,method,key:"root",depth:0,ancestors:[]};
-  let work=0,edges=0,metadataRows=0,bounded=false,effectSummaries=0;
+  let work=0,edges=0,metadataRows=0,branchEdges=0,bounded=false,effectSummaries=0;
   const effectEngines=new Map<string,ApexDataFlowEngine>();
   const found=new Map<string,Evidence>();
   const note=(frame:Frame,offset:number,code:string,symbol?:string,count?:number)=>
@@ -124,6 +128,11 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
     const exact=(e:Evidence)=>e.value.kind==="collection"&&exactCollections.has(e.value)&&!e.annotations.length&&!e.runtimeMembers&&!e.describeObject;
     const exactValue=(e:Evidence)=>!e.annotations.length&&!e.runtimeMembers&&!e.describeObject&&scalarEffectInput(e.value);
     const mark=(value:ApexValue)=>{if(value.kind==="collection")exactCollections.add(value);return value;};
+    const chooseBranch=(key:string):boolean=>{
+      const prior=choices.get(key);
+      if(prior?.kind==="branch")return prior.truth;
+      throw new Expand(key,[{kind:"branch",truth:true},{kind:"branch",truth:false}]);
+    };
     const resolve=(frame:Frame,expression:string,offset:number,locals:Locals=new Map(),members:readonly string[]=[]):Evidence=>{
       tick();
       const expr=clean(expression);
@@ -139,11 +148,38 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
         if(local){note(frame,offset,"LOCAL_BINDING",expr);return local;}
         return variable(frame,expr,offset,locals,members);
       }
+      const ternary=findApexTernary(maskApexSource(expr));
+      if(ternary){
+        const symbols=apexSymbols(frame.source,frame.methods);
+        const guard=evaluateReadOnlyApexGuard(expr.slice(0,ternary.question),{
+          typeOf:n=>symbols.lookup(frame.method,n,offset),
+          valueOf:n=>{const proof=resolve(frame,n,offset,locals);return exactValue(proof)||exact(proof)?proof.value:stop("Conditional input not exact");},
+          stringPlatformAllowed:!symbols.hasLocalBinding(frame.method,"String",offset)&&!index?.hasSourceClass("String")
+        });
+        if(guard!==undefined){
+          const truth=knownBoolean(guard)??(policy.allowConditionalScalarCandidates?chooseBranch(frame.key+"|ternary|"+offset+"|"+expr):undefined);
+          if(truth!==undefined)return resolve(frame,truth?expr.slice(ternary.question+1,ternary.colon):expr.slice(ternary.colon+1),offset,locals,members);
+        }
+        return ev(reject("conditional expression is not proven","TERNARY_UNPROVEN"));
+      }
       const terms=splitApexTopLevel(expr,"+");
       if(terms.length>1){
         let result=resolve(frame,terms[0],offset,locals);
         for(const term of terms.slice(1))result=concat(result,resolve(frame,term,offset,locals));
         return result;
+      }
+      const arithmetic=splitScalarOperator(expr,["-"])??splitScalarOperator(expr,["*","/"]);
+      if(arithmetic){
+        const left=resolve(frame,arithmetic.left,offset,locals),right=resolve(frame,arithmetic.right,offset,locals);
+        if(exactValue(left)&&exactValue(right))return ev(integerArithmetic(left.value,right.value,arithmetic.operator));
+        return ev(reject("numeric operation is not exact","ARITHMETIC_UNPROVEN"));
+      }
+      const conversion=/^String\s*\.\s*valueOf\s*\(([\s\S]*)\)$/i.exec(expr);
+      if(conversion&&!apexSymbols(frame.source,frame.methods).hasLocalBinding(frame.method,"String",offset)&&!index?.hasSourceClass("String")){
+        const input=resolve(frame,conversion[1],offset,locals);
+        if(exactValue(input))return ev(evaluateApexExpression("String.valueOf(value)",{values:new Map([["value",input.value]])}));
+        if(!input.annotations.length&&input.value.kind==="unknown"&&/^(?:integer|long|decimal|double|boolean)$/i.test(input.value.symbol?.type??""))
+          return input;
       }
       const join=/^String\s*\.\s*join\s*\(([\s\S]*)\)$/i.exec(expr);
       if(join){
@@ -581,6 +617,34 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
                   continue;
                 }
               }
+              // A scalar replacement under a pure guard is not a
+              // collection union or an arbitrary skipped write. Select
+              // the known branch, or enumerate correlated candidate paths
+              // only for an explicit inventory consumer.
+              const scalarWrites=new RegExp("\\b"+name+"\\s*=(?!=|>)","i");
+              if(type==="string"&&!conditional&&scalarWrites.test(visible)&&!additions.some(a=>a.conditional)){
+                const symbols=apexSymbols(frame.source,frame.methods);
+                let reaching=current;
+                for(const a of additions)reaching=concat(reaching,a.evidence);
+                const guard=evaluateReadOnlyApexGuard(n.condition??"",{
+                  typeOf:id=>symbols.lookup(frame.method,id,n.start),
+                  valueOf:id=>{
+                    const proof=id.toLowerCase()===key?reaching:resolve(frame,id,n.start,bindings);
+                    return exactValue(proof)||exact(proof)?proof.value:stop("Scalar guard input not exact");
+                  },
+                  stringPlatformAllowed:!symbols.hasLocalBinding(frame.method,"String",n.start)&&!index?.hasSourceClass("String")
+                });
+                if(guard!==undefined){
+                  const truth=knownBoolean(guard)??(policy.allowConditionalScalarCandidates?chooseBranch(frame.key+"|if|"+n.start):undefined);
+                  if(truth!==undefined){
+                    const chosen=truth?n.body??[]:n.otherwise??[];
+                    if(chosen.some(child=>/\b(?:return|throw|break|continue)\b/i.test(maskApexSource(frame.source.slice(child.start,child.end)))))return blocked("SCALAR_GUARD_PATH_TERMINATES");
+                    note(frame,n.start,"SCALAR_GUARD_RESOLVED",name);
+                    if(!visit(chosen,conditional,bindings))return false;
+                    continue;
+                  }
+                }
+              }
               if(collection&&rx(name).test(maskApexSource(n.condition??""))){
                 const guard=evaluateApexCollectionGuard(clean(n.condition??""),name,current.value,
                   !conditional&&!additions.length&&!current.annotations.length&&!current.runtimeMembers&&!current.describeObject&&
@@ -692,6 +756,16 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
                 current=ev(listValue(merged,updated.unique),current.annotations,runtimeMembers?{runtimeMembers}:{});
                 continue;
               }
+              const assignment=new RegExp("^"+name+"\\s*=(?!=|>)\\s*([\\s\\S]+);$","i").exec(statement);
+              if(type==="string"&&assignment&&!conditional&&!additions.some(a=>a.conditional)){
+                let reaching=current;
+                for(const a of additions)reaching=concat(reaching,a.evidence);
+                const inputs=new Map(bindings);inputs.set(key,reaching);
+                current=resolve(frame,assignment[1],n.start,inputs);
+                additions.length=0;
+                note(frame,n.start,"SCALAR_ASSIGNMENT_RESOLVED",name);
+                continue;
+              }
               const append=new RegExp("^"+name+"\\s*\\+=\\s*([\\s\\S]+);$","i").exec(statement);
               if(type==="string"&&append){
                 if(rx(name).test(maskApexSource(append[1])))return blocked("SELF_REFERENTIAL_APPEND");
@@ -801,9 +875,9 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
     }catch(error){
       if(error instanceof Bounded){bounded=true;note(root,use.offset,"WORK_LIMIT");break;}
       if(!(error instanceof Expand))throw error;
-      if(choices.has(error.key)||queue.length+error.choices.length>MAX_EDGES||edges+metadataRows+error.choices.length>MAX_EDGES){bounded=true;note(root,use.offset,"EDGE_OR_ROW_LIMIT");continue;}
+      if(choices.has(error.key)||queue.length+error.choices.length>MAX_EDGES||edges+metadataRows+branchEdges+error.choices.length>MAX_EDGES){bounded=true;note(root,use.offset,"EDGE_OR_ROW_LIMIT");continue;}
       for(const choice of error.choices){
-        if(choice.kind==="caller")edges++;else metadataRows++;
+        if(choice.kind==="caller")edges++;else if(choice.kind==="row")metadataRows++;else branchEdges++;
         const next=new Map(choices);next.set(error.key,choice);queue.push(next);
       }
     }

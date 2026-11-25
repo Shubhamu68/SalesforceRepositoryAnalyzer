@@ -138,6 +138,7 @@ export function backtrackSoqlPermissionShapes(source:string,filePath:string,site
     observe,
     abstractExpression:abstractSoqlExpression,
     allowMetadataCandidateRows:true,
+    allowConditionalScalarCandidates:true,
     join:(list,separator)=>{
       if(list.value.kind!=="collection"||!/^,\s*$/.test(separator)||list.value.items.length>MAX_FIELDS||list.value.items.some(s=>!permissionSelectFieldPath(s)))return undefined;
       const annotations:Use[]=list.value.items.map(field=>({fieldPath:permissionSelectFieldPath(field)!,context:"SELECT"}));

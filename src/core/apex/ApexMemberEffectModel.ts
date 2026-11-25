@@ -212,7 +212,7 @@ export class ApexMemberEffectModel{
         const tail=visible.slice(hit.index!+hit[0].length);
         if(/^\s*[.(]/.test(tail))continue; // the complete call is checked below
         const receiver=hit[1].toLowerCase(),member=hit[2].toLowerCase();
-        if(receiver==="label"||receiver==="schema"&&member==="fieldsetmember"||
+        if(receiver==="label"||receiver==="schema"&&schemaAllowed&&/^(?:fieldsetmember|sobjecttype|sobjectfield|describesobjectresult|describefieldresult|displaytype)$/.test(member)||
           this.key(method,hit[1]+"."+hit[2])||
           this.inertDtos.get((types.get(receiver)??"").toLowerCase())?.has(member))continue;
         return false;
@@ -281,7 +281,20 @@ export class ApexMemberEffectModel{
         // Remove only typed Set mutations and membership/cardinality reads.
         // Remaining Set uses in ordered observations are unproven. Keep
         // the older conservative rule for untyped/new Set expressions.
-        if(!setNames.length&&/\bfor\s*\(|\bString\s*\.\s*join\s*\(|\bnew\s+List\s*<|\.\s*get\s*\(|\[[^\]]*\]/i.test(body))return false;
+        // Even when a Set has aliases, keep the existing prohibition on
+        // ordered conversion/index reads, except for already proven Schema
+        // reads masked above. Only allow loops over typed non-Set inputs.
+        if(/\bString\s*\.\s*join\s*\(|\bnew\s+List\s*<|\.\s*get\s*\(|\[[^\]]*\]/i.test(body))return false;
+        const loops=(nodes:readonly SourceNode[]):boolean=>nodes.every(node=>{
+          if(node.kind==="for"){
+            const input=(node.iterable??"").trim();
+            const sourceType=canonicalApexType(this.types(helper).get(input.toLowerCase()));
+            const schemaNames=/^([A-Za-z_]\w*)\s*\.\s*values\s*\(\s*\)$/i.exec(input);
+            if(!sourceType?.startsWith("list<")&&!(schemaNames&&canonicalApexType(this.types(helper).get(schemaNames[1].toLowerCase()))==="map<string,schema.sobjectfield>"))return false;
+          }
+          return loops(node.body??[])&&loops(node.otherwise??[]);
+        });
+        if(!loops(helper.body))return false;
         for(const name of setNames){
           const ordered=new RegExp("(?:\\bfor\\s*\\([^)]*:\\s*"+name+"\\b|\\bString\\s*\\.\\s*join\\s*\\(\\s*"+name+"\\b|\\bnew\\s+List\\s*<[^>]+>\\s*\\(\\s*"+name+"\\b|\\b"+name+"\\s*(?:\\[|\\.\\s*get\\s*\\())","i");
           if(ordered.test(body))return false;
