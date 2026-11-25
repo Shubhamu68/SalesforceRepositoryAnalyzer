@@ -10,7 +10,7 @@ import {readApexReadOperation} from "./ApexReadOperations.js";
 import {evaluateApexReadOperation} from "./ApexValueEvaluator.js";
 import {applyApexStringCollectionMutation,apexIterationValues,mergeApexRuntimeMembers,proveApexAddOnlyIteration,evaluateApexCollectionGuard,isExactMetadataStringList,type ApexRuntimeCollectionMembers} from "./ApexCollectionOperations.js";
 import {knownBoolean} from "./ApexScalarOperators.js";
-import {evaluateSchemaExpression,evaluateSchemaGlobalGuard,schemaReceiverEligible,isSchemaFieldMap,mutateSchemaFieldMap} from "./ApexSchemaModel.js";
+import {evaluateSchemaExpression,evaluateSchemaGlobalGuard,schemaReceiverEligible,isSchemaFieldMap,mutateSchemaFieldMap,schemaEffectArgument,maskSchemaEffectReads} from "./ApexSchemaModel.js";
 import {metadataSelectorHelper} from "./ApexCustomMetadataQueryModel.js";
 import {reportApexDependency,type ApexDependencyObserver} from "./ApexDependencyDiagnostics.js";
 
@@ -296,7 +296,7 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
         if(name&&(index||resolveExternal)&&frame.depth<MAX_DEPTH){
           const args=pieces.map(arg=>resolve(frame,arg,offset,locals));
           const exact=args.every(a=>!a.annotations.length&&!a.runtimeMembers&&!a.describeObject&&
-            (a.value.kind==="number"||a.value.kind==="null"||a.value.kind==="text"&&a.value.values.length===1));
+            (scalarEffectInput(a.value)||a.value.kind==="schema"));
           if(!exact&&policy.allowMetadataCandidateRows&&target&&resolveExternal&&members.length&&
             args.length===1&&args[0].value.kind==="unknown"&&!args[0].annotations.length&&!args[0].runtimeMembers&&
             !args[0].describeObject&&!index?.hasSourceClass("String")&&
@@ -385,8 +385,35 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
         // Only enter loops currently being enumerated. A local declared
         // within this iteration can be read. An outer symbol must be read
         // only throughout the loop, including subsequent iterations.
+        const symbolTable=apexSymbols(frame.source,frame.methods);
+        const trackedType=symbolTable.lookup(frame.method,name,offset);
+        const schemaMapReadOnly=(node:SourceNode):boolean=>{
+          const body=maskApexSource(frame.source.slice(node.start,node.end));
+          if(!rx(name).test(body))return true;
+          if(!rx(name).test(maskSchemaEffectReads(body,new Map([[name.toLowerCase(),trackedType??""]]),false)))return true;
+          if(node.kind==="statement"){
+            const text=clean(node.text??"").replace(/;\s*$/,"");
+            const declaration=parseApexDeclaration(text);
+            const eq=declaration?maskApexSource(text).indexOf("="):-1;
+            const call=directEffectInvocation(eq>=0?text.slice(eq+1):text);
+            if(!call||!identifier.test(call.name))return false;
+            const pieces=call.argumentText.trim()?splitApexTopLevel(call.argumentText,","):[];
+            const positions=pieces.flatMap((p,i)=>clean(p).toLowerCase()===name.toLowerCase()?[i]:[]);
+            const hints=symbolTable.argumentTypes(frame.method,pieces,node.start);
+            const helper=selectApexOverload(frame.methods.filter(m=>symbolTable.sameOwner(frame.method,m)&&m.name.toLowerCase()===call.name),pieces.length,hints);
+            return !!helper&&positions.length>0&&hints.every((t,i)=>!!canonicalApexType(t)&&canonicalApexType(t)===canonicalApexType(helper.parameterTypes?.[i]))&&
+              pieces.every((p,i)=>positions.includes(i)||!rx(name).test(maskApexSource(p)))&&
+              positions.every(i=>memberEffectModel(frame.source,frame.methods).schemaArgumentReadOnly(helper,i));
+          }
+          if(node.kind!=="for"&&node.kind!=="if"&&node.kind!=="block")return false;
+          const header=maskApexSource((node.condition??"")+" "+(node.iterable??""));
+          return !rx(name).test(header)&&(node.body??[]).every(schemaMapReadOnly)&&(node.otherwise??[]).every(schemaMapReadOnly);
+        };
         const readOnlyMapUse=(node:SourceNode)=>{
           const body=maskApexSource(frame.source.slice(node.start,node.end));
+          if(trackedType==="string"||scalar.test(trackedType??""))
+            return !new RegExp("\\b"+name+"\\s*(?:=(?!=|>)|[+\\-*/%&|^]=|\\+\\+|--)|(?:\\+\\+|--)\\s*"+name+"\\b|\\b(?:String|Boolean|Integer|Long|Decimal|Double|Id|Date|Datetime)\\s+"+name+"\\b","i").test(body);
+          if(trackedType==="map<string,schema.sobjectfield>"&&schemaMapReadOnly(node))return true;
           return !rx(name).test(body.replace(new RegExp("\\b"+name+"\\s*\\.\\s*(?:containsKey|isEmpty|size)\\s*\\(","gi"),"("));
         };
         const prefix=prefixAt(frame.method.body,offset,node=>{
@@ -510,6 +537,7 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
               }
               // Other map snapshots must stay immutable; no aliases or writes.
               if(!rx(name).test(visible.replace(new RegExp("\\b"+name+"\\s*\\.\\s*(?:containsKey|isEmpty|size)\\s*\\(","gi"),"(")))continue;
+              if(schemaFieldMap&&isSchemaFieldMap(current.value)&&schemaMapReadOnly(n))continue;
               return blocked("MAP_ALIAS_OR_WRITE");
             }
             if(n.kind==="if"){
@@ -706,7 +734,9 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
                         frame.methods.some(m=>effects.locals(m).has(p.toLowerCase()))))
                       return blocked("SHARED_HELPER_EFFECT_UNPROVEN");
                     const args=pieces.map((p,i)=>targetPositions.includes(i)?current:resolve(frame,p,n.start,bindings));
-                    if(args.some((v,i)=>!targetPositions.includes(i)&&!exactValue(v)))return blocked("SHARED_HELPER_EFFECT_UNPROVEN");
+                    if(args.some((v,i)=>!targetPositions.includes(i)&&!exactValue(v)&&
+                      (v.annotations.length||v.runtimeMembers||!schemaEffectArgument(v.value,helper.parameterTypes?.[i])||
+                       isSchemaFieldMap(v.value)&&!effects.schemaArgumentReadOnly(helper,i))))return blocked("SHARED_HELPER_EFFECT_UNPROVEN");
                     if(++effectSummaries>MAX_EFFECT_SUMMARIES){note(frame,n.start,"WORK_LIMIT",helper.name);throw new Bounded("Helper effect summary limit");}
                     let engine=effectEngines.get(frame.filePath);
                     if(!engine){
@@ -716,7 +746,8 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
                       engine=new ApexDataFlowEngine(frame.source,{sourceMethods:[...frame.methods],maxOperations:500,
                         selectInvocation:()=>undefined,
                         resolveExternal:(call,values,types)=>call==="Apex.construct"&&values[0]?.kind==="text"&&values[0].values.length===1?
-                          index?.constructInstance(frame.filePath,values[0].values[0],values.slice(1),undefined,types?.slice(1)):undefined});
+                          index?.constructInstance(frame.filePath,values[0].values[0],values.slice(1),undefined,types?.slice(1)):
+                          /^(?:Schema\.objectSchema|Schema\.fieldMap)$/.test(call)?resolveExternal?.(call,values,types,frame.filePath):undefined});
                       effectEngines.set(frame.filePath,engine);
                     }
                     const updated=engine.summarizeArgumentEffects(helper,args.map(v=>v.value))?.[targetPositions[0]];

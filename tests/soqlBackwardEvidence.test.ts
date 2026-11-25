@@ -212,3 +212,11 @@ test("complete Field Set lists pass a compound null/empty guard and feed downstr
     }
   }
 });
+
+test("parser-only formatted SELECT field aggregation preserves underlying permission identity",async()=>{
+  const {simplePermissionShape,aggregatePermissionShapes}=await import("../src/analyzer/soqlPermissionAggregation.js");
+  const shape=simplePermissionShape("SELECT Id, FORMAT(CreatedDate) FROM Account WITH SECURITY_ENFORCED ORDER BY Name");
+  assert.ok(shape);
+  assert.deepEqual(fields(aggregatePermissionShapes([shape!])),new Set(["SELECT:Id","SELECT:CreatedDate","ORDER_BY:Name"]));
+  assert.equal(simplePermissionShape("SELECT SUM(AnnualRevenue) FROM Account"),undefined);
+});

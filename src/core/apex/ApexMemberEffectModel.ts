@@ -1,6 +1,7 @@
 import {maskApexSource,matchingPair,type IndexedApexMethod,type SourceNode} from "./ApexSourceModel.js";
 import {evaluateApexExpression,unknown,type ApexValue} from "./ApexValueEvaluator.js";
 import {canonicalApexType} from "./ApexTypeSystem.js";
+import {maskSchemaEffectReads} from "./ApexSchemaModel.js";
 
 interface ScalarMember {name:string;key:string;initial:ApexValue}
 const safeCall=/^(?:String\.(?:join|valueOf|isBlank|isNotBlank|isEmpty|escapeSingleQuotes)|Math\.(?:min|max)|System\.debug)$/i;
@@ -173,6 +174,8 @@ export class ApexMemberEffectModel{
     const types=this.types(method);
     const check=(source:string,statement=false):boolean=>{
       let visible=maskApexSource(source);
+      const schemaAllowed=!this.locals(method).has("schema")&&!/\bclass\s+Schema\b/i.test(this.masked);
+      visible=maskSchemaEffectReads(visible,types,schemaAllowed);
       if(/\b(?:insert|update|upsert|delete|undelete|merge|throw|switch|try|while|do)\b/i.test(visible))return false;
       // Recognize only platform constructors and independently proven inert
       // nested DTOs. Unknown allocations are not safe effect evidence.
@@ -193,6 +196,9 @@ export class ApexMemberEffectModel{
         this.inertDtos.has((types.get(receiver.toLowerCase())??"").toLowerCase())?"JSON.serialize("+receiver+")":all);
       if(/\+\+|--|\[[^\]]*\]\s*(?:=|\+=)|(?:[-*/%&|^]=)/.test(visible))return false;
       const assignments=[...visible.matchAll(/(?:^|[^=!<>])(?:\+=|=(?!=|>))/g)];
+      const standalone=visible.trim().replace(/;$/,"");
+      const rhs=/^[\w.<> ,]+\s*=(?!=|>)\s*([\s\S]+)$/.exec(standalone)?.[1];
+      const direct=directEffectCall(rhs??standalone);
       if(assignments.length>(statement?1:0))return false;
       const write=/^\s*(?:[\w.]+(?:\s*<[\w\s,.<>]+>)?\s+)?((?:[A-Za-z_]\w*\s*\.\s*)?[A-Za-z_]\w*)\s*(?:=(?!=|>)|\+=|[-*/%&|^]=|\+\+|--)/i.exec(visible);
       if(write&&!this.key(method,write[1].replace(/\s/g,""))&&!types.has(write[1].toLowerCase())){
@@ -227,13 +233,13 @@ export class ApexMemberEffectModel{
         if(dot>0&&safeMember.test(name.slice(dot+1))){
           const type=types.get(name.slice(0,dot).toLowerCase())??"";
           if(/^(?:String|List\s*<\s*String\s*>|Set\s*<\s*String\s*>|Map\s*<\s*String\s*,\s*String\s*>|Schema\.FieldSetMember|List\s*<\s*Object\s*>)$/i.test(type)){
-            if(/^(?:add|addAll|clear|put|putAll|remove)$/i.test(name.slice(dot+1))&&directEffectCall(source.trim().replace(/;$/,""))!==name.toLowerCase())return false;
+            if(/^(?:add|addAll|clear|put|putAll|remove)$/i.test(name.slice(dot+1))&&direct!==name.toLowerCase())return false;
             continue;
           }
         }
         // Allow a uniquely resolved nested local private static helper.
         const candidates=this.methods.filter(m=>m.name.toLowerCase()===name.toLowerCase());
-        if(candidates.length===1&&directEffectCall(source.trim().replace(/;$/,""))===name.toLowerCase()&&this.replaySafe(candidates[0]))continue;
+        if(candidates.length===1&&direct===name.toLowerCase()&&this.replaySafe(candidates[0]))continue;
         return false;
       }
       return true;
@@ -247,6 +253,15 @@ export class ApexMemberEffectModel{
     const result=visit(method.body);
     this.safe.set(method,result);return result;
   }
+  /** No write, alias, escape, or unknown receiver use of a typed map
+   * argument. Allows caller loops to reuse the original Describe snapshot. */
+  schemaArgumentReadOnly(method:IndexedApexMethod,index:number):boolean{
+    if(!method.parameters[index]||canonicalApexType(method.parameterTypes?.[index])!=="map<string,schema.sobjectfield>"||!this.replaySafe(method))return false;
+    const name=method.parameters[index];
+    const visible=this.masked.slice(method.start,method.end);
+    const body=maskSchemaEffectReads(visible,this.types(method),!this.locals(method).has("schema")&&!/\bclass\s+Schema\b/i.test(this.masked));
+    return !new RegExp("\\b"+name+"\\b","i").test(body);
+  }
   /** Exact reference summaries must not depend on an unspecified Set
    * iteration order. Reuse the existing typed receiver and replay proofs;
    * conservatively reject potentially ordered observations of a Set,
@@ -257,10 +272,21 @@ export class ApexMemberEffectModel{
     const visit=(helper:IndexedApexMethod):boolean=>{
       if(checked.has(helper))return true;
       checked.add(helper);
-      const body=this.masked.slice(helper.start,helper.end);
+      const rawBody=this.masked.slice(helper.start,helper.end);
+      const body=maskSchemaEffectReads(rawBody,this.types(helper),!this.locals(helper).has("schema")&&!/\bclass\s+Schema\b/i.test(this.masked));
       const hasSet=[...this.types(helper).values()].some(t=>canonicalApexType(t)?.startsWith("set<"))||
         /\bnew\s+Set\s*</i.test(body);
-      if(hasSet&&/\bfor\s*\(|\bString\s*\.\s*join\s*\(|\bnew\s+List\s*<|\.\s*get\s*\(|\[[^\]]*\]/i.test(body))return false;
+      if(hasSet){
+        const setNames=[...this.types(helper)].filter(([,t])=>canonicalApexType(t)?.startsWith("set<")).map(([n])=>n);
+        // Remove only typed Set mutations and membership/cardinality reads.
+        // Remaining Set uses in ordered observations are unproven. Keep
+        // the older conservative rule for untyped/new Set expressions.
+        if(!setNames.length&&/\bfor\s*\(|\bString\s*\.\s*join\s*\(|\bnew\s+List\s*<|\.\s*get\s*\(|\[[^\]]*\]/i.test(body))return false;
+        for(const name of setNames){
+          const ordered=new RegExp("(?:\\bfor\\s*\\([^)]*:\\s*"+name+"\\b|\\bString\\s*\\.\\s*join\\s*\\(\\s*"+name+"\\b|\\bnew\\s+List\\s*<[^>]+>\\s*\\(\\s*"+name+"\\b|\\b"+name+"\\s*(?:\\[|\\.\\s*get\\s*\\())","i");
+          if(ordered.test(body))return false;
+        }
+      }
       // replaySafe admits only uniquely resolved nested private static calls;
       // inspect those same source targets for Set ordering as well.
       for(const hit of body.matchAll(/\b([A-Za-z_]\w*)\s*\(/g)){

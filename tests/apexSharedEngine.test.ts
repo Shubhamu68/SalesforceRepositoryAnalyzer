@@ -412,3 +412,21 @@ test("shared collection guard adapter reuses null, size and ordered Boolean eval
   assert.equal(evaluateApexCollectionGuard("paths == null || paths.isEmpty()","paths",nonempty,false)?.kind,"unknown");
   assert.equal(evaluateApexCollectionGuard("paths.size() == 0 || Other.mutate(paths)","paths",empty,true),undefined);
 });
+
+test("shared Schema-aware argument replay handles typed field maps and formatted Set mutations",()=>{
+  const source="public class Inspector {public static void run(){Map<String,Schema.SObjectField> fields=Contact.SObjectType.getDescribe().fields.getMap();Set<String> selected=new Set<String>{'Id'};for(String f:new List<String>{'Birthdate','LastName'}){append(fields,f,selected);}Inspector.consume(String.join(new List<String>(selected),','));}private static void append(Map<String,Schema.SObjectField> fields,String f,Set<String> selected){Schema.DescribeFieldResult d=fields.get(f).getDescribe();if(d.getType()==Schema.DisplayType.DATE){selected.add('FORMAT('+f+')');}else{selected.add(f);}}}";
+  const filePath="Inspector.cls",index=new ApexRepositoryMethodIndex([{filePath,source}]);
+  const result=traceApexDependencies(source,filePath,{expression:"String.join(new List<String>(selected),',')",offset:source.indexOf("Inspector.consume")},index,schemaResolver);
+  assert.equal(result.candidates.length,1,JSON.stringify(result));
+  const value=result.candidates[0].value;
+  assert.equal(value.kind,"text",JSON.stringify(result));
+  if(value.kind==="text")assert.deepEqual(new Set(value.values[0].split(",")),new Set(["Id","FORMAT(Birthdate)","LastName"]));
+});
+test("name-field discovery through Schema map iteration uses a unique match, not iteration order",()=>{
+  const source="public class Inspector {public static void run(){Map<String,Schema.SObjectField> fields=Contact.SObjectType.getDescribe().fields.getMap();for(Schema.SObjectField f:fields.values()){Schema.DescribeFieldResult d=f.getDescribe();if(d.isNameField()){Inspector.consume(d.getName());return;}}}}";
+  // The selector helper's early-return loop is tested by a caller, not a
+  // target invocation inside the loop (which has separate capture semantics).
+  const helper="public class Inspector {public static void run(){Inspector.consume(findName());}private static String findName(){Map<String,Schema.SObjectField> fields=Contact.SObjectType.getDescribe().fields.getMap();for(Schema.SObjectField f:fields.values()){Schema.DescribeFieldResult d=f.getDescribe();if(d.isNameField()){return d.getName();}}return null;}}";
+  const report=analyzeApexInvocations(helper,"Inspector.cls",name=>name==="Inspector.consume"?{method:name,argumentIndices:[0]}:undefined,schemaResolver);
+  assert.ok(report.captures.get(report.sites[0].offset)?.length,source);
+});

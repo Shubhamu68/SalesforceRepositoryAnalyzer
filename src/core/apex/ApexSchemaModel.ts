@@ -1,6 +1,7 @@
 import type {ApexObjectSchema,ApexSchemaField,MetadataResult} from "../metadata/ApexMetadataProvider.js";
 import type {ApexValue} from "./ApexValueEvaluator.js";
-import type {ApexCallResolver} from "./ApexTypeSystem.js";
+import {canonicalApexType,type ApexCallResolver} from "./ApexTypeSystem.js";
+import {stripApexComments,type SourceNode} from "./ApexSourceModel.js";
 import {readApexMemberOperation} from "./ApexReadOperations.js";
 import {compareScalars,knownBoolean,splitScalarOperator} from "./ApexScalarOperators.js";
 
@@ -245,4 +246,92 @@ export function evaluateSchemaExpression(expr:string,ctx:SchemaExpressionContext
     if(receiver.kind==="unknown"&&ctx.receiverEligible)return receiver;
   }
   return undefined;
+}
+
+/** Structural Schema argument compatibility shared by effect consumers.
+ * No inferred application type, unknown token or legacy field-name inventory. */
+export function schemaEffectArgument(value:ApexValue,type:string|undefined):boolean{
+  const t=canonicalApexType(type);
+  if(isSchemaFieldMap(value))return t==="map<string,schema.sobjectfield>"&&value.entries.every(([,v])=>v.kind==="schema"&&v.schemaType==="fieldToken");
+  if(value.kind!=="schema")return false;
+  return t===({objectToken:"schema.sobjecttype",objectDescribe:"schema.describesobjectresult",
+    fieldToken:"schema.sobjectfield",fieldDescribe:"schema.describefieldresult",displayType:"schema.displaytype"} as const)[value.schemaType];
+}
+const schemaMapType="map<string,schema.sobjectfield>";
+/** Syntax-only proof of read-only Schema chains. Input is already masked
+ * (literals/comments cannot supply executable tokens). A typed root is
+ * required. Do not treat an arbitrary method named getDescribe as pure. */
+export function maskSchemaEffectReads(visible:string,types:ReadonlyMap<string,string>,schemaAllowed:boolean):string{
+  let result=visible;
+  if(schemaAllowed){
+    result=result.replace(/\bSchema\s*\.\s*DisplayType\s*\.\s*([A-Za-z_]\w*)\b/gi,(all,kind:string)=>displayType(kind)?"0":all);
+  }
+  const roots=/\b(?:Schema\s*\.\s*getGlobalDescribe\s*\(\s*\)\s*\.\s*get\s*\(\s*(?:[A-Za-z_]\w*)?\s*\)|[A-Za-z_]\w*)(?=\s*\.)/gi;
+  const transitions:Record<string,Record<string,string>>={
+    "schema.sobjecttype":{getdescribe:"schema.describesobjectresult"},
+    "schema.describesobjectresult":{getname:"string",getsobjecttype:"schema.sobjecttype"},
+    [schemaMapType]:{get:"schema.sobjectfield",containskey:"boolean",size:"integer",isempty:"boolean",values:"list<schema.sobjectfield>"},
+    "schema.sobjectfield":{getdescribe:"schema.describefieldresult"},
+    "schema.describefieldresult":{getname:"string",gettype:"schema.displaytype",getrelationshipname:"string",getreferenceto:"list<schema.sobjecttype>",isnamefield:"boolean",getsobjectfield:"schema.sobjectfield"},
+    "schema.displaytype":{name:"string"},
+    "list<schema.sobjecttype>":{get:"schema.sobjecttype",size:"integer",isempty:"boolean"}
+  };
+  // Process from left to right; replace only proven complete read prefixes.
+  let out="",cursor=0;
+  for(const hit of result.matchAll(roots)){
+    const start=hit.index!;if(start<cursor)continue;
+    const root=hit[0];
+    // A bare match following a dot is a member, not a typed lexical root.
+    if(/\.\s*$/.test(result.slice(0,start)))continue;
+    let type=/^Schema\s*\./i.test(root)?(schemaAllowed?"schema.sobjecttype":undefined):canonicalApexType(types.get(root.toLowerCase()));
+    if(!type||!transitions[type])continue;
+    let end=start+root.length,read=/^Schema\s*\./i.test(root);
+    for(;;){
+      const rest=result.slice(end);
+      const fieldMap=/^\s*\.\s*fields\s*\.\s*getMap\s*\(\s*\)/i.exec(rest);
+      if(fieldMap&&type==="schema.describesobjectresult"){type=schemaMapType;end+=fieldMap[0].length;read=true;continue;}
+      const index=/^\s*\[\s*0\s*\]/.exec(rest);
+      if(index&&type==="list<schema.sobjecttype>"){type="schema.sobjecttype";end+=index[0].length;read=true;continue;}
+      const operation=/^\s*\.\s*([A-Za-z_]\w*)\s*\(\s*([A-Za-z_]\w*|\d+)?\s*\)/i.exec(rest);
+      if(!operation)break;
+      const op=operation[1].toLowerCase(),next:string|undefined=transitions[type]?.[op];
+      if(!next)break;
+      if(op!=="get"&&op!=="containskey"&&operation[2]!==undefined)break;
+      if(type==="list<schema.sobjecttype>"&&op==="get"&&operation[2]!=="0")break;
+      type=next;end+=operation[0].length;read=true;
+    }
+    if(!read)continue;
+    out+=result.slice(cursor,start)+"0";cursor=end;
+  }
+  return out+result.slice(cursor);
+}
+
+/** Recognize a unique name-field search, not arbitrary Map.values order.
+ * Supports a local Describe binding and a direct return inside its guard. */
+export function schemaNameFieldLoop(node:SourceNode,evaluate:(expression:string)=>ApexValue):ApexValue|undefined{
+  if(node.kind!=="for"||canonicalApexType(node.loopVariableType)!=="schema.sobjectfield"||!node.loopVariable||!node.iterable)return undefined;
+  const values=readApexMemberOperation(stripApexComments(node.iterable).trim(),n=>/^values$/i.test(n));
+  if(!values||values.args.length)return undefined;
+  const norm=(s:string)=>stripApexComments(s).replace(/\s+/g,"").toLowerCase();
+  const variable=node.loopVariable.toLowerCase();
+  const body=[...(node.body??[])];
+  let describe=variable+".getdescribe()";
+  if(body.length===2&&body[0].kind==="statement"){
+    const declaration=/^schema\.describefieldresult([a-z_]\w*)=([a-z_]\w*\.getdescribe\(\));$/.exec(norm(body[0].text??""));
+    if(!declaration||declaration[2]!==describe)return undefined;
+    describe=declaration[1];body.shift();
+  }
+  const guard=body[0];
+  if(body.length!==1||guard.kind!=="if"||guard.otherwise?.length||guard.body?.length!==1||
+    guard.body[0].kind!=="statement"||norm(guard.condition??"")!==describe+".isnamefield()"||
+    norm(guard.body[0].text??"")!=="return"+describe+".getname();")return undefined;
+  const map=evaluate(values.receiver);
+  if(!isSchemaFieldMap(map))return undefined;
+  const fields=map.entries.map(([,v])=>v);
+  if(fields.some(v=>v.kind!=="schema"||v.schemaType!=="fieldToken"||typeof v.field.nameField!=="boolean"))return undefined;
+  const matches=fields.filter(v=>v.kind==="schema"&&v.schemaType==="fieldToken"&&v.field.nameField===true);
+  if(!matches.length)return {kind:"null"}; // no iteration returns
+  if(matches.length!==1)return undefined; // no proven first matching value
+  const desc=evaluateSchemaRead(matches[0],"getDescribe",[]);
+  return desc?evaluateSchemaRead(desc,"getName",[]):undefined;
 }
