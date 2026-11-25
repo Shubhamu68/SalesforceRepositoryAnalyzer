@@ -6,14 +6,14 @@ import {findApexTernary} from "./ApexConditionalInvocation.js";
 import { parseCustomMetadataQuery } from "./ApexCustomMetadataQueryModel.js";
 import {evaluateBoundedStringOperation,isBoundedStringOperation} from "./ApexBoundedStringOperations.js";
 import {readApexReadOperation} from "./ApexReadOperations.js";
-import {evaluateSchemaExpression,evaluateSchemaRead,schemaReceiverEligible,type ApexSchemaValue} from "./ApexSchemaModel.js";
+import {evaluateSchemaExpression,evaluateSchemaRead,schemaReceiverEligible,isSchemaFieldMap,type ApexSchemaValue} from "./ApexSchemaModel.js";
 
 /** Portable abstract Apex values: no Salesforce API calls and no eval(). */
 export type ApexValue =
   | ApexSchemaValue
   | { kind: "text"; values: string[]; scalarType?: "boolean" }
   | { kind: "collection"; items: string[]; unique: boolean }
-  | { kind: "map"; entries: Array<[string,ApexValue]>; keyType?:"integer"|"string" }
+  | { kind: "map"; entries: Array<[string,ApexValue]>; keyType?:"integer"|"string"|"schemaField" }
   | { kind: "instance"; className:string; entries: Array<[string,ApexValue]> }
   | { kind: "instanceList"; elementType:string; items:ApexValue[] }
   | { kind: "record"; entries: Array<[string,ApexValue]>; metadataIdentity?:{type:string;developerName:string} }
@@ -146,6 +146,7 @@ export function addApexValues(left: ApexValue,right: ApexValue): ApexValue {
 /** Legacy JSON maps remain string-keyed. Numeric keys are only accepted
  * for a source-declared Integer map. */
 export function apexMapKey(map:Extract<ApexValue,{kind:"map"}>,value:ApexValue):string|null{
+  if(map.keyType==="schemaField")return value.kind==="text"&&value.scalarType===undefined&&value.values.length===1?value.values[0].toLowerCase():null;
   if(map.keyType==="integer")return value.kind==="number"&&Number.isInteger(value.value)&&value.value>=-2147483648&&value.value<=2147483647?String(value.value):null;
   if(map.keyType==="string")return value.kind==="text"&&value.scalarType===undefined&&value.values.length===1?value.values[0]:null;
   return onlyText(value);
