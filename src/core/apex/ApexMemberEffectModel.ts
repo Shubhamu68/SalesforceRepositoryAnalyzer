@@ -14,6 +14,8 @@ export class ApexMemberEffectModel{
   private readonly masked:string;
   readonly owner:string|undefined;
   private freshEligible=false;
+  private readonly outerMethods=new Set<IndexedApexMethod>();
+  private readonly inertDtos=new Map<string,Set<string>>();
   constructor(private readonly source:string,private readonly methods:readonly IndexedApexMethod[]){
     this.masked=maskApexSource(source);
     const cls=/\bclass\s+([A-Za-z_]\w*)\b/i.exec(this.masked);
@@ -24,6 +26,8 @@ export class ApexMemberEffectModel{
     if(open<0||close<0)return;
     let depth=0;const top=new Int16Array(close-open);
     for(let i=open;i<close;i++){top[i-open]=depth;if(this.masked[i]==="{")depth++;else if(this.masked[i]==="}")depth--;}
+    for(const method of methods)if(top[method.start-1-open]===1)this.outerMethods.add(method);
+    this.indexInertDtos(open,close,top);
     const declarations=/\b((?:(?:private|public|protected|global|static|final|transient)\s+)+)(String|Boolean|Integer|Long|Decimal|Double|Id)\s+([A-Za-z_]\w*)\s*(=|;)/gi;
     const starts=new Set<number>();
     for(const hit of this.masked.matchAll(declarations)){
@@ -67,6 +71,40 @@ export class ApexMemberEffectModel{
       if(!writes)this.fields.delete(name);
     }
   }
+  /** A narrow DTO proof: nested non-inheriting class, scalar automatic
+   * properties, and at most one constructor assigning only those properties
+   * from its parameters or literal scalars. No custom accessors or callbacks. */
+  private indexInertDtos(open:number,close:number,top:Int16Array):void{
+    for(const hit of this.masked.matchAll(/\bclass\s+([A-Za-z_]\w*)\s*\{/gi)){
+      if(top[hit.index!-open]!==1)continue;
+      const start=hit.index!+hit[0].length-1;
+      const end=matchingPair(this.masked,start,"{","}");
+      if(end<0||end>close)continue;
+      const name=hit[1],props=new Set<string>();
+      let body=this.masked.slice(start+1,end);
+      body=body.replace(/(?:@\w+\s*)?(?:public|private|global)\s+(?:String|Boolean|Integer|Long|Decimal|Double|Id)\s+([A-Za-z_]\w*)\s*\{\s*get\s*;\s*set\s*;\s*\}/gi,(_all,prop:string)=>{
+        props.add(prop.toLowerCase());return "";
+      });
+      const constructor=new RegExp("^\\s*(?:public|private|global)\\s+"+name+"\\s*\\(([^()]*)\\)\\s*\\{([\\s\\S]*)\\}\\s*$","i").exec(body);
+      if(constructor){
+        const parameters=new Set<string>();
+        let valid=true;
+        for(const part of constructor[1].split(",").filter(p=>p.trim())){
+          const param=/^\s*(?:String|Boolean|Integer|Long|Decimal|Double|Id)\s+([A-Za-z_]\w*)\s*$/i.exec(part);
+          if(!param){valid=false;break;}
+          parameters.add(param[1].toLowerCase());
+        }
+        for(const part of constructor[2].split(";").filter(p=>p.trim())){
+          const assignment=/^\s*this\.([A-Za-z_]\w*)\s*=\s*([A-Za-z_]\w*|[-+]?\d+|\s*)\s*$/i.exec(part);
+          // Quoted strings are masked; the syntax cannot contain a call.
+          if(!assignment||!props.has(assignment[1].toLowerCase())||
+            !(parameters.has(assignment[2].toLowerCase())||/^(?:true|false|null|[-+]?\d+|\s*)$/i.test(assignment[2]))){valid=false;break;}
+        }
+        if(!valid)continue;
+      }else if(body.trim())continue;
+      if(props.size)this.inertDtos.set(name.toLowerCase(),props);
+    }
+  }
   locals(method:IndexedApexMethod):Set<string>{
     const cached=this.localNames.get(method);if(cached)return cached;
     const names=new Set(method.parameters.map(p=>p.toLowerCase()));
@@ -86,7 +124,7 @@ export class ApexMemberEffectModel{
     return this.locals(method).has(n)?undefined:this.fields.get(n)?.key;
   }
   freshEntry(method:IndexedApexMethod):Map<string,ApexValue>|undefined{
-    if(!this.freshEligible||!this.fields.size||!method.isStatic||method.visibility!=="public")return undefined;
+    if(!this.freshEligible||!this.outerMethods.has(method)||!this.fields.size||!method.isStatic||method.visibility!=="public")return undefined;
     const prefix=this.masked.slice(Math.max(0,method.start-400),method.start);
     const head=prefix.slice(Math.max(prefix.lastIndexOf("}"),prefix.lastIndexOf(";"))+1);
     if(!/@AuraEnabled(?:\s*\([^)]*\))?\s+(?:public\s+static|static\s+public)\s+[\w.<>,\s[\]]+\s*\([^{};]*\)\s*\{\s*$/i.test(head))return undefined;
@@ -120,28 +158,55 @@ export class ApexMemberEffectModel{
     if(/^(?:List|Set)\s*<\s*String\s*>$|^Map\s*<\s*String\s*,\s*String\s*>$/i.test(type))
       return /^(?:get|contains|containsKey|isEmpty|size|keySet)$/i.test(operation);
     if(/^String$/i.test(type))return /^(?:trim|length|substring|endsWith|startsWith|contains|split|isEmpty|toLowerCase|toUpperCase)$/i.test(operation);
-    return /^Schema\.FieldSetMember$/i.test(type)&&/^getFieldPath$/i.test(operation);
+    return /^Schema\.FieldSetMember$/i.test(type)&&/^(?:getFieldPath|getLabel|getType)$/i.test(operation);
   }
   /** Strict replay subset: only local scalars/collections, direct member
    * writes and proven built-ins. Unsupported dispatch/callbacks fail closed. */
   replaySafe(method:IndexedApexMethod):boolean{
     const old=this.safe.get(method);if(old!==undefined)return old;
     this.safe.set(method,false);
-    if(!method.isStatic||method.visibility!=="private")return false;
+    if(!this.outerMethods.has(method)||!method.isStatic||method.visibility!=="private")return false;
     const types=this.types(method);
     const check=(source:string):boolean=>{
-      const visible=maskApexSource(source);
-      if(/\b(?:insert|update|upsert|delete|undelete|merge|throw|switch|try|while|do|new)\b/i.test(visible))return false;
+      let visible=maskApexSource(source);
+      if(/\b(?:insert|update|upsert|delete|undelete|merge|throw|switch|try|while|do)\b/i.test(visible))return false;
+      // Recognize only platform constructors and independently proven inert
+      // nested DTOs. Unknown allocations are not safe effect evidence.
+      for(const allocation of visible.matchAll(/\bnew\s+([A-Za-z_]\w*)(?:\s*<([^<>]+)>)?\s*\(/gi)){
+        if(/^(?:List|Set)$/i.test(allocation[1])&&/^\s*(?:String|Object)\s*$/i.test(allocation[2]??""))continue;
+        if(!allocation[2]&&this.inertDtos.has(allocation[1].toLowerCase()))continue;
+        return false;
+      }
+      // The only supported chained metadata call here is enum name() on
+      // FieldSetMember.getType(). It cannot dispatch into application Apex.
+      visible=visible.replace(/\b([A-Za-z_]\w*)\.getType\s*\(\s*\)\s*\.\s*name\s*\(\s*\)/gi,(all,receiver:string)=>
+        /^Schema\.FieldSetMember$/i.test(types.get(receiver.toLowerCase())??"")?receiver+".getType()":all);
+      // Serialization is permitted only for a source-proven automatic DTO
+      // and the read-only literal String.removeEnd suffix.
+      visible=visible.replace(/\bJSON\.serialize\s*\(\s*([A-Za-z_]\w*)\s*\)\s*\.\s*removeEnd\s*\(\s*\)/gi,(all,receiver:string)=>
+        this.inertDtos.has((types.get(receiver.toLowerCase())??"").toLowerCase())?"JSON.serialize("+receiver+")":all);
       if(/\+\+|--|\[[^\]]*\]\s*(?:=|\+=)|(?:[-*/%&|^]=)/.test(visible))return false;
       const write=/^\s*(?:[\w.]+(?:\s*<[\w\s,.<>]+>)?\s+)?((?:[A-Za-z_]\w*\s*\.\s*)?[A-Za-z_]\w*)\s*(?:=(?!=|>)|\+=|[-*/%&|^]=|\+\+|--)/i.exec(visible);
-      if(write&&!this.key(method,write[1].replace(/\s/g,""))&&!types.has(write[1].toLowerCase()))return false;
+      if(write&&!this.key(method,write[1].replace(/\s/g,""))&&!types.has(write[1].toLowerCase())){
+        const [receiver,property]=write[1].replace(/\s/g,"").toLowerCase().split(".");
+        if(!property||!this.inertDtos.get((types.get(receiver)??"").toLowerCase())?.has(property))return false;
+      }
       for(const hit of visible.matchAll(/\b([A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)*)\s*\(/g)){
         const name=hit[1].replace(/\s+/g,"");
-        if(safeCall.test(name))continue;
+        if(safeCall.test(name)||this.readOnlyCall(method,name))continue;
+        if(/^Label\.[A-Za-z_]\w*\.split$/i.test(name))continue;
+        if(/^JSON\.serialize$/i.test(name)){
+          const open=visible.indexOf("(",hit.index!);
+          const close=matchingPair(visible,open);
+          const receiver=visible.slice(open+1,close).trim().toLowerCase();
+          if(this.inertDtos.has((types.get(receiver)??"").toLowerCase()))continue;
+          return false;
+        }
+        if(this.inertDtos.has(name.toLowerCase())&&/\bnew\s*$/i.test(visible.slice(0,hit.index)))continue;
         const dot=name.lastIndexOf(".");
         if(dot>0&&safeMember.test(name.slice(dot+1))){
           const type=types.get(name.slice(0,dot).toLowerCase())??"";
-          if(/^(?:String|List\s*<\s*String\s*>|Set\s*<\s*String\s*>|Map\s*<\s*String\s*,\s*String\s*>|Schema\.FieldSetMember)$/i.test(type)){
+          if(/^(?:String|List\s*<\s*String\s*>|Set\s*<\s*String\s*>|Map\s*<\s*String\s*,\s*String\s*>|Schema\.FieldSetMember|List\s*<\s*Object\s*>)$/i.test(type)){
             if(/^(?:add|addAll|clear|put|putAll|remove)$/i.test(name.slice(dot+1))&&directEffectCall(source.trim().replace(/;$/,""))!==name.toLowerCase())return false;
             continue;
           }
