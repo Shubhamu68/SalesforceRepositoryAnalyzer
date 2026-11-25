@@ -110,12 +110,13 @@ test("Stage 3 final: Custom Metadata snapshots refresh between scans",async()=>{
   assert.equal(calls.length,2);
 });
 
-test("Stage 3 final: Metadata API Field Set fallback is read-only and scoped to the exact object",async()=>{
+test("Metadata API Field Set primary path is read-only and scoped to the exact object",async()=>{
   const calls:Array<{object:string;name:string}>=[];
+  let toolingCalls=0;
   const connection={
     status:{organizationId:"00Dmock",userId:"005mock",instanceUrl:"https://example.my.salesforce.com",
       connectedAt:"connection-1"},
-    queryAll:async()=>{throw Error("Tooling FieldSet metadata not available");},
+    queryAll:async()=>{toolingCalls++;throw Error("Tooling FieldSet metadata not available");},
     readFieldSetMetadata:async(object:string,name:string)=>{
       calls.push({object,name});
       return ["Id","Account.Name","CreatedDate"];
@@ -126,9 +127,10 @@ test("Stage 3 final: Metadata API Field Set fallback is read-only and scoped to 
   assert.equal(result.complete,true,JSON.stringify(result));
   assert.deepEqual(result.value,["Id","Account.Name","CreatedDate"]);
   assert.deepEqual(calls,[{object:"Account",name:"Export_Fields"}]);
+  assert.equal(toolingCalls,0);
 });
 
-test("Stage 3 final: denied Metadata API fallback is not silently accepted",async()=>{
+test("Denied Metadata API with unavailable Tooling fallback is not silently accepted",async()=>{
   const connection={
     status:{organizationId:"00Dmock",userId:"005mock",instanceUrl:"https://example.my.salesforce.com",
       connectedAt:"connection-1"},
@@ -178,4 +180,36 @@ test("CMDT provider issues validated server-side typed WHERE filters and accepts
     {field:"Active__c OR Name",value:true},
   ]);
   assert.equal(invalid.complete,false);assert.equal(calls.length,1);
+});
+
+
+test("Field Set SOAP failure falls back to Tooling while preserving exact identity and order",async()=>{
+  const calls:string[]=[];
+  const connection={
+    status:{organizationId:"00Dmock",userId:"005mock",instanceUrl:"https://example.my.salesforce.com",connectedAt:"connection-1"},
+    readFieldSetMetadata:async()=>{calls.push("soap");throw Error("Metadata access unavailable");},
+    queryAll:async(soql:string)=>{
+      if(soql.includes("SELECT Id, DeveloperName")){
+        calls.push("inventory");
+        return [{Id:"0IX000000000001AAA",DeveloperName:"Export_Fields",EntityDefinition:{QualifiedApiName:"Account"}}];
+      }
+      calls.push("detail");return [{Metadata:{displayedFields:[{field:"Id"},{field:"Owner.Name"}]}}];
+    },
+  } as unknown as SalesforceOrgConnection;
+  const result=await new SalesforceApexMetadataProvider(connection).getFieldSetFields("Account","Export_Fields");
+  assert.equal(result.complete,true);
+  assert.deepEqual(result.value,["Id","Owner.Name"]);
+  assert.deepEqual(calls,["soap","inventory","detail"]);
+});
+
+test("Invalid Field Set SOAP members cannot be accepted when fallback also fails",async()=>{
+  const connection={
+    status:{organizationId:"00Dmock",userId:"005mock",instanceUrl:"https://example.my.salesforce.com",connectedAt:"connection-1"},
+    readFieldSetMetadata:async()=>["Name","Bad field"],
+    queryAll:async()=>{throw Error("INVALID_FIELD");},
+  } as unknown as SalesforceOrgConnection;
+  const result=await new SalesforceApexMetadataProvider(connection).getFieldSetFields("Account","Export_Fields");
+  assert.equal(result.complete,false);
+  assert.match(result.reason??"",/members are invalid/);
+  assert.match(result.reason??"",/INVALID_FIELD/);
 });
