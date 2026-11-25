@@ -36,7 +36,7 @@ export function proveInstanceArgumentEffects(method:IndexedApexMethod,args:reado
     }
     visible=visible.replace(/\b[A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)+/g," true ");
     for(const token of visible.matchAll(/\b[A-Za-z_]\w*\b/g)){
-      if(!locals.has(token[0].toLowerCase())&&!/^(?:true|false|null)$/i.test(token[0]))return false;
+      if(inputs.get(token[0].toLowerCase())?.kind==="instance"||(!locals.has(token[0].toLowerCase())&&!/^(?:true|false|null)$/i.test(token[0])))return false;
     }
     return !/[;]|\+=|(?:^|[^=!<>])=(?!=|>)/.test(visible)||allowWrite;
   };
@@ -54,7 +54,7 @@ export function proveInstanceArgumentEffects(method:IndexedApexMethod,args:reado
       if(/^return\s+/i.test(source)){if(!expression(source.replace(/^return\s+/i,"")))return false;continue;}
       const declaration=parseApexDeclaration(maskApexSource(source));
       if(declaration){
-        if(!scalar.test(declaration.type)||locals.has(declaration.name.toLowerCase()))return false;
+        if(depth!==0||!scalar.test(declaration.type)||locals.has(declaration.name.toLowerCase()))return false;
         const eq=maskApexSource(source).indexOf("=");
         if(eq>=0&&!expression(source.slice(eq+1)))return false;
         locals.add(declaration.name.toLowerCase());continue;
