@@ -272,14 +272,18 @@ export function evaluateApexExpression(
       :unknown("Collection constructor input is not resolved: "+
         (argument.kind==="unknown"?argument.reason:"input is not a collection."));
   }
-  const fieldSet=/^([A-Za-z_]\w*)\.SObjectType\.getDescribe\(\)\.fieldSets\.getMap\(\)\.get\(([^()]*)\)$/i.exec(expr);
+  // Both source-level Field Set access forms refer to the same ordered
+  // live-org metadata inventory. Neither reads business data.
+  const fieldSet=/^([A-Za-z_]\w*)\.SObjectType\.getDescribe\(\)\.fieldSets\.getMap\(\)\.get\(([^()]*)\)$/i.exec(expr)??
+    /^Schema\.SObjectType\.([A-Za-z_]\w*)\.fieldSets\.getMap\(\)\.get\(([^()]*)\)$/i.exec(expr);
   if(fieldSet){
     const name=evaluateApexExpression(fieldSet[2],context,depth+1);
     if(name.kind!=="text"||name.values.length!==1)
       return unknown("Field Set name depends on unproven Apex runtime input.");
     return {kind:"fieldSet",objectApiName:fieldSet[1],developerName:name.values[0]};
   }
-  const fieldSetChain=/^([A-Za-z_]\w*)\.SObjectType\.getDescribe\(\)\.fieldSets\.getMap\(\)\.get\(([\s\S]+)\)\.getFields\(\)$/i.exec(expr);
+  const fieldSetChain=/^([A-Za-z_]\w*)\.SObjectType\.getDescribe\(\)\.fieldSets\.getMap\(\)\.get\(([\s\S]+)\)\.getFields\(\)$/i.exec(expr)??
+    /^Schema\.SObjectType\.([A-Za-z_]\w*)\.fieldSets\.getMap\(\)\.get\(([\s\S]+)\)\.getFields\(\)$/i.exec(expr);
   if(fieldSetChain){
     const name=evaluateApexExpression(fieldSetChain[2],context,depth+1);
     return name.kind==="text"&&name.values.length===1
