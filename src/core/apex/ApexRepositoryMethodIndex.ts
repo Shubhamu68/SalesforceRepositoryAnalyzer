@@ -1,3 +1,4 @@
+import {outerApexClass} from "./ApexClassModel.js";
 import path from "node:path";
 import {countApex,timeApex} from "./ApexPerformance.js";
 import {apexSymbols} from "./ApexSymbolTable.js";
@@ -151,11 +152,12 @@ export class ApexRepositoryMethodIndex {
           /^Database\.executeBatch$/i.test(name)&&args.length>=1&&args.length<=2?{method:name,argumentIndices:[0]}:undefined);
         for(const site of calls){
           const allocation=/^\s*new\s+([A-Za-z_]\w*)\s*\(/i.exec(site.argument);
-          if(!allocation)continue;
           const method=owner.methods.filter(m=>m.start<=site.offset&&site.offset<m.end)
             .sort((a,b)=>(a.end-a.start)-(b.end-b.start))[0];
           if(!method)continue;
-          const key=allocation[1].toLowerCase();
+          const type=allocation?.[1]??apexSymbols(owner.source,owner.methods).expressionType(method,site.argument,site.offset);
+          if(!type||!/^[A-Za-z_]\w*$/.test(type))continue;
+          const key=type.toLowerCase();
           const candidates=this.batchAllocations.get(key)??[];
           if(candidates.length<=MAX_CALL_CONTEXTS)candidates.push({caller:owner,method,offset:site.offset,expressions:[site.argument]});
           this.batchAllocations.set(key,candidates);
@@ -529,9 +531,9 @@ export class ApexRepositoryMethodIndex {
     const empty={count:0,arguments:[] as ApexValue[][],bounded:false};
     if(method.isStatic||method.name.toLowerCase()!=="start"||method.parameters.length!==1)return empty;
     const masked=maskApexSource(owner.source);
-    const declaration=/\bclass\s+([A-Za-z_]\w*)\s+implements\s+Database\s*\.\s*Batchable\s*<\s*[A-Za-z_]\w*\s*>\s*\{/i.exec(masked);
-    if(!declaration||declaration[1].toLowerCase()!==owner.className.toLowerCase()||
-       !/\bstart\s*\(\s*Database\s*\.\s*BatchableContext\s+[A-Za-z_]\w*\s*\)\s*\{\s*$/i.test(masked.slice(Math.max(0,method.start-250),method.start)))return empty;
+    const declaration=outerApexClass(owner.source);
+    if(!declaration?.batch||declaration.parent||declaration.name.toLowerCase()!==owner.className.toLowerCase()||
+       !/^database\.batchablecontext$/i.test(method.parameterTypes?.[0]??""))return empty;
     const targetIndex=method.body.findIndex(n=>n.start<=offset&&offset<n.end);
     const target=method.body[targetIndex];
     if(targetIndex<0||target?.kind!=="statement"||
