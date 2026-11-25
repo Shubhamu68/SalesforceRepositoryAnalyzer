@@ -714,7 +714,7 @@ export class ApexDataFlowEngine {
       }
       if(this.argumentProbe&&this.argumentProbe.offset>=node.start&&this.argumentProbe.offset<node.end)
         this.argumentProbe.results.push(this.argumentProbe.expressions.map(()=>unknown("Runtime loop invocation context is unproven.")));
-      return {states:[state,changed],returns:effects.possibleReturn?[unknown("Runtime loop may return an unproven value.")]:[]};
+      return {states:[state,changed],returns:effects.possibleReturn||effects.opaque?[unknown("Runtime loop may return an unproven value.")]:[]};
     }
     // Opaque unsupported control flow might modify any previously known symbol.
     for(const name of state.values.keys())state.values.set(name,
