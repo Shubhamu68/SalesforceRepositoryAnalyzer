@@ -1,7 +1,8 @@
-import { splitApexTopLevel, stripApexComments, maskApexSource } from "./ApexSourceModel.js";
+import { splitApexTopLevel, stripApexComments, maskApexSource, matchingPair } from "./ApexSourceModel.js";
 import {compareScalars,integerArithmetic,knownBoolean,splitScalarOperator} from "./ApexScalarOperators.js";
 import {findApexTernary} from "./ApexConditionalInvocation.js";
 import { parseCustomMetadataQuery } from "./ApexCustomMetadataQueryModel.js";
+import {evaluateBoundedStringOperation,isBoundedStringOperation} from "./ApexBoundedStringOperations.js";
 
 /** Portable abstract Apex values: no Salesforce API calls and no eval(). */
 export type ApexValue =
@@ -347,6 +348,34 @@ export function evaluateApexExpression(
     return context.resolveCall?.("Apex.construct",[textValue(allocation[1]),...args])??
       unknown("Apex constructor "+allocation[1]+" is not proven.");
   }
+  // Simple lexical list/index access. A metadata result without ORDER BY
+  // has no proven positional identity unless exactly one row matched.
+  const indexed=/^([A-Za-z_]\w*)\s*\[([\s\S]+)\]$/.exec(expr);
+  if(indexed){
+    const receiver=evaluateApexExpression(indexed[1],context,depth+1);
+    const index=evaluateApexExpression(indexed[2],context,depth+1);
+    if(index.kind==="number"&&Number.isInteger(index.value)&&index.value>=0){
+      if(receiver.kind==="records"&&receiver.items.length===1&&index.value===0)
+        return {kind:"record",entries:receiver.items[0]};
+      if(receiver.kind==="collection"&&!receiver.unique&&index.value<receiver.items.length)
+        return textValue(receiver.items[index.value]);
+      if(receiver.kind==="instanceList"&&index.value<receiver.items.length)
+        return receiver.items[index.value];
+    }
+    return unknown("Indexed Apex value or row ordering is not proven.");
+  }
+  // Evaluate the trailing operation of a chain using the existing expression
+  // evaluator for its receiver; only a fixed allowlist of exact operations.
+  const visible=maskApexSource(expr);
+  for(const match of visible.matchAll(/\.\s*([A-Za-z_]\w*)\s*\(/g)){
+    if(!isBoundedStringOperation(match[1]))continue;
+    const open=match.index!+match[0].length-1;
+    if(matchingPair(visible,open)!==visible.length-1)continue;
+    const receiver=evaluateApexExpression(expr.slice(0,match.index),context,depth+1);
+    const input=expr.slice(open+1,-1).trim();
+    const args=input?splitApexTopLevel(input,",").map(x=>evaluateApexExpression(x,context,depth+1)):[];
+    return evaluateBoundedStringOperation(receiver,match[1],args);
+  }
   const call=/^([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(([\s\S]*)\)$/s.exec(expr);
   if(call){
     const name=call[1];
@@ -426,6 +455,10 @@ export function evaluateApexExpression(
     }
     // Pure scalar conversions used by immutable static initializers and
     // dynamic SELECT fragments. Runtime/collection inputs remain unknown.
+    if((lname==="math.min"||lname==="math.max")&&args.length===2&&args.every(v=>v.kind==="number"&&Number.isInteger(v.value)&&v.value>=-2147483648&&v.value<=2147483647)){
+      const numbers=args.map(v=>v.kind==="number"?v.value:0);
+      return {kind:"number",value:lname==="math.min"?Math.min(...numbers):Math.max(...numbers)};
+    }
     if(lname==="string.valueof"&&args.length===1){
       if(args[0].kind==="text")return {kind:"text",values:args[0].values};
       if(args[0].kind==="number")return textValue(String(args[0].value));
@@ -462,6 +495,10 @@ export function evaluateApexExpression(
       return booleanValue(lname==="string.isblank"?blank:!blank);
     }
     if(lname==="string.escapesinglequotes"&&args.length===1){
+      if(args[0].kind==="unknown"&&args[0].fragments){
+        return {...args[0],reason:"escapeSingleQuotes input unknown: "+args[0].reason,
+          fragments:args[0].fragments.map(part=>part.kind==="literal"?{...part,text:part.text.replace(/'/g,"\\\'")}:part)};
+      }
       if(args[0].kind!=="text")return unknown("escapeSingleQuotes input unknown: "+
         (args[0].kind==="unknown"?args[0].reason:"input is not text."));
       return merged(args[0].values.map(x=>x.replace(/'/g,"\\'")));
