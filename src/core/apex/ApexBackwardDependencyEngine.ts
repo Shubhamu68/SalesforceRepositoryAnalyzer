@@ -11,6 +11,7 @@ import {evaluateApexReadOperation} from "./ApexValueEvaluator.js";
 import {applyApexStringCollectionMutation,apexIterationValues,mergeApexRuntimeMembers,proveApexAddOnlyIteration,type ApexRuntimeCollectionMembers} from "./ApexCollectionOperations.js";
 import {knownBoolean} from "./ApexScalarOperators.js";
 import {evaluateSchemaExpression,schemaReceiverEligible,isSchemaFieldMap,mutateSchemaFieldMap} from "./ApexSchemaModel.js";
+import {metadataSelectorHelper} from "./ApexCustomMetadataQueryModel.js";
 import {reportApexDependency,type ApexDependencyObserver} from "./ApexDependencyDiagnostics.js";
 
 const clean=(s:string)=>stripApexComments(s).trim();
@@ -296,6 +297,25 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
           const args=pieces.map(arg=>resolve(frame,arg,offset,locals));
           const exact=args.every(a=>!a.annotations.length&&!a.runtimeMembers&&!a.describeObject&&
             (a.value.kind==="number"||a.value.kind==="null"||a.value.kind==="text"&&a.value.values.length===1));
+          if(!exact&&policy.allowMetadataCandidateRows&&target&&resolveExternal&&members.length&&
+            args.length===1&&args[0].value.kind==="unknown"&&!args[0].annotations.length&&!args[0].runtimeMembers&&
+            !args[0].describeObject&&!index?.hasSourceClass("String")&&
+            !/\bclass\s+String\b/i.test(maskApexSource(frame.source))&&
+            !apexSymbols(frame.source,frame.methods).hasLocalBinding(target,"String",target.start)){
+            const query=metadataSelectorHelper(target);
+            if(query&&members.every(m=>query.fields.some(f=>f.toLowerCase()===m.toLowerCase()))){
+              const rowKey=frame.key+"|metadata-selector|"+offset+"|"+target.start;
+              const selected=choices.get(rowKey);
+              if(selected?.kind==="row")return ev({kind:"record",entries:selected.row});
+              note(frame,offset,"METADATA_SELECTOR_CANDIDATE_REQUEST",query.type);
+              const rows=resolveExternal("Apex.metadataSelectorCandidates",[textValue(query.expression)]);
+              note(frame,offset,rows?.kind==="records"?"METADATA_SELECTOR_ROWS_RETURNED":"METADATA_SELECTOR_ROWS_UNAVAILABLE",
+                query.type,rows?.kind==="records"?rows.items.length:undefined);
+              if(rows?.kind!=="records"||!rows.items.length||rows.items.length>MAX_EDGES)
+                return ev(reject("complete bounded metadata selector candidates unavailable","METADATA_SELECTOR_ROWS_UNAVAILABLE"));
+              throw new Expand(rowKey,rows.items.map(row=>({kind:"row",row})));
+            }
+          }
           if(exact){
             const values=args.map(a=>a.value);
             const result=resolveExternal?.(name,values,hints,frame.filePath)??index?.evaluateReturn(frame.filePath,name,values,resolveExternal,hints);
@@ -487,6 +507,17 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
               return blocked("MAP_ALIAS_OR_WRITE");
             }
             if(n.kind==="if"){
+              // A selected metadata row cannot be null. Follow the proven
+              // branch of the explicit null guard; never execute guard code.
+              if(type?.endsWith("__mdt")&&current.value.kind==="record"){
+                const guard=new RegExp("^\\s*(?:"+name+"\\s*(==|!=)\\s*null|null\\s*(==|!=)\\s*"+name+")\\s*$","i").exec(clean(n.condition??""));
+                if(guard){
+                  const truth=(guard[1]??guard[2])==="!=";
+                  if(!visit(truth?n.body??[]:n.otherwise??[],conditional,bindings))return false;
+                  note(frame,n.start,"METADATA_NULL_GUARD_RESOLVED",name);
+                  continue;
+                }
+              }
               if(rx(name).test(maskApexSource(n.condition??""))&&
                 !new RegExp("^\\s*!?\\s*"+name+"\\s*\\.\\s*isEmpty\\s*\\(\\s*\\)\\s*$","i").test(clean(n.condition??"")))return blocked("GUARD_DEPENDS_ON_TARGET");
               const condition=clean(n.condition??"");

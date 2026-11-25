@@ -1,4 +1,5 @@
-import {maskApexSource, stripApexComments} from "./ApexSourceModel.js";
+import {maskApexSource, stripApexComments,type IndexedApexMethod} from "./ApexSourceModel.js";
+import {canonicalApexType,parseApexDeclaration} from "./ApexTypeSystem.js";
 
 /** Shared syntax for a bounded, read-only Custom Metadata SELECT. No Apex
  * execution or query string interpolation is performed by this parser. */
@@ -50,4 +51,49 @@ export function parseCustomMetadataQuery(source:string):MetadataLoopQuery|undefi
     }
   }
   return {expression,type:parsed[2],fields,predicates,...(limit?{singletonLimit:true as const}:{})};
+}
+
+/** Recognize a source-proven, side-effect-free metadata selector helper.
+ * Its body must consist solely of an optional blank guard, a typed singleton
+ * SELECT and an empty-list guard/first-row return. No arbitrary Apex runs. */
+export function metadataSelectorHelper(method:IndexedApexMethod):MetadataLoopQuery|undefined{
+  if(method.visibility!=="private"||!method.isStatic||method.parameters.length!==1||
+    canonicalApexType(method.parameterTypes?.[0])!=="string")return undefined;
+  const parameter=method.parameters[0].toLowerCase();
+  if(!API.test(parameter))return undefined;
+  const normalized=(s:string)=>stripApexComments(s).replace(/\s+/g,"").toLowerCase();
+  const nodes=[...method.body];
+  const first=nodes[0];
+  if(first?.kind==="if"){
+    if(normalized(first.condition??"")!=="string.isblank("+parameter+")"||
+      first.otherwise?.length||first.body?.length!==1||
+      first.body[0].kind!=="statement"||normalized(first.body[0].text??"")!=="returnnull;")return undefined;
+    nodes.shift();
+  }
+  if(nodes.length!==2&&nodes.length!==3)return undefined;
+  const declaration=nodes[0];
+  if(declaration.kind!=="statement")return undefined;
+  const source=stripApexComments(declaration.text??"").trim();
+  const local=parseApexDeclaration(source);
+  const initializer=/^[\s\S]*?=\s*(\[\s*SELECT\b[\s\S]*\])\s*;$/i.exec(source);
+  if(!local||!initializer)return undefined;
+  const query=parseCustomMetadataQuery(initializer[1]);
+  if(!query?.singletonLimit||local.type!=="list<"+query.type.toLowerCase()+">"||
+    canonicalApexType(method.returnType)!==query.type.toLowerCase())return undefined;
+  const selector=query.predicates.filter(p=>p.bind);
+  if(selector.length!==1||selector[0].field.toLowerCase()!=="developername"||
+    selector[0].right.toLowerCase()!==parameter||
+    query.predicates.some(p=>!p.bind&&p.field.toLowerCase()==="developername"))return undefined;
+  const variable=local.name.toLowerCase(),last=nodes.at(-1)!;
+  if(last.kind!=="statement")return undefined;
+  if(nodes.length===2){
+    if(normalized(last.text??"")!=="return"+variable+".isempty()?null:"+variable+"[0];")return undefined;
+  }else{
+    const guard=nodes[1];
+    if(guard.kind!=="if"||guard.otherwise?.length||guard.body?.length!==1||guard.body[0].kind!=="statement")return undefined;
+    const condition=normalized(guard.condition??""),body=normalized(guard.body[0].text??""),tail=normalized(last.text??"");
+    if(!((condition===variable+".isempty()"&&body==="returnnull;"&&tail==="return"+variable+"[0];")||
+      (condition==="!"+variable+".isempty()"&&body==="return"+variable+"[0];"&&tail==="returnnull;")))return undefined;
+  }
+  return query;
 }

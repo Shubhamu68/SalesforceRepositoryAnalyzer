@@ -4,7 +4,7 @@ import {ApexDataFlowEngine,type ApexFlowOptions} from "./ApexDataFlowEngine.js";
 import type {ApexInvocationSelector} from "./ApexInvocationModel.js";
 import {listValue,textValue,unknown,type ApexValue} from "./ApexValueEvaluator.js";
 import type {ApexRepositoryMethodIndex} from "./ApexRepositoryMethodIndex.js";
-import {planCustomMetadataRequest,resolveCustomMetadataRows,type CustomMetadataRequest,type CustomMetadataInventory} from "./ApexCustomMetadataQueries.js";
+import {planCustomMetadataRequest,planCustomMetadataSelectorCandidates,resolveCustomMetadataRows,type CustomMetadataRequest,type CustomMetadataInventory} from "./ApexCustomMetadataQueries.js";
 import type {ApexMetadataProvider} from "../metadata/ApexMetadataProvider.js";
 import {resolveSchemaSnapshot,resolveSchemaFieldMap} from "./ApexSchemaModel.js";
 
@@ -153,6 +153,16 @@ export class ApexAnalysisEngine {
       if(rows.items.length!==1)return unknown("Custom Metadata getInstance record identity is ambiguous.");
       if(field)return rows.items[0].find(([key])=>key.toLowerCase()===field.toLowerCase())?.[1]??unknown("Custom Metadata record omitted requested field.");
       return {kind:"record",entries:rows.items[0],metadataIdentity:{type,developerName}};
+    }
+    if(name==="Apex.metadataSelectorCandidates"){
+      if(args.length!==1||args[0]?.kind!=="text"||args[0].scalarType||args[0].values.length!==1)
+        return unknown("Custom Metadata candidate selector identity is unresolved.");
+      const request=planCustomMetadataSelectorCandidates(args[0].values[0]);
+      if("kind" in request)return request;
+      const found=metadataInventories.get(request.key);
+      if(found)return resolveCustomMetadataRows(request,found);
+      requestedMetadata.set(request.key,request);
+      return unknown("Complete Custom Metadata selector candidates require authoritative metadata.");
     }
     if(name==="Apex.metadataRows"){
       if(args[0]?.kind!=="text"||args[0].values.length!==1)

@@ -320,3 +320,47 @@ test("backward typed map reads replay exact local mutations but reject alias esc
     else assert.deepEqual(back.candidates.map(c=>c.value),[booleanValue(!middle)],JSON.stringify(back));
   }
 });
+
+test("source-proven metadata selector candidates preserve literal filters and row correlation",async()=>{
+  const source=[
+    "public class Inspector {",
+    "public static void run(String reportName){",
+    "Config__mdt cfg=getConfig(reportName);if(cfg==null){return;}",
+    "Inspector.consume(cfg.Object__c+'/'+cfg.Field_Set__c);}",
+    "private static Config__mdt getConfig(String developerName){",
+    "if(String.isBlank(developerName)){return null;}",
+    "List<Config__mdt> cfgs=[SELECT DeveloperName,Object__c,Field_Set__c,Optional_Field__c FROM Config__mdt WHERE DeveloperName=:developerName AND Active__c=true LIMIT 1];",
+    "return cfgs.isEmpty()?null:cfgs[0];}}"
+  ].join("\n");
+  const filePath="Inspector.cls",index=new ApexRepositoryMethodIndex([{filePath,source}]);
+  const calls:CustomMetadataFilter[][]=[];
+  const metadata:ApexMetadataProvider={
+    scopeKey:"selector-candidate-fixture",getObjectFieldNames:async()=>({complete:false,source:"LIVE_ORG"}),
+    getCustomMetadataRecords:async(type,fields,filters)=>{
+      assert.equal(type,"Config__mdt");assert.ok(fields.includes("DeveloperName"));calls.push([...(filters??[])]);
+      return {complete:true,source:"LIVE_ORG",value:[
+        {DeveloperName:"A",Object__c:"Account",Field_Set__c:"AccountFields",Optional_Field__c:null,Active__c:true},
+        {DeveloperName:"B",Object__c:"Contact",Field_Set__c:"ContactFields",Optional_Field__c:null,Active__c:true},
+        {DeveloperName:"C",Object__c:"Lead",Field_Set__c:"InactiveFields",Optional_Field__c:null,Active__c:false}
+      ]};
+    }
+  };
+  const session=new ApexAnalysisEngine(index,metadata);
+  const use={expression:"cfg.Object__c+'/'+cfg.Field_Set__c",offset:source.indexOf("Inspector.consume")};
+  const result=await session.analyze(filePath,ctx=>traceApexDependencies(source,filePath,use,index,ctx.resolveExternal,{allowMetadataCandidateRows:true}));
+  assert.deepEqual(result.candidates.map(c=>c.value).sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b))),
+    [textValue("Account/AccountFields"),textValue("Contact/ContactFields")],JSON.stringify(result));
+  assert.deepEqual(calls,[[{field:"Active__c",value:true}]]);
+  const exactOnly=await session.analyze(filePath,ctx=>traceApexDependencies(source,filePath,use,index,ctx.resolveExternal));
+  assert.ok(exactOnly.candidates.every(c=>c.value.kind==="unknown"),JSON.stringify(exactOnly));
+});
+test("metadata candidate helpers with unsupported effects or filters remain unknown",()=>{
+  for(const extra of ["System.debug(developerName);","developerName='A';"]){
+    const source="public class Inspector {public static void run(String name){Config__mdt cfg=getConfig(name);Inspector.consume(cfg.Object__c);}private static Config__mdt getConfig(String developerName){"+extra+"List<Config__mdt> cfgs=[SELECT Object__c FROM Config__mdt WHERE DeveloperName=:developerName LIMIT 1];return cfgs.isEmpty()?null:cfgs[0];}}";
+    const filePath="Inspector.cls",index=new ApexRepositoryMethodIndex([{filePath,source}]);
+    let requests=0;
+    const result=traceApexDependencies(source,filePath,{expression:"cfg.Object__c",offset:source.indexOf("Inspector.consume")},index,(name)=>{if(name==="Apex.metadataSelectorCandidates")requests++;return undefined;},{allowMetadataCandidateRows:true});
+    assert.equal(requests,0);
+    assert.ok(result.candidates.every(c=>c.value.kind==="unknown"),JSON.stringify(result));
+  }
+});
