@@ -97,3 +97,18 @@ test("known configuration helper propagates singleton record to another generic 
   const result=await engine.analyzeInvocations(source,"Consumer.cls",name=>name==="Inspector.inspect"?{method:name,argumentIndices:[0]}:undefined);
   assert.deepEqual(result.captures.get(result.sites[0].offset)?.map(v=>v.arguments),[[textValue("Account")]]);
 });
+
+
+test("invocation prefix avoids unrelated branches that cannot reach the selected site",()=>{
+  const source="public class Builder { public static void run(Boolean route,Boolean a,Boolean b,Boolean c){ if(route){String x='Id';String y='Id';String z='Id';if(a){x='Name';}if(b){y='Phone';}if(c){z='Email';}External.inspect(x,y,z);}else{Inspector.inspect('Name');} } }";
+  const result=analyzeApexInvocations(source,"Builder.cls",name=>name==="Inspector.inspect"?{method:name,argumentIndices:[0]}:undefined,undefined,undefined,{maxPaths:2});
+  assert.equal(result.exceeded,false);
+  assert.deepEqual(result.captures.get(result.sites[0].offset)?.map(v=>v.arguments),[[textValue("Name")]]);
+});
+
+test("selected invocation frontier does not include post-target branches",()=>{
+  const source="public class Builder { public static void run(Boolean route,Boolean a,Boolean b){if(route){String x='Id';if(a){x='Name';}Inspector.inspect(x);}else{String y='Id';if(a){y='Phone';}if(b){y+='Email';}External.inspect(y);}}}";
+  const result=analyzeApexInvocations(source,"Builder.cls",name=>name==="Inspector.inspect"?{method:name,argumentIndices:[0]}:undefined,undefined,undefined,{maxPaths:2});
+  assert.equal(result.exceeded,false);
+  assert.deepEqual(result.captures.get(result.sites[0].offset)?.map(v=>v.arguments).sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b))),[[textValue("Id")],[textValue("Name")]]);
+});
