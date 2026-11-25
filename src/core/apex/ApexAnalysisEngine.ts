@@ -2,7 +2,7 @@ import type {ApexCallResolver,ApexArgumentTypes} from "./ApexTypeSystem.js";
 import {countApex,timeApex} from "./ApexPerformance.js";
 import {ApexDataFlowEngine,type ApexFlowOptions} from "./ApexDataFlowEngine.js";
 import type {ApexInvocationSelector} from "./ApexInvocationModel.js";
-import {listValue,unknown,type ApexValue} from "./ApexValueEvaluator.js";
+import {listValue,textValue,unknown,type ApexValue} from "./ApexValueEvaluator.js";
 import type {ApexRepositoryMethodIndex} from "./ApexRepositoryMethodIndex.js";
 import {planCustomMetadataRequest,resolveCustomMetadataRows,type CustomMetadataRequest,type CustomMetadataInventory} from "./ApexCustomMetadataQueries.js";
 import type {ApexMetadataProvider} from "../metadata/ApexMetadataProvider.js";
@@ -130,6 +130,24 @@ export class ApexAnalysisEngine {
         :unknown("Complete Field Set "+object+"."+fieldSet+
           " unavailable from org metadata: "+
           (selected?.reason??"Runtime Field Set identity not proven in this scan."));
+    }
+    if(name==="Apex.metadataGetInstance"){
+      if((args.length!==2&&args.length!==3)||args.some(v=>v.kind!=="text"||v.values.length!==1))return unknown("Custom Metadata getInstance requires a proven developer name.");
+      const [type,developerName,field]=args.map(v=>v.kind==="text"?v.values[0]:"");
+      if(!/^[A-Za-z_]\w*__mdt$/i.test(type)||!/^[A-Za-z_]\w*$/.test(developerName)||field&&!/^[A-Za-z_]\w*$/.test(field))
+        return unknown("Unsupported Custom Metadata getInstance identity or member.");
+      // The same provider, exact filters, scan-local memoization and row
+      // completeness checks as the Custom Metadata SOQL interpreter.
+      const request=planCustomMetadataRequest("[SELECT "+(field??"DeveloperName")+" FROM "+type+" WHERE DeveloperName = :developerName LIMIT 1]",[textValue(developerName)]);
+      if("kind" in request)return request;
+      const found=metadataInventories.get(request.key);
+      if(!found){requestedMetadata.set(request.key,request);return unknown("Custom Metadata getInstance requires authoritative metadata.");}
+      const rows=resolveCustomMetadataRows(request,found);
+      if(rows.kind!=="records")return rows;
+      if(!rows.items.length)return field?unknown("Custom Metadata record is absent."):{kind:"null"};
+      if(rows.items.length!==1)return unknown("Custom Metadata getInstance record identity is ambiguous.");
+      if(field)return rows.items[0].find(([key])=>key.toLowerCase()===field.toLowerCase())?.[1]??unknown("Custom Metadata record omitted requested field.");
+      return {kind:"record",entries:rows.items[0],metadataIdentity:{type,developerName}};
     }
     if(name==="Apex.metadataRows"){
       if(args[0]?.kind!=="text"||args[0].values.length!==1)
