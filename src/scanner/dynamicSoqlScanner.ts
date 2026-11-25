@@ -88,8 +88,10 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
           }
           knownVariants=variants.size;
           if(mode!==null)for(const args of scoped.conditionalArguments){
-            if(args[0]?.kind!=="text")continue;
-            for(const value of args[0].values){
+            const value=args[0];
+            const proof=value?.kind==="unknown"?provePartialSoql(value):undefined;
+            const candidates=value?.kind==="text"?value.values:proof?[proof.text]:[];
+            for(const value of candidates){
               const text=value.trim();
               if(!/^SELECT\b/i.test(text)||variants.has(text)||variants.size>=MAX_VARIANTS)continue;
               const parsed=parseNestedSoql(text,site.line),fields=extractSoqlExpressionFields(text),declared=classifySoqlMode(text);
@@ -111,7 +113,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
             " complete execution coverage is not proven.";
         }
       }
-      if(conditionalFrameworkVariants)explanation+=" Conditional framework variants: "+conditionalFrameworkVariants+". Constructor-only or sampled map-key scenarios are conditional source evidence, not observed batch submissions. Other receiver states remain unverified.";
+      if(conditionalFrameworkVariants)explanation+=" Conditional framework variants: "+conditionalFrameworkVariants+". Constructor-only or sampled map-key scenarios are conditional source evidence, not observed batch submissions. Typed runtime slots may use synthetic parser placeholders. Other receiver states remain unverified.";
       let partialStructureVariants=0;
       // Grammar-specific proof is intentionally confined to this adapter.
       // The core Apex value remains unknown; no synthetic query is executed.
