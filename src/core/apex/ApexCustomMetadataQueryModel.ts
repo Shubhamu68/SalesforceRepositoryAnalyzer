@@ -6,6 +6,8 @@ export interface MetadataLoopQuery {
   expression:string;
   type:string;
   fields:string[];
+  /** Only singleton LIMIT 1, with unique matching row proof. */
+  singletonLimit?:true;
   predicates:Array<{field:string;right:string;bind:boolean}>;
 }
 const API=/^[A-Za-z_]\w*$/;
@@ -13,8 +15,10 @@ const API=/^[A-Za-z_]\w*$/;
 export function parseCustomMetadataQuery(source:string):MetadataLoopQuery|undefined {
   const expression=stripApexComments(source).trim();
   if(!/^\[\s*SELECT\b[\s\S]*\]$/i.test(expression))return undefined;
-  const body=expression.slice(1,-1).trim()
+  let body=expression.slice(1,-1).trim()
     .replace(/\s+WITH\s+(?:SECURITY_ENFORCED|USER_MODE|SYSTEM_MODE)\s*$/i,"");
+  const limit=/\s+LIMIT\s+1\s*$/i.exec(maskApexSource(body));
+  if(limit)body=body.slice(0,limit.index).trim();
   const parsed=/^SELECT\s+([\w\s,]+?)\s+FROM\s+([A-Za-z_]\w*__mdt)(?:\s+WHERE\s+([\s\S]+))?$/i.exec(body);
   if(!parsed)return undefined;
   const fields=parsed[1].split(",").map(x=>x.trim());
@@ -45,5 +49,5 @@ export function parseCustomMetadataQuery(source:string):MetadataLoopQuery|undefi
       predicates.push({field:m[1],right:bind?right.replace(/\s*\.\s*/g,"."):right,bind});
     }
   }
-  return {expression,type:parsed[2],fields,predicates};
+  return {expression,type:parsed[2],fields,predicates,...(limit?{singletonLimit:true as const}:{})};
 }
