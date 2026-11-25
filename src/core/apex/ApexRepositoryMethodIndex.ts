@@ -288,8 +288,11 @@ export class ApexRepositoryMethodIndex {
     let result:ApexValue;
     try {
       const engine=new ApexDataFlowEngine(owner.source,{sourceMethods:owner.methods,
-        resolveExternal:(nestedName,nestedArgs,nestedTypes)=>resolveExternal?.(nestedName,nestedArgs,nestedTypes) ??
-          this.evaluateReturn(owner.filePath,nestedName,nestedArgs,resolveExternal,nestedTypes),
+        resolveExternal:(nestedName,nestedArgs,nestedTypes)=>{
+          if(nestedName==="Apex.construct"&&nestedArgs[0]?.kind==="text"&&nestedArgs[0].values.length===1)
+            return this.constructInstance(owner.filePath,nestedArgs[0].values[0],nestedArgs.slice(1),resolveExternal,nestedTypes?.slice(1));
+          return resolveExternal?.(nestedName,nestedArgs,nestedTypes)??this.evaluateReturn(owner.filePath,nestedName,nestedArgs,resolveExternal,nestedTypes);
+        },
       });
       result=timeApex("helper.repository_evaluation_ms",()=>engine.summarizeMethodReturn(method,args));
       if(result.kind==="instance"||result.kind==="instanceList")result=unknown("Instance-return alias transfer is not yet proven.");
