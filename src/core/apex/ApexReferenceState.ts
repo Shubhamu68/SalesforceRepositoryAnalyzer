@@ -40,10 +40,11 @@ export function collectApexReferences(inputs:readonly ApexValue[],limit=128):Ape
 }
 /** Simultaneous identity-based substitutions. An updated root already
  * carries its updated descendants; do not rewrite it a second time. */
-export function replaceApexReferences(values:ApexEnvironment,replacements:ReadonlyMap<ApexValue,ApexValue>):void{
+export function replaceApexReferences(values:ApexEnvironment,replacements:ReadonlyMap<ApexValue,ApexValue>):boolean{
+  let found=false;
   const memo=new Map<ApexValue,ApexValue>();
   const visit=(value:ApexValue,depth:number):ApexValue=>{
-    const replacement=replacements.get(value);if(replacement!==undefined)return replacement;
+    const replacement=replacements.get(value);if(replacement!==undefined){found=true;return replacement;}
     if(!isApexReference(value))return value;
     if(depth>12)return unknown("Reference update exceeded supported nesting.");
     const cached=memo.get(value);if(cached!==undefined)return cached;
@@ -57,4 +58,5 @@ export function replaceApexReferences(values:ApexEnvironment,replacements:Readon
     memo.set(value,result);return result;
   };
   for(const [key,value] of values)values.set(key,visit(value,0));
+  return found;
 }
