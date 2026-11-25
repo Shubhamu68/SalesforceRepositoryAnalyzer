@@ -101,7 +101,7 @@ export class ApexInstanceIndex {
     const constructors=shapes[0].constructors;
     return constructors.length?constructors.filter(c=>c.externallyCallable).slice(0,4):[{parameters:[],parameterTypes:[]}];
   }
-  construct(name:string,args:readonly ApexValue[],filePath:string,resolve?:Resolver,types?:ApexArgumentTypes):ApexValue|undefined{
+  construct(name:string,args:readonly ApexValue[],filePath:string,resolve?:Resolver,types?:ApexArgumentTypes,normalScenario=false):ApexValue|undefined{
     let candidates=this.shapes.get(name.toLowerCase())??[];
     if(!candidates.length&&!name.includes(".")){
       candidates=[...this.shapes.values()].flat().filter(c=>
@@ -114,10 +114,10 @@ export class ApexInstanceIndex {
       return unknown("Unsupported instance declarations or initialization for "+name+".");
     if(this.activeAllocations.has(shape.name.toLowerCase())||this.activeAllocations.size>=8)return unknown("Recursive or deeply nested instance initialization.");
     this.activeAllocations.add(shape.name.toLowerCase());
-    try{return this.constructShape(shape,name,args,resolve,types);}
+    try{return this.constructShape(shape,name,args,resolve,types,normalScenario);}
     finally{this.activeAllocations.delete(shape.name.toLowerCase());}
   }
-  private constructShape(shape:ClassShape,name:string,args:readonly ApexValue[],resolve?:Resolver,types?:ApexArgumentTypes):ApexValue{
+  private constructShape(shape:ClassShape,name:string,args:readonly ApexValue[],resolve?:Resolver,types?:ApexArgumentTypes,normalScenario=false):ApexValue{
     const constructor=selectApexOverload(shape.constructors,args.length,types);
     if(!constructor&&(shape.constructors.length||args.length))
       return unknown("Constructor overload is not uniquely proven for "+name+".");
@@ -163,6 +163,12 @@ export class ApexInstanceIndex {
         if(++operations>500)return false;
         if(node.kind==="block"){if(!scoped(node.body??[]))return false;continue;}
         if(node.kind==="if"){
+          if(node.condition==="__apex_exception_path_unknown__"&&normalScenario&&node.otherwise?.length){
+            // Only a hypothetical successful initialization path. Actual
+            // submitted receivers never discard exception alternatives.
+            if(!scoped(node.body??[]))return false;
+            continue;
+          }
           const condition=knownBoolean(evaluate(node.condition??"",parameters));
           if(condition===undefined)return false;
           if(!scoped(condition?node.body??[]:node.otherwise??[]))return false;
