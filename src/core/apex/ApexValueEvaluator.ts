@@ -1,3 +1,4 @@
+import {lexicalValue,referenceMember} from "./ApexReferenceState.js";
 import type {ApexArgumentTypes,ApexCallResolver} from "./ApexTypeSystem.js";
 import { splitApexTopLevel, stripApexComments, maskApexSource, matchingPair } from "./ApexSourceModel.js";
 import {compareScalars,integerArithmetic,knownBoolean,splitScalarOperator} from "./ApexScalarOperators.js";
@@ -172,7 +173,7 @@ export function evaluateApexExpression(
   if(/^null$/i.test(expr))return {kind:"null"};
   // Qualified member overrides are method-local abstract state, not changes
   // to the repository snapshot.
-  const tracked=context.values.get(expr);
+  const tracked=/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/.test(expr)?lexicalValue(context.values,expr):context.values.get(expr);
   if(tracked!==undefined)return tracked;
   if(/^[A-Za-z_]\w*$/.test(expr))return context.values.get(expr) ??
     context.resolveCall?.("Apex.unqualifiedField",[textValue(expr)]) ??
@@ -183,19 +184,22 @@ export function evaluateApexExpression(
   const label=/^(?:System\.)?Label\.([A-Za-z_]\w*)$/i.exec(expr);
   if(label)return context.resolveCall?.("System.Label",[textValue(label[1])]) ??
     unknown("Custom Label "+label[1]+" is not available from complete org metadata.");
+  if(/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*){2,}$/.test(expr)){
+    const member=referenceMember(context.values,expr);if(member!==undefined)return member;
+  }
   const instanceMember=/^([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/.exec(expr);
-  if(instanceMember && context.values.get(instanceMember[1])?.kind==="instance"){
-    const instance=context.values.get(instanceMember[1])!;
+  if(instanceMember && lexicalValue(context.values,instanceMember[1])?.kind==="instance"){
+    const instance=lexicalValue(context.values,instanceMember[1])!;
     if(instance.kind==="instance")return instance.entries.find(([key])=>key.toLowerCase()===instanceMember[2].toLowerCase())?.[1]??unknown("Instance member "+instanceMember[2]+" is not proven.");
   }
-  if(instanceMember && context.values.get(instanceMember[1])?.kind==="record"){
-    const record=context.values.get(instanceMember[1])!;
+  if(instanceMember && lexicalValue(context.values,instanceMember[1])?.kind==="record"){
+    const record=lexicalValue(context.values,instanceMember[1])!;
     if(record.kind==="record")
       return record.entries.find(([key])=>key.toLowerCase()===instanceMember[2].toLowerCase())?.[1] ??
         unknown("Metadata row field "+instanceMember[2]+" was not completely retrieved.");
   }
   const constant=/^([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/.exec(expr);
-  if(constant&&context.values.has(constant[1]))
+  if(constant&&lexicalValue(context.values,constant[1])!==undefined)
     return unknown("Instance member expression "+expr+" depends on runtime object state.");
   if(constant)return context.resolveCall?.("Apex.constant",[textValue(expr)]) ??
     unknown(/^[a-z]/.test(constant[1])
