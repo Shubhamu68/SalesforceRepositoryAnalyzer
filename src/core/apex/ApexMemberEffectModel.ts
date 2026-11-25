@@ -2,7 +2,6 @@ import {maskApexSource,matchingPair,type IndexedApexMethod,type SourceNode} from
 import {evaluateApexExpression,unknown,type ApexValue} from "./ApexValueEvaluator.js";
 
 interface ScalarMember {name:string;key:string;initial:ApexValue}
-const scalar=/^(?:String|Boolean|Integer|Long|Decimal|Double|Id)$/i;
 const safeCall=/^(?:String\.(?:join|valueOf|isBlank|isNotBlank|isEmpty|escapeSingleQuotes)|Math\.(?:min|max)|System\.debug)$/i;
 const safeMember=/^(?:add|addAll|clear|put|putAll|remove|contains|containsKey|isEmpty|size|get|keySet|trim|length|substring|endsWith|startsWith|toLowerCase|toUpperCase|getFieldPath)$/i;
 
@@ -57,6 +56,15 @@ export class ApexMemberEffectModel{
       const field=[...starts].some(start=>start<=hit.index!&&hit.index!-start<100&&
         !/[;{}]/.test(this.masked.slice(start,hit.index!)));
       if(!field){this.freshEligible=false;break;}
+    }
+    // Only track declarations that are visibly assigned somewhere in a
+    // method. Immutable snapshots keep their existing repository semantics.
+    for(const [name,field] of this.fields){
+      const writes=this.methods.some(method=>{
+        const body=this.masked.slice(method.start,method.end);
+        return new RegExp("\\b(?:"+this.owner+"\\s*\\.\\s*)?"+name+"\\s*(?:=(?!=|>)|[+\\-*/%&|^]=|\\+\\+|--)","i").test(body);
+      });
+      if(!writes)this.fields.delete(name);
     }
   }
   locals(method:IndexedApexMethod):Set<string>{
@@ -138,4 +146,15 @@ export function memberEffectModel(source:string,methods:readonly IndexedApexMeth
   if(!Object.isFrozen(methods))return new ApexMemberEffectModel(source,methods);
   const old=cache.get(methods);if(old)return old;
   const model=new ApexMemberEffectModel(source,methods);cache.set(methods,model);return model;
+}
+
+/** A single top-level call whose arguments contain no invocations. Effects
+ * cannot be replayed inside an arbitrary expression or speculative branch. */
+export function directEffectCall(source:string):string|undefined{
+  const visible=maskApexSource(source).trim();
+  const call=/^([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(/.exec(visible);
+  if(!call)return undefined;
+  const open=visible.indexOf("(");
+  if(matchingPair(visible,open)!==visible.length-1||/[()]/.test(visible.slice(open+1,-1)))return undefined;
+  return call[1].toLowerCase();
 }
