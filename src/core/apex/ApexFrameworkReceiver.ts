@@ -6,9 +6,10 @@ type Instance=Extract<ApexValue,{kind:"instance"}>;
 /** Initial start() receiver is a submission snapshot, not a static singleton.
  * This proof covers local assignments, conditional exits and reads of modeled
  * fields/maps. No member writes, opaque control flow or arbitrary callbacks. */
-export function supportsReceiverPrefix(method:IndexedApexMethod,offset:number,receiver:Instance):boolean{
+export function supportsReceiverPrefix(method:IndexedApexMethod,offset:number,receiver:Instance,selectedPrivateCall=false):boolean{
   const fields=new Map(receiver.entries.map(([k,v])=>[k.toLowerCase(),v]));
   const locals=new Set(method.parameters.map(p=>p.toLowerCase()));
+  let selected=false;
   const expression=(source:string,scope:Set<string>):boolean=>{
     const masked=maskApexSource(source);
     // A read-only Describe chain returns a runtime Id; no actual record
@@ -43,7 +44,17 @@ export function supportsReceiverPrefix(method:IndexedApexMethod,offset:number,re
       if(node.start<=offset&&offset<node.end){
         // A selected invocation must be the first evaluated call in this
         // statement; earlier effects in an argument list cannot be ignored.
-        return /^\s*(?:return\s*)?$/.test(maskApexSource((node.text??"").slice(0,offset-node.start)));
+        const head=maskApexSource((node.text??"").slice(0,offset-node.start));
+        selected=true;
+        if(/^\s*(?:return\s*)?$/.test(head))return true;
+        if(!selectedPrivateCall)return false;
+        // The helper must be the first evaluated call. Permit a local
+        // declaration or scalar local assignment, not a member write.
+        const declaration=parseApexDeclaration(head);
+        if(declaration&&/=\s*$/.test(head))
+          return !scope.has(declaration.name.toLowerCase())&&!fields.has(declaration.name.toLowerCase());
+        const assignment=/^\s*([A-Za-z_]\w*)\s*=\s*$/.exec(head);
+        return !!assignment&&scope.has(assignment[1].toLowerCase());
       }
       const source=(node.text??"").trim().replace(/;\s*$/,"");
       if(/^return\b/i.test(source)){if(!expression(source.slice(6),scope))return false;continue;}
@@ -59,7 +70,7 @@ export function supportsReceiverPrefix(method:IndexedApexMethod,offset:number,re
     }
     return true;
   };
-  return visit(method.body,0,locals);
+  return visit(method.body,0,locals)&&(!selectedPrivateCall||selected);
 }
 
 /** A finite map-domain sample is conditional on a successful lookup, never
@@ -88,4 +99,24 @@ export function receiverMapSamples(method:IndexedApexMethod,receiver:Instance,li
   if(shadowed(method.body))return {receivers:[receiver],sampled:false,bounded:false};
   const samples=keys.slice(0,limit).map(k=>({...receiver,entries:receiver.entries.map(([name,value]):[string,ApexValue]=>[name,name.toLowerCase()===match[2].toLowerCase()?{kind:"number",value:k}:value])}));
   return {receivers:[receiver,...samples],sampled:samples.length>0,bounded:keys.length>limit};
+}
+
+/** Conditional first execute() evidence: only a start method with a proven
+ * read-only body and direct QueryLocator returns is supported. No inference
+ * about later chunks, finish(), exception continuations or row contents. */
+export function supportsInitialBatchExecute(start:IndexedApexMethod,receiver:Instance):boolean{
+  if(!supportsReceiverPrefix(start,start.end,receiver))return false;
+  let returns=0;
+  const check=(nodes:readonly SourceNode[]):boolean=>nodes.every(node=>{
+    if(node.kind==="statement"&&/^\s*return\b/i.test(node.text??"")){
+      returns++;
+      if(!/^\s*return\s+Database\s*\.\s*getQueryLocator\s*\(/i.test(maskApexSource(node.text??"")))return false;
+    }
+    // A naked receiver could escape to an unmodeled consumer. Only explicit
+    // member access to this is allowed; the prefix proof rejects writes.
+    if(/\bthis\b(?!\s*\.)/i.test(maskApexSource(node.text??""))||
+       /\bthis\b(?!\s*\.)/i.test(maskApexSource(node.condition??"")))return false;
+    return check(node.body??[])&&check(node.otherwise??[]);
+  });
+  return check(start.body)&&returns>0;
 }

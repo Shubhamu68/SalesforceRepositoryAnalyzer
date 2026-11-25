@@ -144,3 +144,36 @@ test("duplicate batch query arguments leave bounded sampling capacity for later 
   assert.ok((counts.get("caller.batch_receiver_overflow_samples")??0)>0);
   assert.ok((counts.get("caller.batch_receiver_overflow_samples")??0)<=32);
 });
+
+test("stateful first execute carries constructor fields through a read-only start, but remains conditional",async()=>{
+  const batch="public class Work implements Database.Batchable<SObject>,Database.Stateful{private String fields;public Work(){fields='Name';}public Database.QueryLocator start(Database.BatchableContext bc){return Database.getQueryLocator('SELECT Id FROM Account');}public void execute(Database.BatchableContext bc,List<SObject> rows){Database.query('SELECT '+fields+' FROM Account');}public void finish(Database.BatchableContext bc){}}";
+  const result=await scan([{filePath:"Work.cls",source:batch}],"Work.cls");
+  assert.ok(result.queries.some(q=>q.query==="SELECT Name FROM Account"&&q.coverage==="CONDITIONAL_FRAMEWORK_CONTEXT"),JSON.stringify(result));
+  assert.equal(result.unresolved.length,1);
+  for(const variant of [
+    batch.replace(",Database.Stateful",""),
+    batch.replace("return Database.getQueryLocator","fields='Id';return Database.getQueryLocator"),
+    batch.replace("return Database.getQueryLocator","Other.mutate(this);return Database.getQueryLocator"),
+    batch.replace("private String fields","private transient String fields")
+  ]){
+    const rejected=await scan([{filePath:"Work.cls",source:variant}],"Work.cls");
+    assert.ok(!rejected.queries.some(q=>q.query==="SELECT Name FROM Account"&&q.coverage==="CONDITIONAL_FRAMEWORK_CONTEXT"),JSON.stringify(rejected));
+  }
+});
+test("private receiver dispatch preserves constructor state and call argument correlation",async()=>{
+  const batch="public class Work implements Database.Batchable<SObject>,Database.Stateful{private String fields;public Work(){fields='Name';}public Database.QueryLocator start(Database.BatchableContext bc){return Database.getQueryLocator('SELECT Id FROM Account');}public void execute(Database.BatchableContext bc,List<SObject> rows){this.fetch('Account');}private void fetch(String obj){Database.query('SELECT '+this.fields+' FROM '+obj);}public void finish(Database.BatchableContext bc){}}";
+  const result=await scan([{filePath:"Work.cls",source:batch}],"Work.cls");
+  assert.ok(result.queries.some(q=>q.query==="SELECT Name FROM Account"&&q.coverage==="CONDITIONAL_FRAMEWORK_CONTEXT"),JSON.stringify(result));
+  assert.equal(result.unresolved.length,1);
+  const mutated=batch.replace("this.fetch('Account');","fields='Id';this.fetch('Account');");
+  const unsafe=await scan([{filePath:"Work.cls",source:mutated}],"Work.cls");
+  assert.ok(!unsafe.queries.some(q=>q.query==="SELECT Name FROM Account"),JSON.stringify(unsafe));
+});
+test("private zero-argument dispatch from start is conditional, and unreachable call is not sampled",async()=>{
+  const batch="public class Work implements Database.Batchable<SObject>{private String query;public Work(){query='SELECT Name FROM Account';}public Database.QueryLocator start(Database.BatchableContext bc){return this.fetch();}private Database.QueryLocator fetch(){return Database.getQueryLocator(query);}}";
+  const result=await scan([{filePath:"Work.cls",source:batch}],"Work.cls");
+  assert.ok(result.queries.some(q=>q.query==="SELECT Name FROM Account"&&q.coverage==="CONDITIONAL_FRAMEWORK_CONTEXT"),JSON.stringify(result));
+  const unreachable=batch.replace("return this.fetch();","if(false){return this.fetch();}return Database.getQueryLocator('SELECT Id FROM Account');");
+  const rejected=await scan([{filePath:"Work.cls",source:unreachable}],"Work.cls");
+  assert.ok(!rejected.queries.some(q=>q.query==="SELECT Name FROM Account"),JSON.stringify(rejected));
+});

@@ -1,10 +1,10 @@
 import {isLiteralMapFactory} from "./ApexPureFactory.js";
-import {supportsReceiverPrefix,receiverMapSamples} from "./ApexFrameworkReceiver.js";
+import {supportsReceiverPrefix,receiverMapSamples,supportsInitialBatchExecute} from "./ApexFrameworkReceiver.js";
 import {outerApexClass} from "./ApexClassModel.js";
 import path from "node:path";
 import {countApex,timeApex} from "./ApexPerformance.js";
 import {apexSymbols} from "./ApexSymbolTable.js";
-import {selectApexOverload,type ApexArgumentTypes,type ApexCallResolver} from "./ApexTypeSystem.js";
+import {canonicalApexType,selectApexOverload,type ApexArgumentTypes,type ApexCallResolver} from "./ApexTypeSystem.js";
 import { ApexDataFlowEngine } from "./ApexDataFlowEngine.js";
 import {memberEffectModel} from "./ApexMemberEffectModel.js";
 import { ApexRepositorySyntaxInventory, maskApexSource, matchingPair, splitApexTopLevel,
@@ -103,6 +103,7 @@ const BASE_RECEIVER_KEY_LIMIT = 32;
 const BASE_RECEIVER_SAMPLE_LIMIT = 40;
 const MAX_EXTRA_RECEIVER_SAMPLES = 32;
 type BatchReceiver = Extract<ApexValue,{kind:"instance"}>;
+interface ReceiverCallEdge {caller:IndexedApexMethod;target:IndexedApexMethod;offset:number;expressions:string[]}
 interface BatchReceiverInventory {
   count:number;
   bounded:boolean;
@@ -675,6 +676,122 @@ export class ApexRepositoryMethodIndex {
     return {count:inventory.count,arguments:[...argumentsByValue.values()],conditionalArguments:[...conditionalArguments.values()],partialArguments:[...partialArguments.values()],scenarioCount,bounded};
   }
 
+  /** A bounded same-receiver path from a framework entry to an explicitly
+   * private instance method. Overloads are selected using lexical types.
+   * No arbitrary object dispatch, recursion, virtual calls or closed-world claim. */
+  private frameworkReceiverPaths(owner:IndexedSource,target:IndexedApexMethod,
+    entries:readonly IndexedApexMethod[]):Array<{entry:IndexedApexMethod;edges:ReceiverCallEdge[]}>{
+    const symbols=apexSymbols(owner.source,owner.methods);
+    const paths:Array<{entry:IndexedApexMethod;edges:ReceiverCallEdge[]}>=[];
+    const visit=(method:IndexedApexMethod,edges:ReceiverCallEdge[],seen:Set<IndexedApexMethod>)=>{
+      if(paths.length>=8||seen.has(method)||edges.length>3)return;
+      if(entries.includes(method)){paths.push({entry:method,edges});return;}
+      if(method.isStatic||method.visibility!=="private"||edges.length===3)return;
+      const name=method.name.toLowerCase();
+      const calls=discoverApexInvocations(owner.source,(qualified,raw)=>{
+        if(qualified.toLowerCase()!==name&&qualified.toLowerCase()!=="this."+name)return undefined;
+        const args=raw.length===1&&!raw[0].trim()?[]:raw;
+        // Direct literal/local/receiver-member arguments only. Do not ignore
+        // nested argument effects or pass the entire receiver as a value.
+        if(args.some(a=>! /^(?:(?:this\.)?[A-Za-z_]\w*|[-+]?\d+|'(?:\\.|[^'\\])*')$/i.test(a.trim())||/^this$/i.test(a.trim())))return undefined;
+        return {method:qualified,argumentIndices:args.map((_,i)=>i)};
+      });
+      for(const call of calls){
+        if(paths.length>=8)break;
+        const caller=owner.methods.filter(m=>m.start<=call.offset&&call.offset<m.end)
+          .sort((a,b)=>(a.end-a.start)-(b.end-b.start))[0];
+        if(!caller||caller.isStatic||!symbols.sameOwner(caller,method)||caller===method)continue;
+        const candidates=owner.methods.filter(m=>m.name.toLowerCase()===name&&symbols.sameOwner(caller,m));
+        if(selectApexOverload(candidates,call.arguments.length,symbols.argumentTypes(caller,call.arguments,call.offset))!==method)continue;
+        const next=new Set(seen);next.add(method);
+        visit(caller,[{caller,target:method,offset:call.offset,expressions:[...call.arguments]},...edges],next);
+      }
+    };
+    visit(target,[],new Set());
+    return paths;
+  }
+
+  /** Preserve a proven incoming receiver while probing a private call chain
+   * or first stateful execute chunk. These are always conditional variants.
+   * The ordinary start-site analysis and its existing budgets are unchanged. */
+  private probeLifecycleReceivers(owner:IndexedSource,target:IndexedApexMethod,offset:number,
+    expressions:readonly string[],resolveExternal?:ApexCallResolver):{arguments:ApexValue[][];scenarios:number;bounded:boolean}{
+    const empty={arguments:[] as ApexValue[][],scenarios:0,bounded:false};
+    if(target.isStatic)return empty;
+    const cls=outerApexClass(owner.source);
+    if(!cls?.batch||cls.parent||cls.name.toLowerCase()!==owner.className.toLowerCase()||this.classes.has("database"))return empty;
+    const symbols=apexSymbols(owner.source,owner.methods);
+    if(symbols.ownerAt(target.start)?.toLowerCase()!==owner.className.toLowerCase())return empty;
+    const frameworkEntry=(m:IndexedApexMethod,name:string,arity:number)=>!m.isStatic&&
+      (m.visibility==="public"||m.visibility==="global")&&m.name.toLowerCase()===name&&m.parameters.length===arity&&
+      canonicalApexType(m.parameterTypes?.[0])==="database.batchablecontext"&&symbols.sameOwner(target,m);
+    const starts=owner.methods.filter(m=>frameworkEntry(m,"start",1)&&canonicalApexType(m.returnType)==="database.querylocator");
+    if(starts.length!==1)return empty;
+    const start=starts[0];
+    const executes=cls.stateful&&!/\btransient\b/i.test(maskApexSource(owner.source))
+      ?owner.methods.filter(m=>frameworkEntry(m,"execute",2)&&canonicalApexType(m.returnType)==="void"&&/^list</.test(canonicalApexType(m.parameterTypes?.[1])??"")):[];
+    const entries=executes.length===1?[start,executes[0]]:[start];
+    if(target===start||(!entries.includes(target)&&target.visibility!=="private"))return empty;
+    // Reject lexical shadowing of platform Database for this proof.
+    const platformShadow=owner.methods.some(m=>symbols.lookup(m,"Database",m.start)!==undefined)||
+      /\b[A-Za-z_]\w*\s+Database\s*(?:[=;,)])/i.test(maskApexSource(owner.source));
+    if(platformShadow)return empty;
+    const paths=this.frameworkReceiverPaths(owner,target,entries);
+    if(!paths.length)return empty;
+    const inventory=this.batchReceiverInventory(owner,start,resolveExternal);
+    let scenarios=0,bounded=inventory.bounded;
+    const results=new Map<string,ApexValue[]>();
+    let probes=0;
+    for(const {value:receiver} of inventory.candidates){
+      for(const {entry,edges} of paths){
+        const executeEntry=entry!==start;
+        if(executeEntry&&!supportsInitialBatchExecute(start,receiver))continue;
+        if(!supportsReceiverPrefix(target,offset,receiver)||
+           edges.some(edge=>!supportsReceiverPrefix(edge.caller,edge.offset,receiver,true)))continue;
+        const resolver:ApexCallResolver=(name,args,types)=>{
+          if(name==="Apex.scopeField"&&args[0]?.kind==="text"&&args[0].values[0]?.toLowerCase()===owner.className.toLowerCase()&&
+             args[1]?.kind==="text"&&args[3]?.kind==="text"&&args[3].values[0]!=="true"){
+            const fieldName=args[1].values[0]?.toLowerCase();
+            const field=receiver.entries.find(([key])=>key.toLowerCase()===fieldName);
+            if(field)return field[1];
+          }
+          return resolveExternal?.(name,args,types)??this.evaluateReturn(owner.filePath,name,args,resolveExternal,types);
+        };
+        const probe=(method:IndexedApexMethod,site:number,exprs:readonly string[],seed?:ApexValue[])=>{
+          if(++probes>32){bounded=true;return [];}
+          const engine=new ApexDataFlowEngine(owner.source,{sourceMethods:owner.methods,maxOperations:2000,resolveExternal:resolver});
+          return engine.evaluateArgumentsAt(method,site,exprs,seed);
+        };
+        let seeds:Array<ApexValue[]|undefined>=[undefined];
+        for(const edge of edges){
+          const next=new Map<string,ApexValue[]>();
+          for(const seed of seeds){
+            // A literal reachability marker distinguishes a zero-argument
+            // call from the engine's unknown/unreachable fallback result.
+            for(const vector of probe(edge.caller,edge.offset,["true",...edge.expressions],seed)){
+              if(vector[0]?.kind!=="text"||vector[0].scalarType!=="boolean"||vector[0].values[0]!=="true")continue;
+              const args=vector.slice(1);
+              if(args.length===edge.target.parameters.length&&next.size<8)next.set(argumentIdentity(args),args);
+            }
+          }
+          seeds=[...next.values()];
+          if(!seeds.length)break;
+        }
+        for(const seed of seeds){
+          if(probes>=32||results.size>=32){bounded=true;break;}
+          scenarios++;
+          countApex(executeEntry?"caller.batch_first_execute_scenarios":"caller.batch_private_start_scenarios");
+          if(edges.length)countApex("caller.batch_private_receiver_paths");
+          for(const args of probe(target,offset,expressions,seed)){
+            if(args.some(v=>v.kind==="unknown"&&!v.fragments))continue;
+            if(results.size<32)results.set(argumentIdentity(args),args);
+          }
+        }
+      }
+    }
+    return {arguments:[...results.values()],scenarios,bounded};
+  }
+
   /** Evaluate selected invocation arguments in proven incoming contexts.
    * Evidence is kept separate from the all-path verdict and from permissions. */
   probeInvocationContexts(filePath:string,offset:number,expressions:readonly string[],
@@ -684,7 +801,8 @@ export class ApexRepositoryMethodIndex {
     const owner=this.paths.get(path.resolve(filePath));
     const method=owner?.methods.filter(m=>m.start<=offset&&offset<m.end)
       .sort((a,b)=>(a.end-a.start)-(b.end-b.start))[0];
-    if(!owner||!method||!method.parameters.length)return undefined;
+    if(!owner||!method)return undefined;
+    if(!method.parameters.length&&(method.isStatic||method.visibility!=="private"))return undefined;
     const contexts=this.resolveCallerContexts(filePath,method,resolveExternal);
     const argumentsByValue=new Map<string,ApexValue[]>();
     const partialArguments=new Map<string,ApexValue[]>();
@@ -710,7 +828,9 @@ export class ApexRepositoryMethodIndex {
     const batch=this.probeBatchReceivers(owner,method,offset,expressions,resolveExternal);
     for(const args of batch.arguments)argumentsByValue.set(JSON.stringify(args),args);
     for(const args of batch.partialArguments)if(partialArguments.size<32)partialArguments.set(argumentIdentity(args),args);
-    return {contexts,arguments:[...argumentsByValue.values()],partialArguments:[...partialArguments.values()],conditionalArguments:batch.conditionalArguments,bounded:bounded||batch.bounded,receiverContexts:batch.count,receiverScenarios:batch.scenarioCount};
+    const lifecycle=this.probeLifecycleReceivers(owner,method,offset,expressions,resolveExternal);
+    const conditional=new Map([...batch.conditionalArguments,...lifecycle.arguments].map(args=>[argumentIdentity(args),args]));
+    return {contexts,arguments:[...argumentsByValue.values()],partialArguments:[...partialArguments.values()],conditionalArguments:[...conditional.values()],bounded:bounded||batch.bounded||lifecycle.bounded,receiverContexts:batch.count,receiverScenarios:batch.scenarioCount+lifecycle.scenarios};
   }
 
   /**
