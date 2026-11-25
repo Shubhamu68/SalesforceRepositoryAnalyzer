@@ -1,3 +1,5 @@
+import {apexSymbols,type ApexSymbolTable} from "./ApexSymbolTable.js";
+import {selectApexOverload,type ApexCallResolver} from "./ApexTypeSystem.js";
 import {countApex,timeApex} from "./ApexPerformance.js";
 import {memberEffectModel,directEffectCall,isLiteralFieldSetRead,type ApexMemberEffectModel} from "./ApexMemberEffectModel.js";
 import {
@@ -29,7 +31,7 @@ export interface ApexCallValue {
 }
 export interface ApexFlowOptions {
   /** Pluggable read-only, preloaded metadata or constant value source. */
-  resolveExternal?: (name: string, args: ApexValue[]) => ApexValue | undefined;
+  resolveExternal?: ApexCallResolver;
   /** Only completely proven private-method caller contexts can narrow entry inputs. */
   resolvePrivateContexts?: (method: IndexedApexMethod) => ApexValue[][] | undefined;
   selectInvocation?:ApexInvocationSelector;
@@ -127,6 +129,8 @@ export class ApexDataFlowEngine {
   private readonly className:string|undefined;
   private currentMethod:IndexedApexMethod|undefined;
   private readonly effects:ApexMemberEffectModel;
+  private readonly symbols:ApexSymbolTable;
+  private evaluationOffset=0;
   private provenEffectCall:string|undefined;
   constructor(readonly source:string,options:ApexFlowOptions={}) {
     countApex("engine.instances");
@@ -138,11 +142,13 @@ export class ApexDataFlowEngine {
     this.className=/\bclass\s+([A-Za-z_]\w*)\b/i.exec(masked)?.[1];
     this.methods=options.sourceMethods??indexApexMethods(source);
     this.effects=memberEffectModel(source,this.methods);
+    this.symbols=apexSymbols(source,this.methods);
     this.sites=discoverApexInvocations(source,options.selectInvocation??dynamicDatabaseQuerySelector,this.methods);
   }
   private evaluate(expr:string, state:State, depth:number,allowEffects=false):ApexValue {
     const context:ApexExpressionContext={values:state.values,
-      resolveCall:(name,args)=>{
+      argumentTypes:expressions=>this.symbols.argumentTypes(this.currentMethod,expressions,this.evaluationOffset),
+      resolveCall:(name,args,argumentTypes)=>{
         if(name==="Apex.thisField"||name==="Apex.unqualifiedField"){
           const field=args[0];
           if(field?.kind!=="text"||field.values.length!==1||!this.className)
@@ -185,14 +191,16 @@ export class ApexDataFlowEngine {
           if(value?.kind==="collection"||value?.kind==="map")state.values.set(key,value);
           if(value!==undefined)return value;
         }
-        const external=this.options.resolveExternal?.(name,args);
+        const external=this.options.resolveExternal?.(name,args,argumentTypes);
         if(external!==undefined)return external;
         const ownName=name.replace(/^this\./i,"");
         const sameClass=this.className&&ownName.startsWith(this.className+".")
           ?ownName.slice(this.className.length+1):ownName;
-        const candidates=this.methods.filter(m=>m.name.toLowerCase()===sameClass.toLowerCase()
-          && m.parameters.length===args.length);
-        if(candidates.length!==1)return undefined;
+        const matches=this.methods.filter(m=>m.name.toLowerCase()===sameClass.toLowerCase()
+          && m.parameters.length===args.length&&(!this.currentMethod||this.symbols.sameOwner(this.currentMethod,m)));
+        const selected=selectApexOverload(matches,args.length,argumentTypes);
+        if(!selected)return matches.length?unknown("Apex overload is ambiguous or its source argument types are unproven: "+name):undefined;
+        const candidates=[selected];
         if(!args.length&&candidates[0].isStatic&&this.className){
           const lazy=this.options.resolveExternal?.("Apex.lazyGetter",[textValue(this.className),textValue(sameClass)]);
           if(lazy!==undefined)return lazy;
@@ -224,11 +232,13 @@ export class ApexDataFlowEngine {
         }
         let result:FrameResult;
         const previousMethod:IndexedApexMethod|undefined=this.currentMethod;
+        const previousOffset=this.evaluationOffset;
         this.currentMethod=candidates[0];
         try {
           result=this.execute(candidates[0].body,[{values:env,effectFrame:replay}],depth+1);
         }finally{
           this.currentMethod=previousMethod;
+          this.evaluationOffset=previousOffset;
           this.activeCalls.delete(key);
         }
         if(replay){
@@ -327,7 +337,10 @@ export class ApexDataFlowEngine {
         this.skippedInvocations.set(site.offset,(this.skippedInvocations.get(site.offset)??0)+1);
         continue;
       }
+      const previousOffset=this.evaluationOffset;
+      this.evaluationOffset=site.offset;
       const args=site.arguments.map(argument=>this.evaluate(argument,state,depth));
+      this.evaluationOffset=previousOffset;
       const value=args[0]??unknown("Invocation has no selected argument.");
       const access=args[1]??textValue("(default)");
       const captures=this.captures.get(site.offset)??[];
@@ -339,7 +352,9 @@ export class ApexDataFlowEngine {
     const probe=this.argumentProbe;
     if(probe&&start<=probe.offset&&probe.offset<end&&(onlyOffset===undefined||probe.offset===onlyOffset)&&
       invocationMayExecute(this.source.slice(start,end),probe.offset-start,condition=>this.evaluate(condition,clone(state),depth)))
+      {const previousOffset=this.evaluationOffset;this.evaluationOffset=probe.offset;
       probe.results.push(probe.expressions.map(expr=>this.evaluate(expr,state,depth)));
+      this.evaluationOffset=previousOffset;}
   }
   private statement(node:SourceNode,state:State,depth:number):ApexValue|undefined{
     const original=(node.text??"").trim().replace(/;\s*$/,"");
@@ -599,6 +614,7 @@ export class ApexDataFlowEngine {
   private runNode(node:SourceNode,state:State,depth:number):
     {states:State[];returns:ApexValue[]}{
     if(state.stopped||state.loopControl)return {states:[state],returns:[]};
+    this.evaluationOffset=node.start;
     if(depth===0&&this.activeSlice&&!this.activeSlice.has(node))return {states:[state],returns:[]};
     if(!this.budget.visit(node.start,this.currentMethod?.name??"(unknown method)")){
       return {states:[{values:new Map([...state.values.keys()].map((k):[string,ApexValue]=>
