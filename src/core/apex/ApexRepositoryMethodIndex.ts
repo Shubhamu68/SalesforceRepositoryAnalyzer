@@ -1,3 +1,4 @@
+import {supportsReceiverPrefix,receiverMapSamples} from "./ApexFrameworkReceiver.js";
 import {outerApexClass} from "./ApexClassModel.js";
 import path from "node:path";
 import {countApex,timeApex} from "./ApexPerformance.js";
@@ -533,38 +534,9 @@ export class ApexRepositoryMethodIndex {
     {count:number;arguments:ApexValue[][];bounded:boolean}{
     const empty={count:0,arguments:[] as ApexValue[][],bounded:false};
     if(method.isStatic||method.name.toLowerCase()!=="start"||method.parameters.length!==1)return empty;
-    const masked=maskApexSource(owner.source);
     const declaration=outerApexClass(owner.source);
     if(!declaration?.batch||declaration.parent||declaration.name.toLowerCase()!==owner.className.toLowerCase()||
        !/^database\.batchablecontext$/i.test(method.parameterTypes?.[0]??""))return empty;
-    const targetIndex=method.body.findIndex(n=>n.start<=offset&&offset<n.end);
-    const target=method.body[targetIndex];
-    if(targetIndex<0||target?.kind!=="statement"||
-      !/^\s*(?:return\s*)?$/i.test(masked.slice(target.start,offset)))return empty;
-    // Only declarations of local scalars whose expressions consist of
-    // literals, parameters, previously declared locals and simple receiver
-    // member reads. No calls, assignments to members, or getter chains.
-    const locals=new Set(method.parameters.map(p=>p.toLowerCase()));
-    const requiredFields=new Set<string>();
-    for(const node of method.body.slice(0,targetIndex)){
-      if(node.kind!=="statement")return empty;
-      const declaration=/^\s*(?:final\s+)?(?:String|Boolean|Integer|Long|Decimal|Double|Id)\s+([A-Za-z_]\w*)\s*=\s*([\s\S]+);\s*$/i.exec(node.text??"");
-      if(!declaration||locals.has(declaration[1].toLowerCase()))return empty;
-      const expr=maskApexSource(declaration[2]);
-      if(!/^[\w\s.+\-]*$/.test(expr)||/\+\+|--|\bnew\b/i.test(expr)||
-        /\b(?!this\b)[A-Za-z_]\w*\s*\./i.test(expr.replace(/\bthis\s*\.\s*[A-Za-z_]\w*/gi,"")))return empty;
-      // Every qualified reference must be a direct receiver field. Bare
-      // names must be a known local/parameter or a real field of this allocation.
-      const bare=expr.replace(/\bthis\s*\.\s*([A-Za-z_]\w*)/gi,(_whole,field:string)=>{
-        requiredFields.add(field.toLowerCase());return " ";
-      });
-      if(bare.includes("."))return empty;
-      for(const token of bare.matchAll(/\b[A-Za-z_]\w*\b/g)){
-        const name=token[0].toLowerCase();
-        if(!locals.has(name)&&!["true","false","null"].includes(name))requiredFields.add(name);
-      }
-      locals.add(declaration[1].toLowerCase());
-    }
     const calls=this.batchAllocations.get(owner.className.toLowerCase())??[];
     const receivers=new Map<string,Extract<ApexValue,{kind:"instance"}>>();
     let bounded=calls.length>8;
@@ -584,11 +556,16 @@ export class ApexRepositoryMethodIndex {
       if(receivers.size>=8)break;
     }
     const argumentsByValue=new Map<string,ApexValue[]>();
-    for(const instance of receivers.values()){
-      if([...requiredFields].some(field=>!instance.entries.some(([key])=>key.toLowerCase()===field)))continue;
+    let samples=0;
+    for(const original of receivers.values()){
+      if(!supportsReceiverPrefix(method,offset,original))continue;
+      const domain=receiverMapSamples(method,original,Math.max(0,32-samples));
+      bounded=bounded||domain.bounded;
+      for(const instance of domain.receivers){
+        if(++samples>40){bounded=true;break;}
       const engine=new ApexDataFlowEngine(owner.source,{sourceMethods:owner.methods,maxOperations:2000,
         resolveExternal:(name,args,types)=>{
-          if(name==="Apex.scopeField"&&args[0]?.kind==="text"&&args[0].values[0]?.toLowerCase()===owner.className.toLowerCase()&&args[1]?.kind==="text"){
+          if(name==="Apex.scopeField"&&args[0]?.kind==="text"&&args[0].values[0]?.toLowerCase()===owner.className.toLowerCase()&&args[1]?.kind==="text"&&args[3]?.kind==="text"&&args[3].values[0]!=="true"){
             const fieldName=args[1].values[0]?.toLowerCase();
             const field=instance.entries.find(([key])=>key.toLowerCase()===fieldName);
             if(field)return field[1];
@@ -599,7 +576,9 @@ export class ApexRepositoryMethodIndex {
         if(args.some(v=>v.kind==="unknown"))continue;
         argumentsByValue.set(JSON.stringify(args),args);
       }
+      }
     }
+    if(samples)countApex("caller.batch_receiver_samples",samples);
     return {count:receivers.size,arguments:[...argumentsByValue.values()],bounded};
   }
 
