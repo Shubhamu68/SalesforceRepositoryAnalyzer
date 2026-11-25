@@ -147,3 +147,46 @@ test("add-only unknown iterations preserve known members and explicit incomplete
   const joined=traceApexDependencies(source,"Worker.cls",{expression:"String.join(items,',')",offset:source.indexOf("Sink.consume")});
   assert.ok(joined.candidates.every(e=>e.value.kind==="unknown"),JSON.stringify(joined));
 });
+
+
+test("backward helper dispatch reuses repository overload and return evaluation",()=>{
+  const files=[
+    {filePath:"Worker.cls",source:"public class Worker {public static void run(){String kind='detail';List<String> fields=Utils.columns(kind);Sink.consume(fields);}}"},
+    {filePath:"Utils.cls",source:"public class Utils {public static List<String> columns(String kind){List<String> fields=new List<String>{'Id'};if(kind=='detail'){fields.add('Name');}return fields;}public static List<String> columns(Integer n){return new List<String>{'Wrong'};}}"}
+  ];
+  const root=files[0],events:string[]=[];
+  const trace=traceApexDependencies(root.source,root.filePath,{expression:"fields",offset:root.source.indexOf("Sink.consume")},new ApexRepositoryMethodIndex(files),undefined,{observe:e=>events.push(e.code)});
+  assert.deepEqual(trace.candidates.map(e=>e.value),[{kind:"collection",items:["Id","Name"],unique:false}],JSON.stringify(trace));
+  assert.ok(events.includes("SHARED_HELPER_RESOLVED"));
+});
+test("same-class static helper with control flow uses existing return summary",()=>{
+  const source="public class Worker {public static void run(){String value=choose('a');Sink.consume(value);}private static String choose(String key){if(key=='a'){return 'Name';}return 'Industry';}}";
+  const filePath="Worker.cls";
+  const trace=traceApexDependencies(source,filePath,{expression:"value",offset:source.indexOf("Sink.consume")},new ApexRepositoryMethodIndex([{filePath,source}]));
+  assert.deepEqual(trace.candidates.map(e=>e.value),[textValue("Name")],JSON.stringify(trace));
+});
+test("shared dispatch does not guess runtime inputs, mutable arguments, shadowed receivers or private cross-class returns",()=>{
+  const utils={filePath:"Utils.cls",source:"public class Utils {public static String columns(String key){return 'Name';}private static String secret(){return 'Secret';}public static String mutate(List<String> input){input.clear();return 'Wrong';}}"};
+  for(const source of [
+    "public class Worker {public static void run(String key){Sink.consume(Utils.columns(key));}}",
+    "public class Worker {public static void run(){List<String> cols=new List<String>{'Id'};Sink.consume(Utils.mutate(cols));}}",
+    "public class Worker {public static void run(Utils Utils){Sink.consume(Utils.columns('a'));}}",
+    "public class Worker {public static void run(){Sink.consume(Utils.secret());}}",
+    "public class Worker {public static void run(){Sink.consume(Utils.columns(null));}}".replace("columns(null)","secret()")
+  ]){
+    const filePath="Worker.cls";
+    const expression=source.slice(source.indexOf("Sink.consume(")+13,source.lastIndexOf(");"));
+    const result=traceApexDependencies(source,filePath,{expression,offset:source.indexOf("Sink.consume")},new ApexRepositoryMethodIndex([{filePath,source},utils]));
+    assert.ok(result.candidates.length&&result.candidates.every(e=>e.value.kind==="unknown"),JSON.stringify(result));
+  }
+});
+test("caller-frame helper resolution uses caller source rather than root source",()=>{
+  const files=[
+    {filePath:"Worker.cls",source:"public class Worker {public static void run(String field){Sink.consume(field);}}"},
+    {filePath:"Entry.cls",source:"public class Entry {public static void load(){String field=pick('yes');Worker.run(field);}private static String pick(String flag){if(flag=='yes'){return 'Name';}return 'Phone';}}"}
+  ];
+  const root=files[0],index=new ApexRepositoryMethodIndex(files);
+  const result=traceApexDependencies(root.source,root.filePath,{expression:"field",offset:root.source.indexOf("Sink.consume")},index,
+    (name,args,hints,from)=>index.evaluateReturn(from??root.filePath,name,args,undefined,hints));
+  assert.deepEqual(result.candidates.map(e=>e.value),[textValue("Name")],JSON.stringify(result));
+});

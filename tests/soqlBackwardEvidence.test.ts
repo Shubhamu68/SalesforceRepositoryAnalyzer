@@ -6,6 +6,7 @@ import {backtrackSoqlPermissionShapes} from "../src/analyzer/soqlBackwardEvidenc
 import {extractSoqlExpressionFields} from "../src/analyzer/soqlExpressionInventory.js";
 import {extractDynamicSoqlQueries} from "../src/scanner/dynamicSoqlScanner.js";
 import {textValue,type ApexValue} from "../src/core/apex/ApexValueEvaluator.js";
+import {ApexAnalysisEngine} from "../src/core/apex/ApexAnalysisEngine.js";
 function evidence(files:Array<{filePath:string;source:string}>,resolve?: (name:string,args:ApexValue[])=>ApexValue|undefined){
   const root=files[0],site=discoverApexInvocations(root.source,dynamicDatabaseQuerySelector)[0];
   return backtrackSoqlPermissionShapes(root.source,root.filePath,site,new ApexRepositoryMethodIndex(files),resolve);
@@ -120,4 +121,45 @@ test("runtime additions require an authoritative same-object schema guard and ad
     runtimeFieldsFixture.replace("requested.add(f.trim());","Other.mutate(requested);requested.add(f.trim());")
   ])assert.equal(evidence([{filePath:"UI.cls",source}],describeAccount).runtimeFieldQueries,undefined,source);
   assert.deepEqual(evidence([{filePath:"UI.cls",source:runtimeFieldsFixture}]).queries,[]);
+});
+
+
+test("backward Field Set helper reuses scan-scoped metadata resolution",async()=>{
+  const source="public class Report {public static void run(){String obj='Account';String fs='ReportFields';List<String> paths=Utils.getFieldListFromFieldSet(obj,fs);Set<String> cols=new Set<String>{'Id'};for(String f:paths){cols.add(f);}Database.query('SELECT '+String.join(cols,', ')+' FROM Account WITH USER_MODE');}}";
+  const filePath="Report.cls",index=new ApexRepositoryMethodIndex([{source,filePath}]);
+  let reads=0;
+  const metadata={
+    scopeKey:"test-backward-fieldset",
+    getObjectFieldNames:async()=>({complete:false as const,source:"LIVE_ORG" as const}),
+    getCustomMetadataRecords:async()=>({complete:false as const,source:"LIVE_ORG" as const}),
+    getFieldSetFields:async(object:string,name:string)=>{
+      reads++;assert.equal(object,"Account");assert.equal(name,"ReportFields");
+      return {complete:true as const,source:"LIVE_ORG" as const,value:["Name","Industry"]};
+    },
+  };
+  const engine=new ApexAnalysisEngine(index,metadata);
+  const site=discoverApexInvocations(source,dynamicDatabaseQuerySelector)[0];
+  const resolve=()=>engine.analyze(filePath,context=>backtrackSoqlPermissionShapes(source,filePath,site,index,context.resolveExternal));
+  const result=await resolve();
+  assert.deepEqual(fields(result.queries),new Set(["SELECT:Id","SELECT:Name","SELECT:Industry"]),JSON.stringify(result));
+  assert.equal(reads,1);
+  await resolve();assert.equal(reads,1);
+});
+test("runtime-selected metadata helper stays unresolved without broadening the lookup",async()=>{
+  const source="public class Report {public static void run(String reportName){Report_Config__mdt cfg=getConfig(reportName);List<String> paths=Utils.getFieldListFromFieldSet(cfg.Object_API_Name__c,cfg.Field_Set_Name__c);Database.query('SELECT '+String.join(paths,',')+' FROM '+cfg.Object_API_Name__c);}private static Report_Config__mdt getConfig(String developerName){if(String.isBlank(developerName)){return null;}List<Report_Config__mdt> cfgs=[SELECT DeveloperName,Object_API_Name__c,Field_Set_Name__c FROM Report_Config__mdt WHERE DeveloperName=:developerName AND Active__c=true LIMIT 1];return cfgs.isEmpty()?null:cfgs[0];}}";
+  const filePath="Report.cls",index=new ApexRepositoryMethodIndex([{source,filePath}]);
+  let reads=0;
+  const metadata={
+    scopeKey:"test-runtime-config",
+    getObjectFieldNames:async()=>({complete:false as const,source:"LIVE_ORG" as const}),
+    getCustomMetadataRecords:async()=>{reads++;return {complete:false as const,source:"LIVE_ORG" as const};},
+    getFieldSetFields:async()=>{reads++;return {complete:false as const,source:"LIVE_ORG" as const};},
+  };
+  const site=discoverApexInvocations(source,dynamicDatabaseQuerySelector)[0];
+  const events:string[]=[];
+  const result=await new ApexAnalysisEngine(index,metadata).analyze(filePath,context=>
+    backtrackSoqlPermissionShapes(source,filePath,site,index,context.resolveExternal,e=>events.push(e.code)));
+  assert.deepEqual(result.queries,[]);
+  assert.ok(events.includes("SHARED_HELPER_ARGUMENT_UNPROVEN"));
+  assert.equal(reads,0);
 });

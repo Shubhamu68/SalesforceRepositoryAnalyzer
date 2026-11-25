@@ -1,6 +1,6 @@
 import {indexApexMethods,maskApexSource,matchingPair,splitApexTopLevel,stripApexComments,type IndexedApexMethod,type SourceNode} from "./ApexSourceModel.js";
 import {apexSymbols} from "./ApexSymbolTable.js";
-import {parseApexDeclaration,type ApexCallResolver} from "./ApexTypeSystem.js";
+import {parseApexDeclaration,selectApexOverload,type ApexCallResolver} from "./ApexTypeSystem.js";
 import {addApexValues,evaluateApexExpression,listValue,runtimeParameter,textValue,unknown,type ApexValue} from "./ApexValueEvaluator.js";
 import type {ApexRepositoryMethodIndex,ApexCallerSource} from "./ApexRepositoryMethodIndex.js";
 import {countApex} from "./ApexPerformance.js";
@@ -233,8 +233,49 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
       // Exact, read-only Field Set expression with a source-known name.
       if(/^(?:Schema\.SObjectType\.[A-Za-z_]\w*\.fieldSets\.getMap\(\)\.get\('(?:\\.|[^'\\])*'\)\.getFields\(\)|[A-Za-z_]\w*\.SObjectType\.getDescribe\(\)\.fieldSets\.getMap\(\)\.get\('(?:\\.|[^'\\])*'\)\.getFields\(\))$/i.test(expr))
         return ev(evaluateApexExpression(expr,{values:new Map(),resolveCall:resolveExternal}));
-      // Same-owner private straight-line helper return. Keep arguments
-      // correlated; no dispatch inference and no evaluation of helper bodies.
+      // Reuse the repository/metadata invocation resolver with source-level
+      // overload hints. Only exact scalar arguments may cross this boundary:
+      // candidate collection unions, synthetic slots and reference effects
+      // are not exact Apex execution states. The legacy symbolic helper
+      // path below remains available for its existing narrow evidence.
+      const invocation=/^([A-Za-z_]\w*)(?:\s*\.\s*([A-Za-z_]\w*))?\s*\(([\s\S]*)\)$/i.exec(expr);
+      if(invocation&&matchingPair(maskApexSource(expr),expr.indexOf("("))===expr.length-1){
+        const symbols=apexSymbols(frame.source,frame.methods);
+        const pieces=invocation[3].trim()?splitApexTopLevel(invocation[3],","):[];
+        const hints=symbols.argumentTypes(frame.method,pieces,offset);
+        const owner=symbols.ownerAt(frame.method.start);
+        const qualified=!!invocation[2];
+        const target=qualified?undefined:selectApexOverload(frame.methods.filter(m=>
+          symbols.sameOwner(frame.method,m)&&m.name.toLowerCase()===invocation[1].toLowerCase()),pieces.length,hints);
+        const name=qualified
+          ?(!locals.has(invocation[1].toLowerCase())&&!symbols.lookup(frame.method,invocation[1],offset)&&
+            !symbols.hasLocalBinding(frame.method,invocation[1],offset)?invocation[1]+"."+invocation[2]:undefined)
+          :target?.isStatic&&owner&&identifier.test(owner)?owner+"."+target.name:undefined;
+        if(name&&(index||resolveExternal)&&frame.depth<MAX_DEPTH){
+          const args=pieces.map(arg=>resolve(frame,arg,offset,locals));
+          const exact=args.every(a=>!a.annotations.length&&!a.runtimeMembers&&!a.describeObject&&
+            (a.value.kind==="number"||a.value.kind==="null"||a.value.kind==="text"&&a.value.values.length===1));
+          if(exact){
+            const values=args.map(a=>a.value);
+            const result=resolveExternal?.(name,values,hints,frame.filePath)??index?.evaluateReturn(frame.filePath,name,values,resolveExternal,hints);
+            if(result!==undefined){
+              note(frame,offset,result.kind==="unknown"?"SHARED_HELPER_UNPROVEN":"SHARED_HELPER_RESOLVED",invocation[2]??invocation[1]);
+              // A complete return summary is not a reference-effect proof.
+              // Never transfer instances or multiple text alternatives as
+              // a single exact argument/value. Retain symbolic fallback.
+              if(result.kind!=="unknown"&&result.kind!=="instance"&&result.kind!=="instanceList"&&
+                !(result.kind==="text"&&result.values.length!==1))return ev(result);
+              if(qualified)return ev(result.kind==="unknown"?result:reject("helper return alternatives are not exact","HELPER_RETURN_UNPROVEN"));
+            }
+          }else{
+            note(frame,offset,"SHARED_HELPER_ARGUMENT_UNPROVEN",invocation[2]??invocation[1]);
+            if(qualified)return ev(reject("class-qualified helper arguments depend on unresolved runtime values or reference state","HELPER_ARGUMENT_UNPROVEN"));
+          }
+        }
+      }
+      // Existing symbolic private straight-line helper evidence. This is
+      // not a second general invocation interpreter: it preserves consumer
+      // annotations and typed holes that exact value summaries cannot take.
       const call=/^([A-Za-z_]\w*)\s*\(([\s\S]*)\)$/i.exec(expr);
       if(call){
         const args=call[2].trim()?splitApexTopLevel(call[2],","):[];

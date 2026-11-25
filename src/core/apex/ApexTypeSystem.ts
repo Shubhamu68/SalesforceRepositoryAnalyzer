@@ -3,7 +3,7 @@
  * object's concrete class is sufficient to select an Apex overload. */
 export type ApexArgumentTypes=readonly (string|undefined)[];
 export interface ApexTypedSignature {parameters:readonly string[];parameterTypes?:readonly string[]}
-export type ApexCallResolver=(name:string,args:import("./ApexValueEvaluator.js").ApexValue[],argumentTypes?:ApexArgumentTypes)=>import("./ApexValueEvaluator.js").ApexValue|undefined;
+export type ApexCallResolver=(name:string,args:import("./ApexValueEvaluator.js").ApexValue[],argumentTypes?:ApexArgumentTypes,fromFilePath?:string)=>import("./ApexValueEvaluator.js").ApexValue|undefined;
 
 export function canonicalApexType(raw:string|undefined):string|undefined{
   if(!raw)return undefined;

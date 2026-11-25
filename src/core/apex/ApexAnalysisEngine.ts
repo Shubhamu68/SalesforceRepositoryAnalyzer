@@ -174,9 +174,11 @@ export class ApexAnalysisEngine {
     }
     return undefined;
   };
-  const resolver:ApexExternalResolver=(name,args,types)=>
+  // Backward caller traversal can enter a different source class. Preserve
+  // that lexical caller for existing repository accessibility checks.
+  const resolver:ApexExternalResolver=(name,args,types,fromFilePath=filePath)=>
     baseResolver(name,args,types) ??
-    repositoryIndex?.evaluateReturn(filePath,name,args,baseResolver,types);
+    repositoryIndex?.evaluateReturn(fromFilePath,name,args,baseResolver,types);
     return {baseResolver,resolver};
   };
   // Bound metadata discovery by passes and distinct requests per query class.
