@@ -6,6 +6,7 @@ import path from "node:path";
 import { parseKnownJsonMap } from "../src/core/apex/ApexValueEvaluator.js";
 import { extractSoqlQueries, scanApexSoqlWithUnresolved } from "../src/scanner/apexSoqlScanner.js";
 import { extractDynamicSoqlQueries } from "../src/scanner/dynamicSoqlScanner.js";
+import { extractSoqlExpressionFields } from "../src/analyzer/soqlExpressionInventory.js";
 
 test("mixed static and dynamic SOQL retains both original source locations", async () => {
   const dir=await mkdtemp(path.join(os.tmpdir(),"v011-soql-"));
@@ -252,7 +253,7 @@ test("site slicing prunes unrelated conditional mutations without losing relevan
   ]);
 });
 
-test("query-relevant conditional paths are not discarded to satisfy a budget",()=>{
+test("SOQL permission aggregation preserves every field beyond the execution path budget",()=>{
   const branches=Array.from({length:7},(_,i)=>
     "if (flag"+i+") {query += ' AND Field"+i+"__c = null';}").join("\n");
   const code=[
@@ -265,7 +266,12 @@ test("query-relevant conditional paths are not discarded to satisfy a budget",()
     "}"
   ].join("\n");
   const result=extractDynamicSoqlQueries(code,"QueryPathBudget.cls");
-  assert.equal(result.queries.length,0);
+  assert.equal(result.queries.length,1,JSON.stringify(result));
+  assert.equal(result.queries[0].permissionEvidence,"AGGREGATED_STRUCTURE");
+  const fields=extractSoqlExpressionFields(result.queries[0].query);
+  assert.equal(fields.parsed,true);
+  assert.deepEqual(new Set(fields.fields.map(f=>f.context+":"+f.fieldPath)),
+    new Set(["SELECT:Id","WHERE:Name",...Array.from({length:7},(_,i)=>"WHERE:Field"+i+"__c")]));
   assert.equal(result.unresolved.length,1);
   assert.match(result.unresolved[0].reason,/budget|limit|alternatives/i);
 });

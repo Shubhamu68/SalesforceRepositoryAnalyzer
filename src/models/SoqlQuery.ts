@@ -69,6 +69,9 @@ export interface SoqlQuery {
   dynamicOrigin?: boolean;
   /** Incomplete coverage: explicit caller sample or a typed numeric-slot structure. */
   coverage?: "KNOWN_CALLER_CONTEXT" | "PROVEN_PARTIAL_STRUCTURE" | "CONDITIONAL_FRAMEWORK_CONTEXT";
+  /** Parser-only inventory, distinct from complete query execution coverage.
+   * Does not imply exhaustive caller coverage or runtime execution. */
+  permissionEvidence?: "AGGREGATED_STRUCTURE";
   querySiteId?: string;
   queryVariantId?: string;
 }

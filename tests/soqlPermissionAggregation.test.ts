@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import {test} from "node:test";
 import {extractDynamicSoqlQueries} from "../src/scanner/dynamicSoqlScanner.js";
 import {proveLocalSoqlPermissionShape} from "../src/analyzer/soqlSourceStructuralEvidence.js";
+import {proveCallerPermissionShapes,proveLiteralHelperPermissionShapes} from "../src/analyzer/soqlCallerStructuralEvidence.js";
+import {ApexRepositoryMethodIndex} from "../src/core/apex/ApexRepositoryMethodIndex.js";
 import {aggregatePermissionShapes,simplePermissionShape} from "../src/analyzer/soqlPermissionAggregation.js";
 import {dynamicDatabaseQuerySelector,discoverApexInvocations} from "../src/core/apex/ApexInvocationModel.js";
 import {extractSoqlExpressionFields} from "../src/analyzer/soqlExpressionInventory.js";
@@ -91,4 +93,37 @@ test("unknown loop or opaque field source cannot be rescued by a known zero-iter
   const result=extractDynamicSoqlQueries(code,"Builder.cls");
   assert.equal(result.queries.length,0,JSON.stringify(result));
   assert.equal(result.unresolved.length,1);
+});
+
+test("all cached caller seeds contribute distinct field evidence without increasing execution probe budget",()=>{
+  const source="public class Service { public static void fetch(String predicate){String q='SELECT Id FROM Account WHERE '+predicate;Database.query(q);} }";
+  const caller="public class Entry { public static void run(){"+Array.from({length:12},(_,i)=>"Service.fetch('Field"+i+"__c != null');").join("")+"} }";
+  const index=new ApexRepositoryMethodIndex([{filePath:"Service.cls",source},{filePath:"Entry.cls",source:caller}]);
+  const result=extractDynamicSoqlQueries(source,"Service.cls",undefined,index);
+  const inventory=new Set(result.queries.flatMap(q=>extractSoqlExpressionFields(q.query).fields.map(f=>f.context+":"+f.fieldPath)));
+  for(let i=0;i<12;i++)assert.ok(inventory.has("WHERE:Field"+i+"__c"),JSON.stringify(result));
+  assert.equal(result.queries.filter(q=>q.permissionEvidence==="AGGREGATED_STRUCTURE").length,1,JSON.stringify(result));
+  assert.equal(result.unresolved.length,1);
+  assert.equal(result.unresolved[0].aggregatedPermissionInventories,1);
+});
+test("caller templates reject mutable parameters and never substitute unproven structural strings",()=>{
+  const code="public class Service { public static void fetch(String fields){String q='SELECT '+fields+' FROM Account';Database.query(q);} }";
+  const site=discoverApexInvocations(code,dynamicDatabaseQuerySelector)[0];
+  assert.deepEqual(proveCallerPermissionShapes(code,site,[[runtimeParameter("fields","String","UI input")]]),[]);
+  const changed=code.replace("String q=","fields=Other.load();String q=");
+  assert.deepEqual(proveCallerPermissionShapes(changed,discoverApexInvocations(changed,dynamicDatabaseQuerySelector)[0],[[textValue("Name")]]),[]);
+});
+test("literal helper alternatives stay grouped by object and mode and retain unknown execution coverage",()=>{
+  const code="public class Cleanup { public static void run(Integer step){String q=build(step);Database.query(q);} private static String build(Integer step){if(step==1){return 'SELECT Name FROM Account';}else if(step==2){return 'SELECT Industry FROM Account';}else if(step==3){return 'SELECT Email FROM Contact WITH USER_MODE';}return null;} }";
+  const site=discoverApexInvocations(code,dynamicDatabaseQuerySelector)[0];
+  const alternatives=proveLiteralHelperPermissionShapes(code,site);
+  assert.equal(alternatives.length,3,JSON.stringify(alternatives));
+  const grouped=aggregatePermissionShapes(alternatives.map(s=>simplePermissionShape(s)!));
+  assert.equal(grouped.length,2);
+  const result=extractDynamicSoqlQueries(code,"Cleanup.cls");
+  assert.equal(result.queries.length,2,JSON.stringify(result));
+  assert.equal(result.queries.filter(q=>q.permissionEvidence==="AGGREGATED_STRUCTURE").length,2);
+  assert.equal(result.unresolved.length,1);
+  const unknown=code.replace("return null;","return Other.load();");
+  assert.deepEqual(proveLiteralHelperPermissionShapes(unknown,discoverApexInvocations(unknown,dynamicDatabaseQuerySelector)[0]),[]);
 });

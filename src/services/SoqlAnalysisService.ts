@@ -63,7 +63,7 @@ function unresolvedDynamicFindings(sites: readonly UnresolvedDynamicSoql[]): Soq
     declaredMode: "UNSPECIFIED",
     effectiveMode: "UNKNOWN",
     runtimeImpact: "Not assessed",
-    reason: site.knownVariants || site.partialStructureVariants || site.conditionalFrameworkVariants ? `Dynamic SOQL execution coverage is incomplete: ${site.reason} OLS/FLS findings apply only to the proven caller variants, conditional framework scenarios or proven partial structures; unproven paths were not assessed.` : `Dynamic SOQL could not be parsed and verified because ${site.reason} OLS/FLS analysis was not performed for this query.`,
+    reason: site.aggregatedPermissionInventories ? `Aggregated permission structure available (${site.aggregatedPermissionInventories} parser-only inventory/inventories). ${site.reason} OLS/FLS analysis covers established references; exhaustive structure and runtime execution are not certified.` : site.knownVariants || site.partialStructureVariants || site.conditionalFrameworkVariants ? `Dynamic SOQL execution coverage is incomplete: ${site.reason} OLS/FLS findings apply only to the proven caller variants, conditional framework scenarios or proven partial structures; unproven paths were not assessed.` : `Dynamic SOQL could not be parsed and verified because ${site.reason} OLS/FLS analysis was not performed for this query.`,
   }));
 }
 
@@ -88,6 +88,7 @@ export class SoqlAnalysisService {
       .filter((query) => isDataAccessAnalysisObject(query.object));
     recordSoqlCount("queries.analyzed", queries.length);
     recordSoqlCount("queries.partial_structure", queries.filter(q=>q.coverage==="PROVEN_PARTIAL_STRUCTURE").length);
+    recordSoqlCount("queries.aggregated_permission_inventory", queries.filter(q=>q.permissionEvidence==="AGGREGATED_STRUCTURE").length);
     recordSoqlCount("queries.known_caller", queries.filter(q=>q.coverage==="KNOWN_CALLER_CONTEXT").length);
     recordSoqlCount("queries.complete", queries.filter(q=>!q.coverage).length);
     recordSoqlCount("queries.conditional_framework", queries.filter(q=>q.coverage==="CONDITIONAL_FRAMEWORK_CONTEXT").length);
@@ -186,6 +187,7 @@ export class SoqlAnalysisService {
         .filter((query) => isDataAccessAnalysisObject(query.object));
       recordSoqlCount("queries.analyzed", queries.length);
     recordSoqlCount("queries.partial_structure", queries.filter(q=>q.coverage==="PROVEN_PARTIAL_STRUCTURE").length);
+    recordSoqlCount("queries.aggregated_permission_inventory", queries.filter(q=>q.permissionEvidence==="AGGREGATED_STRUCTURE").length);
     recordSoqlCount("queries.known_caller", queries.filter(q=>q.coverage==="KNOWN_CALLER_CONTEXT").length);
     recordSoqlCount("queries.complete", queries.filter(q=>!q.coverage).length);
     recordSoqlCount("queries.conditional_framework", queries.filter(q=>q.coverage==="CONDITIONAL_FRAMEWORK_CONTEXT").length);

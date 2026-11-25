@@ -362,7 +362,9 @@ export class SoqlSecurityAnalyzer {
         finding.reason += " Coverage: known repository caller variant only; other execution contexts remain unverified.";
       if(coverage==="CONDITIONAL_FRAMEWORK_CONTEXT")finding.reason += " Coverage: conditional framework receiver scenario only; actual job submission and other receiver states remain unverified.";
       if(coverage==="PROVEN_PARTIAL_STRUCTURE")
-        finding.reason += " Coverage: proven partial SOQL structure only; runtime value placeholders and aggregated permission inventories are synthetic, not runtime queries. Other execution contexts remain unverified.";
+        finding.reason += (variant&&queryByLocation.get(variant)?.query.permissionEvidence==="AGGREGATED_STRUCTURE")
+          ?" Coverage: aggregated permission inventory; parser-only representative, not an executable query. Exhaustive structural coverage is not certified."
+          :" Coverage: proven partial SOQL structure only; runtime value placeholders are synthetic, not runtime queries. Other execution contexts remain unverified.";
     }
     return findings;
   }
