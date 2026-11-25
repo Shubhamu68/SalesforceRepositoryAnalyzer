@@ -81,15 +81,15 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
         (owner.visibility==="private"&&/budget/i.test(reason)))){
         const evidence=repositoryIndex!.inspectCallers(owner.className,owner.methodName,owner.arity);
         if(evidence.candidateCalls)explanation +=
-          " Repository caller index: "+evidence.knownCalls+" known and "+
-          evidence.unknownCalls+" unproven explicit caller(s)."+
+          " Source callers: "+evidence.knownCalls+" known and "+
+          evidence.unknownCalls+" unproven."+
           (evidence.externallyCallable
-            ?" Method is externally callable; complete caller coverage cannot be established from repository metadata."
+            ?" The method is externally callable, so other calls may exist outside the repository."
             :"");
         const scoped=inspectApexInvocationContexts(filePath,site.offset,[site.argument],resolveExternal,repositoryIndex);
         if(scoped)callerSeeds=[...scoped.contexts.known,...scoped.contexts.partial];
         if(scoped?.lifecycleDiagnostics?.length)
-          explanation+=" Framework lifecycle diagnostics: "+scoped.lifecycleDiagnostics.join(", ")+".";
+          explanation+=" Framework execution details: "+scoped.lifecycleDiagnostics.join(", ")+".";
         if(scoped&&(scoped.contexts.known.length||scoped.contexts.partial.length||scoped.receiverContexts||scoped.receiverScenarios)){
           partialEvidence.push(...scoped.partialArguments.map(args=>args[0]).filter((v):v is ApexValue=>v!==undefined));
           // Do not publish a guessed security mode, even if SELECT is valid.
@@ -127,18 +127,18 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
                 queryVariantId:siteId+"#framework-"+(conditionalFrameworkVariants-1),coverage:"CONDITIONAL_FRAMEWORK_CONTEXT",...(mode?{dynamicAccessLevel:mode}:{})});
             }
           }
-          explanation+=" Known repository contexts: "+scoped.contexts.known.length+
-            "; partially known contexts: "+scoped.contexts.partial.length+
-            (scoped.receiverContexts?"; known framework receiver contexts: "+scoped.receiverContexts:"")+
-            (scoped.receiverScenarios?"; conditional framework receiver scenarios: "+scoped.receiverScenarios:"")+
-            (scoped.contexts.freshEntryContexts?"; sampled direct fresh framework entry contexts: "+scoped.contexts.freshEntryContexts:"")+
-            "; structurally valid query variants in probed contexts: "+knownVariants+
-            (scoped.bounded?" (bounded sample).":"." )+
-            (knownVariants?" Known variants are submitted for separate access analysis;":" Context evidence only;")+
-            " complete execution coverage is not proven.";
+          explanation+=" Calls with known inputs: "+scoped.contexts.known.length+
+            "; calls with partially known inputs: "+scoped.contexts.partial.length+
+            (scoped.receiverContexts?"; known framework states: "+scoped.receiverContexts:"")+
+            (scoped.receiverScenarios?"; possible framework states: "+scoped.receiverScenarios:"")+
+            (scoped.contexts.freshEntryContexts?"; sampled new framework instances: "+scoped.contexts.freshEntryContexts:"")+
+            "; valid query versions found: "+knownVariants+
+            (scoped.bounded?" (limited sample).":"." )+
+            (knownVariants?" Known query versions are checked separately;":" These inputs alone do not establish a query;")+
+            " other execution paths remain unchecked.";
         }
       }
-      if(conditionalFrameworkVariants)explanation+=" Conditional framework variants: "+conditionalFrameworkVariants+". Constructor-only or sampled map-key scenarios are conditional source evidence, not observed batch submissions. Typed runtime slots may use synthetic parser placeholders. Other receiver states remain unverified.";
+      if(conditionalFrameworkVariants)explanation+=" Possible framework query versions: "+conditionalFrameworkVariants+". Based on constructors or sampled map keys, not actual batch runs. Placeholder values may be used for analysis; other framework states were not verified.";
       let partialStructureVariants=0;
       // Grammar-specific proof is intentionally confined to this adapter.
       // The core Apex value remains unknown; no synthetic query is executed.
@@ -188,21 +188,21 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
         if(traced&&!traced.queries.length){
           const details=blockers.summarize();
           const structure=structuralCodes.has("SOQL_CONDITIONAL_MERGE_REJECTED")
-            ?" Conditional query fragments could not be combined into a validated permission structure."
+            ?" Could not combine conditional parts into a query suitable for permission checks."
             :structuralCodes.has("RUNTIME_SELECT_DOMAIN_MISMATCH")||structuralCodes.has("SOQL_REQUIRED_REFERENCE_MISMATCH")
-              ?" Required field or object references could not be validated."
+              ?" Could not verify required object or field references."
               :structuralCodes.has("SOQL_RUNTIME_SLOT_UNPROVEN")
-                ?" One or more query fragments remain structurally unproven."
-                :structuralCodes.has("SOQL_VALUE_UNRESOLVED")?" A complete query value could not be established.":"";
-          if(details||structure)backwardExplanation="Backward dependency assessment: "+(details??"")+structure;
+                ?" Some parts of the query remain unknown."
+                :structuralCodes.has("SOQL_VALUE_UNRESOLVED")?" Could not reconstruct the complete query.":"";
+          if(details||structure)backwardExplanation="Why the query could not be fully resolved: "+(details??"")+structure;
         }
         if(trace){
           trace.localCandidates=local.length;trace.callerCandidates=callers.length;
           trace.fallback=traced?"ATTEMPTED":variants.size?"SKIP_EXISTING_VARIANTS":local.length?"SKIP_LOCAL_CANDIDATES":"SKIP_CALLER_CANDIDATES";
           if(traced){trace.backwardCandidates=traced.queries.length;trace.callerEdges=traced.callerEdges;trace.metadataRows=traced.metadataRows;trace.bounded=traced.bounded;}
         }
-        if(traced?.queries.length)explanation+=" Backward structural dependency evidence from "+traced.callerEdges+" explicit caller edge(s) and "+traced.metadataRows+" metadata row candidate(s); intended predicate literals are parser-only, not an injection-safety proof.";
-        if(traced?.bounded)explanation+=" Backward dependency trace reached its work bound.";
+        if(traced?.queries.length)explanation+=" Query details recovered from "+traced.callerEdges+" source caller(s) and "+traced.metadataRows+" possible metadata record(s). Placeholder filter values are for analysis only; SOQL injection safety was not checked.";
+        if(traced?.bounded)explanation+=" Backward analysis reached its processing limit.";
         const shapes=[...local,...callers,...(traced?.queries??[])].flatMap(text=>{
           const shape=simplePermissionShape(text,site.line,trace?(code)=>note(code):undefined);
           return shape&&!hasModeConflict(shape.mode)?[shape]:[];
@@ -240,17 +240,17 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
             coverage:"PROVEN_PARTIAL_STRUCTURE",permissionEvidence:"AGGREGATED_STRUCTURE",...(runtimeOnly?{runtimeFieldCoverage:true}:{}),...(mode?{dynamicAccessLevel:mode}:{})});
         }
         if(trace)trace.added=aggregatedPermissionInventories;
-        if(aggregatedPermissionInventories)explanation+=" Permission inventory aggregated from individually validated SOQL structural evidence; representative query is parser-only and is not an executable reconstruction.";
+        if(aggregatedPermissionInventories)explanation+=" Permission inventory aggregated from known object and field references. The reconstructed query is for analysis only, not execution.";
       }
-      if(backwardExplanation)explanation=backwardExplanation+" Original analysis diagnostic: "+explanation;
-      if(runtimeFieldCoverage)explanation+=" Known fields are submitted for permission analysis; additional runtime-dependent fields are outside verified coverage.";
-      if(partialStructureVariants)explanation+=" Proven partial structural variants: "+partialStructureVariants+
-        ". Typed value slots use synthetic parser placeholders, not actual runtime values; only those proven field and object references are submitted for access analysis. Complete execution coverage remains unverified.";
+      if(backwardExplanation)explanation=backwardExplanation+" Initial analysis: "+explanation;
+      if(runtimeFieldCoverage)explanation+=" Known fields are checked for permissions; additional runtime-dependent fields are outside verified coverage.";
+      if(partialStructureVariants)explanation+=" Partially resolved query versions: "+partialStructureVariants+
+        ". Placeholder values are for analysis only. Only known objects and fields are checked; the full query remains unverified.";
       if(conflicts.size&&mode){
         const declarations=[...conflicts].sort().map(m=>"WITH "+m).join(" / ");
-        explanation="REVIEW — Security-mode conflict: a structurally validated query candidate contains "+declarations+
-          ", but Database."+site.method+" specifies AccessLevel."+mode+
-          ". Verify the intended Salesforce execution mode and align the declarations. Runtime enforcement is not established; conflicting candidates were excluded from OLS/FLS analysis. "+
+        explanation="REVIEW — Security-mode conflict: a resolved query version uses "+declarations+
+          ", but Database."+site.method+" uses AccessLevel."+mode+
+          ". Make both declarations use the intended mode. Actual permission enforcement is unclear; the conflicting query was excluded from OLS/FLS checks. "+
           explanation;
       }
       unresolved.push({filePath,lineNumber:site.line,siteId,reason:explanation,...(backwardExplanation?{backwardExplanation}:{}),...(conflicts.size?{securityModeConflict:true}:{}),...(knownVariants?{knownVariants}:{}),
@@ -263,7 +263,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
     if(!captures.length){fail("Invocation is outside a supported method or execution path. "+
       explainUncapturedApexQuery(source,site.offset,site.argument));continue;}
     const mode=explicitMode(site);
-    if(mode===null){fail("Dynamic Database AccessLevel expression could not be established.");continue;}
+    if(mode===null){fail("Could not determine the query's Database AccessLevel.");continue;}
     const strings:string[]=[];
     let reason:string|undefined;
     let initialConflict:DeclaredSoqlMode|undefined;
@@ -274,10 +274,10 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
       }
       strings.push(...capture.query.values);
     }
-    if(reason){fail("Query dependency unresolved: "+reason,captures.map(c=>c.query));continue;}
+    if(reason){fail("Could not build the full query: "+reason,captures.map(c=>c.query));continue;}
     const variants=[...new Set(strings.map(s=>s.trim()))];
     if(!variants.length||variants.length>MAX_VARIANTS){
-      fail("Query has no proven complete value or exceeds the variant limit.");continue;
+      fail("Could not reconstruct a complete query or the query version limit was reached.");continue;
     }
     const candidates:SoqlQuery[]=[];
     for(let index=0;index<variants.length;index++){
@@ -292,7 +292,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
       const fields=extractSoqlExpressionFields(queryText);
       if(!parsed||!fields.parsed||fields.limitations.length){
         const detail=fields.limitations[0]??"Root scope invalid.";
-        reason="Complete query failed SOQL parsing: "+detail+describeMalformedSoql(queryText,detail);
+        reason="The reconstructed SOQL could not be parsed: "+detail+describeMalformedSoql(queryText,detail);
         break;
       }
       const declared=classifySoqlMode(queryText);

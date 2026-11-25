@@ -107,8 +107,8 @@ test("runtime configuration dependency is propagated to the actual Excel Explana
     const workbook=new ExcelJS.Workbook();await workbook.xlsx.readFile(result.reports.summaryReportPath);
     const sheet=workbook.getWorksheet("Summary")!;
     const explanation=String(sheet.getCell("F7").value);
-    assert.match(explanation,/Backward dependency assessment/);
-    assert.match(explanation,/reportName.*no proven source caller/);
+    assert.match(explanation,/Why the query could not be fully resolved/);
+    assert.match(explanation,/reportName.*no source caller could be verified/);
     assert.match(explanation,/Custom Metadata.*Object_API_Name__c/);
     assert.match(explanation,/getConfig.*getFieldListFromFieldSet/);
     assert.match(explanation,/OLS\/FLS analysis was not performed/);

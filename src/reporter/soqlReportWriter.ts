@@ -274,7 +274,7 @@ function buildConciseFindings(
     entry.criticality = highest.criticality;
     const isMixed = entry.references.some(ref => ref.criticality !== highest.criticality);
     entry.explanation = highest.explanation + (isMixed
-      ? " Severity differs across SOQL queries. Highest severity shown; see the Apex Classes column for affected locations."
+      ? " Severity differs across SOQL queries. The highest severity is shown; see Apex Classes for locations."
       : "");
   }
 
@@ -453,8 +453,8 @@ function appendSummaryFindingRows(sheet: ExcelJS.Worksheet, findings: ConciseFin
     row.getCell(6).alignment = { wrapText: true, vertical: "top" };
     row.getCell(7).alignment = { wrapText: true, vertical: "top" };
     row.getCell(8).alignment = { wrapText: true, vertical: "top" };
-    row.height = Math.min(112, Math.max(30,
-      15 * Math.max(groupedReferences.length, Math.ceil(finding.explanation.length / 65))));
+    row.height = Math.min(180, Math.max(30,
+      15 * Math.max(groupedReferences.length, finding.explanation.split("\n").reduce((lines,part)=>lines+Math.max(1,Math.ceil(part.length/60)),0))));
   }
 }
 

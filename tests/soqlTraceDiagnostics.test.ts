@@ -27,7 +27,7 @@ test("SOQL diagnostics are opt-in and preserve scan queries and unresolved reaso
   const base=extractDynamicSoqlQueries(source,"UI.cls",undefined,index);
   const traced=extractDynamicSoqlQueries(source,"UI.cls",undefined,index,true);
   assert.equal(base.unresolved[0].trace,undefined);
-  assert.match(base.unresolved[0].reason,/Backward dependency assessment:.*Runtime inputs.*obj.*no proven source caller/i);
+  assert.match(base.unresolved[0].reason,/Why the query could not be fully resolved:.*Could not determine input values.*obj.*no source caller could be verified/i);
   const {trace,...rest}=traced.unresolved[0];
   assert.deepEqual(base,{queries:traced.queries,unresolved:[rest]});
   assert.equal(trace?.fallback,"ATTEMPTED");
@@ -72,7 +72,7 @@ test("normal explanations distinguish indexed-but-ineligible callers, metadata, 
   emit("SHARED_HELPER_ARGUMENT_UNPROVEN","getFieldListFromFieldSet",228);
   emit("LOOP_ITERABLE_UNPROVEN","selectFields",236);
   const summary=collector.summarize()!;
-  assert.match(summary,/reportName.*1 indexed caller\(s\), none eligible/);
+  assert.match(summary,/reportName.*1 caller found, none could be analyzed/);
   assert.match(summary,/Custom Metadata.*Object_API_Name__c/);
   assert.match(summary,/getConfig.*getFieldListFromFieldSet/);
   assert.doesNotMatch(summary,/LOOP_ITERABLE_UNPROVEN|selectFields/);
@@ -86,4 +86,14 @@ test("report diagnostic summaries are bounded and do not print raw trace codes",
   for(let i=0;i<500;i++)collector.observe({code:"NO_PROVEN_CALLER",symbol:"p"+i,file:"UI.cls",line:i,depth:0});
   assert.match(collector.summarize()!,/p0.*p3/);
   assert.doesNotMatch(collector.summarize()!,/p4|NO_PROVEN_CALLER/);
+});
+
+
+test("plain-language summaries combine source locations without dropping symbols",()=>{
+  const collector=collectApexDependencyBlockers();
+  for(const [symbol,line] of [["caseFieldList",112],["caseTypeFilterQuery",112],["otherField",114]] as const)
+    collector.observe({code:"CLASS_MEMBER_UNPROVEN",symbol,file:"Batch.cls",method:"fetch",line,depth:0});
+  const summary=collector.summarize()!;
+  assert.equal(summary,"Could not determine class member or variable values: Batch.cls / fetch(): caseFieldList, caseTypeFilterQuery (line 112); otherField (line 114).");
+  assert.equal(summary.split("Batch.cls").length,2);
 });

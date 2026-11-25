@@ -115,7 +115,7 @@ test('Confirmed field denial has one concise explanation without duplicate verif
   assert.equal(findings.length, 1);
   assert.equal(findings[0].criticality, 'High');
   assert.equal(findings[0].reason,
-    'Field Account.Industry: Repository metadata did not establish Read access; Salesforce confirmed it is missing for the selected user.');
+    'Field Account.Industry: Read access was not found in the repository. Salesforce confirmed it is missing for the selected user.');
   assert.doesNotMatch(findings[0].reason, /Outcome=DENIED/);
 });
 
@@ -125,7 +125,7 @@ test('Confirmed object denial has one concise explanation without duplicate veri
   assert.equal(findings.length, 1);
   assert.equal(findings[0].findingType, 'OBJECT_READ');
   assert.equal(findings[0].reason,
-    'Object Account: Repository metadata did not establish Read access; Salesforce confirmed it is missing for the selected user.');
+    'Object Account: Read access was not found in the repository. Salesforce confirmed it is missing for the selected user.');
   assert.doesNotMatch(findings[0].reason, /Outcome=DENIED/);
 });
 
