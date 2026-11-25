@@ -86,12 +86,12 @@ function computeSlice(nodes:SourceNode[], offset:number, expression:string):Slic
       for(let i=children.length-1;i>=0;i--)if(mark(children[i]))childNeeded=true;
       if(node.kind!=="for"||before===relevant.size)break;
     }while(true);
-    const condition=(node.condition??"")+" "+(node.iterable??"");
+    const condition=(node.condition??"")+" "+(node.iterable??"")+(node.kind==="for"&&!node.loopVariable?" "+(node.text??""):"");
     const conditionCalls=[...maskApexSource(condition).matchAll(
       /\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(/g)].map(match=>match[1]);
     const opaqueCondition=conditionCalls.some(name=>
       !/^(?:String\.(?:isBlank|isNotBlank)|Math\.\w+)$/i.test(name));
-    const needed=isTarget||childNeeded||opaqueCondition;
+    const needed=isTarget||childNeeded||opaqueCondition||(node.kind==="for"&&!node.loopVariable);
     if(needed) {
       live.add(node);
       for(const name of identifiers(condition))relevant.add(name);
