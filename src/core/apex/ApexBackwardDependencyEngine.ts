@@ -8,7 +8,7 @@ import type {ApexRepositoryMethodIndex,ApexCallerSource} from "./ApexRepositoryM
 import {countApex} from "./ApexPerformance.js";
 import {readApexReadOperation} from "./ApexReadOperations.js";
 import {evaluateApexReadOperation} from "./ApexValueEvaluator.js";
-import {applyApexStringCollectionMutation,apexIterationValues,mergeApexRuntimeMembers,proveApexAddOnlyIteration,type ApexRuntimeCollectionMembers} from "./ApexCollectionOperations.js";
+import {applyApexStringCollectionMutation,apexIterationValues,mergeApexRuntimeMembers,proveApexAddOnlyIteration,evaluateApexCollectionGuard,isExactMetadataStringList,type ApexRuntimeCollectionMembers} from "./ApexCollectionOperations.js";
 import {knownBoolean} from "./ApexScalarOperators.js";
 import {evaluateSchemaExpression,evaluateSchemaGlobalGuard,schemaReceiverEligible,isSchemaFieldMap,mutateSchemaFieldMap} from "./ApexSchemaModel.js";
 import {metadataSelectorHelper} from "./ApexCustomMetadataQueryModel.js";
@@ -427,7 +427,9 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
           if((collection||map||schemaReferenceList)&&identifier.test(clean(def.expression)))return ev(reject("mutable collection alias","COLLECTION_ALIAS"));
           note(frame,def.node.start,"REACHING_DEFINITION",name);
           base=resolve(frame,def.expression,def.node.start,locals,members);
-          freshCollection=collection&&/^new\s+(?:List|Set)\s*</i.test(clean(def.expression))&&exact(base);
+          freshCollection=collection&&(
+            /^new\s+(?:List|Set)\s*</i.test(clean(def.expression))&&exact(base)||
+            isExactMetadataStringList(base.value)&&!base.annotations.length&&!base.runtimeMembers&&!base.describeObject);
           after=prefix.slice(def.index+1);
         }else if(param>=0){
           if(schemaReferenceList||schemaFieldMap)return ev(reject("Schema collection caller alias not proven","SCHEMA_COLLECTION_ALIAS_OR_WRITE"));
@@ -549,6 +551,27 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
                     return blocked("SCHEMA_GUARD_PATH_TERMINATES");
                   if(!visit(chosen,conditional,bindings))return false;
                   continue;
+                }
+              }
+              if(collection&&rx(name).test(maskApexSource(n.condition??""))){
+                const guard=evaluateApexCollectionGuard(clean(n.condition??""),name,current.value,
+                  !conditional&&!additions.length&&!current.annotations.length&&!current.runtimeMembers&&!current.describeObject&&
+                  (exactCurrent||current.value.kind==="null"));
+                if(guard!==undefined){
+                  const truth=knownBoolean(guard);
+                  if(truth===undefined){
+                    // Retain the existing inventory-only behavior for a
+                    // lone emptiness test; compound guards require proof.
+                    if(!new RegExp("^\\s*!?\\s*"+name+"\\s*\\.\\s*isEmpty\\s*\\(\\s*\\)\\s*$","i").test(clean(n.condition??"")))
+                      return blocked("COLLECTION_GUARD_UNPROVEN");
+                  }else{
+                    note(frame,n.start,"COLLECTION_GUARD_RESOLVED",name);
+                    const chosen=truth?n.body??[]:n.otherwise??[];
+                    if(chosen.some(child=>/\b(?:return|throw|break|continue)\b/i.test(maskApexSource(frame.source.slice(child.start,child.end)))))
+                      return blocked("COLLECTION_GUARD_PATH_TERMINATES");
+                    if(!visit(chosen,conditional,bindings))return false;
+                    continue;
+                  }
                 }
               }
               if(rx(name).test(maskApexSource(n.condition??""))&&

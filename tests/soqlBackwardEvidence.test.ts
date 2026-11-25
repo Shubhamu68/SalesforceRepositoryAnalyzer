@@ -186,3 +186,29 @@ test("destructive helper effect is not replayed over unspecified Set iteration o
   const source="public class Builder {public static void run(){Set<String> cols=new Set<String>{'Id'};Set<String> paths=new Set<String>{'Name','Phone'};for(String path:paths){replaceColumn(cols,path);}Database.query('SELECT '+String.join(cols,',')+' FROM Account');}private static void replaceColumn(Set<String> cols,String path){cols.clear();cols.add(path);}}";
   assert.deepEqual(evidence([{filePath:"Builder.cls",source}]).queries,[]);
 });
+
+test("complete Field Set lists pass a compound null/empty guard and feed downstream SOQL",async()=>{
+  const source="public class Report {public static void run(){List<String> paths=Utils.getFieldListFromFieldSet('Account','ReportFields');if(paths==null||paths.isEmpty()){System.debug(paths);return;}Set<String> cols=new Set<String>{'Id'};for(String f:paths){cols.add(f);}Database.query('SELECT '+String.join(cols,',')+' FROM Account WITH USER_MODE');}}";
+  const filePath="Report.cls",index=new ApexRepositoryMethodIndex([{source,filePath}]);
+  const site=discoverApexInvocations(source,dynamicDatabaseQuerySelector)[0];
+  for(const members of [["Name","Industry"],[],undefined]){
+    const events:string[]=[];
+    const metadata={
+      scopeKey:"collection-guard-fixture",
+      getObjectFieldNames:async()=>({complete:false as const,source:"LIVE_ORG" as const}),
+      getCustomMetadataRecords:async()=>({complete:false as const,source:"LIVE_ORG" as const}),
+      getFieldSetFields:async()=>members===undefined?{complete:false as const,source:"LIVE_ORG" as const}:
+        {complete:true as const,source:"LIVE_ORG" as const,value:members}
+    };
+    const result=await new ApexAnalysisEngine(index,metadata).analyze(filePath,ctx=>
+      backtrackSoqlPermissionShapes(source,filePath,site,index,ctx.resolveExternal,e=>events.push(e.code)));
+    if(members?.length){
+      assert.deepEqual(fields(result.queries),new Set(["SELECT:Id","SELECT:Name","SELECT:Industry"]),JSON.stringify(result));
+      assert.ok(events.includes("COLLECTION_GUARD_RESOLVED"));
+      assert.ok(events.includes("LOOP_ITERABLE_RESOLVED"));
+    }else{
+      assert.deepEqual(result.queries,[]);
+      if(members)assert.ok(events.includes("COLLECTION_GUARD_PATH_TERMINATES"));
+    }
+  }
+});

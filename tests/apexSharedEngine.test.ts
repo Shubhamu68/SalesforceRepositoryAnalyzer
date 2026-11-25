@@ -395,3 +395,20 @@ test("global Describe guard does not bypass a reachable mutation or shadowed Sch
     assert.ok(result.candidates.every(c=>c.value.kind==="unknown"||JSON.stringify(c.value)===JSON.stringify(textValue("Contact"))),JSON.stringify(result));
   }
 });
+
+test("shared collection guard adapter reuses null, size and ordered Boolean evaluation",async()=>{
+  const {evaluateApexCollectionGuard}=await import("../src/core/apex/ApexCollectionOperations.js");
+  const nonempty=listValue(["Name"]),empty=listValue([]),nil:ApexValue={kind:"null"};
+  for(const [guard,value,expected] of [
+    ["paths == null || paths.isEmpty()",nonempty,false],
+    ["paths == null || paths.isEmpty()",empty,true],
+    ["paths == null || paths.isEmpty()",nil,true],
+    ["paths != null && !paths.isEmpty()",nil,false],
+    ["paths != null && paths.size() > 0",nonempty,true],
+    ["0 == paths.size()",empty,true],
+    ["!(paths == null || paths.isEmpty())",nonempty,true]
+  ] as const)assert.deepEqual(evaluateApexCollectionGuard(guard,"paths",value,true),booleanValue(expected),guard);
+  assert.equal(evaluateApexCollectionGuard("paths.isEmpty() || paths == null","paths",nil,true)?.kind,"unknown");
+  assert.equal(evaluateApexCollectionGuard("paths == null || paths.isEmpty()","paths",nonempty,false)?.kind,"unknown");
+  assert.equal(evaluateApexCollectionGuard("paths.size() == 0 || Other.mutate(paths)","paths",empty,true),undefined);
+});

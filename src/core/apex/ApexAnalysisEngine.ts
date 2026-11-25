@@ -7,6 +7,7 @@ import type {ApexRepositoryMethodIndex} from "./ApexRepositoryMethodIndex.js";
 import {planCustomMetadataRequest,planCustomMetadataSelectorCandidates,resolveCustomMetadataRows,type CustomMetadataRequest,type CustomMetadataInventory} from "./ApexCustomMetadataQueries.js";
 import type {ApexMetadataProvider} from "../metadata/ApexMetadataProvider.js";
 import {resolveSchemaSnapshot,resolveSchemaFieldMap} from "./ApexSchemaModel.js";
+import {exactMetadataStringList} from "./ApexCollectionOperations.js";
 
 type LabelResult=Awaited<ReturnType<NonNullable<ApexMetadataProvider["getCustomLabelValue"]>>>;
 type FieldSetResult=Awaited<ReturnType<NonNullable<ApexMetadataProvider["getFieldSetFields"]>>>;
@@ -131,7 +132,7 @@ export class ApexAnalysisEngine {
         requestedFieldSets.set(key,[object,fieldSet]);
       const selected=fieldSetValues.get(key);
       return selected?.complete&&selected.value
-        ?listValue(selected.value)
+        ?exactMetadataStringList(selected.value)
         :unknown("Complete Field Set "+object+"."+fieldSet+
           " unavailable from org metadata: "+
           (selected?.reason??"Runtime Field Set identity not proven in this scan."));

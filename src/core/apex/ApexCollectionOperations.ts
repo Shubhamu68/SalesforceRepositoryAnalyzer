@@ -1,5 +1,6 @@
-import {listValue,textValue,unknown,type ApexValue} from "./ApexValueEvaluator.js";
-import {stripApexComments,type SourceNode} from "./ApexSourceModel.js";
+import {listValue,textValue,unknown,evaluateApexExpression,type ApexValue} from "./ApexValueEvaluator.js";
+import {stripApexComments,maskApexSource,matchingPair,splitApexTopLevel,type SourceNode} from "./ApexSourceModel.js";
+import {splitScalarOperator} from "./ApexScalarOperators.js";
 import {readApexReadOperation} from "./ApexReadOperations.js";
 
 export type ApexStringCollection=Extract<ApexValue,{kind:"collection"}>;
@@ -75,4 +76,50 @@ export function proveApexAddOnlyIteration(nodes:readonly SourceNode[],target:str
     return {membership,caseOnly:projected==="case",usesStringGuard};
   }
   return undefined;
+}
+
+/** Identity-local evidence for a fresh, complete metadata list. No marker
+ * is serialized into reports, and copies/unions do not inherit it. */
+const completeMetadataLists=new WeakSet<ApexValue>();
+export function exactMetadataStringList(items:readonly string[]):ApexValue{
+  const value=listValue([...items]);completeMetadataLists.add(value);return value;
+}
+export function isExactMetadataStringList(value:ApexValue):boolean{
+  return value.kind==="collection"&&completeMetadataLists.has(value);
+}
+
+/** Backward consumers must prove the reaching collection value and admit
+ * only pure guard syntax before using the ordinary expression evaluator.
+ * This is a syntax/provenance adapter, not a second Boolean evaluator. */
+export function evaluateApexCollectionGuard(condition:string,target:string,
+  value:ApexValue,complete:boolean):ApexValue|undefined{
+  if(!/^[A-Za-z_]\w*$/.test(target))return undefined;
+  const reference=new RegExp("^"+target+"$","i");
+  const empty=new RegExp("^"+target+"\\s*\\.\\s*isEmpty\\s*\\(\\s*\\)$","i");
+  const size=new RegExp("^"+target+"\\s*\\.\\s*size\\s*\\(\\s*\\)$","i");
+  const nullLiteral=(s:string)=>/^null$/i.test(s);
+  const integer=(s:string)=>/^(?:0|[1-9]\d{0,8})$/.test(s);
+  const supported=(input:string,depth=0):boolean=>{
+    if(depth>16)return false;
+    const expr=input.trim();
+    if(expr.startsWith("(")&&matchingPair(maskApexSource(expr),0)===expr.length-1)
+      return supported(expr.slice(1,-1),depth+1);
+    for(const operator of ["||","&&"]){
+      const parts=splitApexTopLevel(expr,operator);
+      if(parts.length>1)return parts.every(p=>supported(p,depth+1));
+    }
+    if(empty.test(expr)||/^(?:true|false)$/i.test(expr))return true;
+    const equality=splitScalarOperator(expr,["==","!="]);
+    if(equality&&(reference.test(equality.left)&&nullLiteral(equality.right)||
+      nullLiteral(equality.left)&&reference.test(equality.right)))return true;
+    const comparison=splitScalarOperator(expr,["==","!=","<",">","<=",">="]);
+    if(comparison&&(size.test(comparison.left)&&integer(comparison.right)||
+      integer(comparison.left)&&size.test(comparison.right)))return true;
+    return expr.startsWith("!")&&!expr.startsWith("!=")&&supported(expr.slice(1),depth+1);
+  };
+  const expr=stripApexComments(condition).trim();
+  if(expr.length>2000||!supported(expr))return undefined;
+  if(!complete||value.kind!=="collection"&&value.kind!=="null")
+    return unknown("Collection guard requires a proven complete reaching value.");
+  return evaluateApexExpression(expr,{values:new Map([[target,value]]),strictBooleanGuards:true});
 }

@@ -110,6 +110,8 @@ export interface ApexExpressionContext {
   resolveCall?: ApexCallResolver;
   argumentTypes?: (expressions:readonly string[])=>ApexArgumentTypes;
   schemaShadowed?: (name:string)=>boolean;
+  /** Guard replay requires ordered evaluation; an unknown earlier term may throw. */
+  strictBooleanGuards?:boolean;
 }
 
 function unescapeApex(token: string): string | null {
@@ -252,7 +254,10 @@ export function evaluateApexExpression(
       let unknownTerm=false;
       for(const term of terms){
         const check=knownBoolean(evaluateApexExpression(term,context,depth+1));
-        if(check===undefined){unknownTerm=true;continue;}
+        if(check===undefined){
+          if(context.strictBooleanGuards)return unknown("Earlier guard term is not proven to evaluate safely.");
+          unknownTerm=true;continue;
+        }
         if((operator==="&&"&&!check)||(operator==="||"&&check))return booleanValue(check);
       }
       return unknownTerm?unknown("Boolean condition depends on runtime inputs."):booleanValue(operator==="&&");
