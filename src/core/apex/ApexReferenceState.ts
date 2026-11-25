@@ -15,7 +15,7 @@ export function referenceMember(values:ReadonlyMap<string,ApexValue>,path:string
   for(const part of parts){
     if(value.kind==="unknown")return value;
     if(value.kind!=="instance"&&value.kind!=="record")return undefined;
-    const entry=value.entries.filter(([key])=>key.toLowerCase()===part.toLowerCase());
+    const entry: Array<[string,ApexValue]>=value.entries.filter(([key])=>key.toLowerCase()===part.toLowerCase());
     if(entry.length!==1)return unknown("Instance member path is not proven: "+path);
     value=entry[0][1];
   }
