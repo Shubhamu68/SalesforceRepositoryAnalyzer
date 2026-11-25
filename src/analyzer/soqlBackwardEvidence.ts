@@ -160,13 +160,13 @@ export function backtrackSoqlPermissionShapes(source:string,filePath:string,site
         return ev(runtimeParameter(date[1],"date","Typed date parser slot"));
       // Read-only scalar/string operations and metadata calls reuse the
       // existing evaluator; inputs must be exact, never a synthesized query.
-      const operation=/^([A-Za-z_]\w*)\s*\.\s*(split|trim|replace|toLowerCase|toUpperCase)\s*\(([\s\S]*)\)$/i.exec(expr);
+      const operation=/^((?:(?:System\.)?Label\.)?[A-Za-z_]\w*)\s*\.\s*(split|trim|replace|toLowerCase|toUpperCase)\s*\(([\s\S]*)\)$/i.exec(expr);
       if(operation){
         const value=resolve(frame,operation[1],offset,locals);
         if(one(value.value)===undefined||value.required.length)return ev(stop("non-exact String receiver"));
         const args=operation[3].trim()?splitApexTopLevel(operation[3],","):[];
         if(args.some(s=>!/^'(?:\\.|[^'\\])*'$/s.test(clean(s))))return ev(stop("runtime String operation argument"));
-        return ev(evaluateApexExpression(expr,{values:new Map([[operation[1],value.value]])}));
+        return ev(evaluateApexExpression("receiver."+operation[2]+"("+operation[3]+")",{values:new Map([["receiver",value.value]])}));
       }
       if(/^(?:System\.)?Label\.[A-Za-z_]\w*$/i.test(expr))
         return ev(evaluateApexExpression(expr,{values:new Map(),resolveCall:resolveExternal}));
@@ -191,7 +191,9 @@ export function backtrackSoqlPermissionShapes(source:string,filePath:string,site
         if(members.some(m=>!identifier.test(m)))return ev(stop("invalid metadata member"));
         const key=resolve(frame,metadata[2],offset,locals);
         const known=one(key.value);
-        const rowKey=frame.key+"|metadata|"+expr+"|"+members.map(m=>m.toLowerCase()).sort().join(",");
+        // One row per originating expression, even if a later member read
+        // demands a different projection. Missing members remain unknown.
+        const rowKey=frame.key+"|metadata|"+offset+"|"+expr;
         const selected=choices.get(rowKey);
         if(selected?.kind==="row")return ev({kind:"record",entries:selected.row});
         // All rows are a conservative candidate inventory only for a
@@ -254,7 +256,16 @@ export function backtrackSoqlPermissionShapes(source:string,filePath:string,site
         let base:Evidence,after:SourceNode[];
         const collection=/^(?:list|set)<string>$/i.test(type??"");
         if(defs.length){
-          const def=defs[0];
+          let def=defs[0];
+          // Latest unconditional scalar assignment is the reaching
+          // definition; an older overwritten value is not evidence.
+          if(def.type==="string"){
+            const assignment=new RegExp("^"+name+"\\s*=(?!=|>)\\s*([\\s\\S]+);$","i");
+            for(let i=def.index+1;i<prefix.length;i++){
+              const node=prefix[i],match=node.kind==="statement"?assignment.exec(clean(node.text??"")):null;
+              if(match)def={index:i,node,expression:match[1],type:def.type};
+            }
+          }
           if(!def.expression)return ev(stop("no initializer"));
           // A direct collection alias may be mutated via another name. Only
           // a fresh collection or a proven read-only getter is supported.
@@ -290,6 +301,11 @@ export function backtrackSoqlPermissionShapes(source:string,filePath:string,site
               if(rx(name).test(maskApexSource(n.condition??""))&&
                 !new RegExp("^\\s*!?\\s*"+name+"\\s*\\.\\s*isEmpty\\s*\\(\\s*\\)\\s*$","i").test(clean(n.condition??"")))return false;
               const condition=clean(n.condition??"");
+              // A guard invoking Describe/map/metadata predicates is not
+              // merely a runtime data flag. It can establish a field's
+              // very existence; leave those to authoritative engine proof.
+              const calls=[...maskApexSource(condition).matchAll(/\b[A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)*\s*\(/g)].map(m=>m[0].replace(/\s|\(/g,""));
+              if(calls.some(c=>!(/^(?:String\.(?:isBlank|isNotBlank)|[A-Za-z_]\w*\.isEmpty)$/i.test(c))))return false;
               if(!/^false$/i.test(condition)&&!visit(n.body??[],conditional||!/^true$/i.test(condition),bindings))return false;
               if(!/^true$/i.test(condition)&&!visit(n.otherwise??[],conditional||!/^false$/i.test(condition),bindings))return false;
             }else if(n.kind==="block"){
@@ -320,9 +336,16 @@ export function backtrackSoqlPermissionShapes(source:string,filePath:string,site
                 additions.push({e:resolve(frame,append[1],n.start,bindings),conditional});
                 continue;
               }
-              if(collection||type?.endsWith("__mdt")){
+              if(type?.endsWith("__mdt")){
+                // Reading a scalar configuration member cannot mutate or
+                // escape the record; reject assignments and receiver calls.
+                const memberRead=new RegExp("\\b"+name+"\\s*\\.\\s*[A-Za-z_]\\w*(?!\\w)(?!\\s*(?:\\(|\\.|=(?!=|>)|[+\\-*/%&|^]=|\\+\\+|--))","gi");
+                if(!rx(name).test(visible.replace(memberRead,"")))continue;
+                return false;
+              }
+              if(collection){
                 // Inert reads only. Any alias or unknown call invalidates
-                // the whole collection/record dependency.
+                // the whole collection dependency.
                 if(new RegExp("^System\\s*\\.\\s*debug\\s*\\(\\s*"+name+"\\s*\\.\\s*(?:size|isEmpty)\\s*\\(\\s*\\)\\s*\\)\\s*;$","i").test(statement))continue;
                 return false;
               }
@@ -365,7 +388,9 @@ export function backtrackSoqlPermissionShapes(source:string,filePath:string,site
           const result=aggregatePermissionShapes(shapes);
           return result.length===1?ev(textValue(result[0])):ev(stop("unproven aggregated query"));
         }
-        const basePredicate=normalizePredicate(current.value);
+        const baseText=fragmentText(current.value);
+        const lead=baseText?.match(/^\s*(?:WHERE|AND)\s+/i)?.[0]??"";
+        const basePredicate=baseText===undefined?undefined:normalizePredicate(textValue(baseText.slice(lead.length)));
         if(basePredicate){
           const fields=basePredicate.fields.filter(f=>f.context==="WHERE");
           for(const a of additions){
@@ -376,9 +401,23 @@ export function backtrackSoqlPermissionShapes(source:string,filePath:string,site
             fields.push(...proof.fields.filter(f=>f.context==="WHERE"));
           }
           const unique=[...new Map(fields.map(f=>[f.fieldPath.toLowerCase(),f])).values()];
-          return ev(textValue(unique.map(f=>f.fieldPath+" != null").join(" AND ")),unique);
+          return ev(textValue(lead+unique.map(f=>f.fieldPath+" != null").join(" AND ")),unique);
         }
-        return ev(stop("conditional fragment is not a proven query or predicate"));
+        // Complete comma-delimited field paths, never identifier fragments.
+        // Require every resulting field to occur in the final SELECT.
+        const columns=original?.split(",").map(s=>s.trim());
+        if(columns?.length&&columns.every(s=>path.test(s))){
+          for(const a of additions){
+            const text=one(a.e.value);
+            if(text===undefined||a.e.required.length||!/^\s*,/.test(text))return ev(stop("unknown SELECT append"));
+            const extra=text.trim().slice(1).split(",").map(s=>s.trim());
+            if(!extra.length||extra.some(s=>!path.test(s)))return ev(stop("invalid SELECT append"));
+            columns.push(...extra);
+          }
+          const unique=[...new Set(columns)];
+          return unique.length<=MAX_FIELDS?ev(textValue(unique.join(",")),unique.map(fieldPath=>({fieldPath,context:"SELECT"}))):ev(stop("field limit"));
+        }
+        return ev(stop("conditional fragment is not a proven query, predicate or field list"));
       }finally{active.delete(id);}
     };
     return resolve(root,site.argument,site.offset);

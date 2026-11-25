@@ -1,4 +1,4 @@
-import {indexApexMethods,maskApexSource,matchingPair,splitApexTopLevel,stripApexComments,type IndexedApexMethod,type SourceNode} from "../core/apex/ApexSourceModel.js";
+import {indexApexMethods,maskApexSource,matchingPair,splitApexTopLevel,stripApexComments,parseApexStatements,type IndexedApexMethod,type SourceNode} from "../core/apex/ApexSourceModel.js";
 import {apexSymbols} from "../core/apex/ApexSymbolTable.js";
 import {addApexValues,evaluateApexExpression,textValue,runtimeParameter,type ApexValue} from "../core/apex/ApexValueEvaluator.js";
 import type {ApexCallSite} from "../core/apex/ApexInvocationModel.js";
@@ -120,8 +120,8 @@ export function proveCallerPermissionShapes(source:string,site:ApexCallSite,seed
 }
 
 /** A small, source-only return inventory for same-owner private String helpers.
- * Only literal query/null returns and pure scalar guards. We never execute
- * the helper, infer switch syntax, or replace an arbitrary unknown return. */
+ * Only literal query/null returns, pure scalar guards and complete literal
+ * switch cases. Never execute the helper or replace an arbitrary unknown return. */
 export function proveLiteralHelperPermissionShapes(source:string,site:ApexCallSite,methods=indexApexMethods(source)):string[]{
   const template=directTemplate(source,site,methods);
   if(!template)return [];
@@ -160,6 +160,41 @@ export function proveLiteralHelperPermissionShapes(source:string,site:ApexCallSi
         if(/^true$/i.test(condition)?yes.stopped:/^false$/i.test(condition)?no.stopped:yes.stopped&&no.stopped)return {ok:true,stopped:true};
       }else if(node.kind==="block"){
         const block=walk(node.body??[]);if(!block.ok||block.stopped)return block;
+      }else if(node.kind==="opaque"){
+        // Shared syntax index conservatively marks switch opaque. Consume
+        // only a complete local scalar switch with literal case labels and
+        // explicit returning arms; no fall-through or unknown case effects.
+        const raw=source.slice(node.start,node.end),masked=maskApexSource(raw);
+        const head=/^\s*switch\s+on\s+([A-Za-z_]\w*)\s*\{/i.exec(masked);
+        if(!head||!names.has(head[1].toLowerCase()))return {ok:false,stopped:false};
+        const open=head[0].length-1,end=matchingPair(masked,open,"{","}");
+        if(end<0)return {ok:false,stopped:false};
+        const type=symbols.lookup(method,head[1],node.start);
+        if(!type||!/^(?:integer|long|string)$/i.test(type))return {ok:false,stopped:false};
+        let cursor=open+1,seenElse=false,arms=0,allStopped=true;
+        while(cursor<end){
+          while(cursor<end&&/\s/.test(masked[cursor]))cursor++;
+          if(cursor>=end)break;
+          const when=/^when\b/i.exec(masked.slice(cursor));
+          if(!when||seenElse||++arms>32)return {ok:false,stopped:false};
+          const brace=masked.indexOf("{",cursor+when[0].length);
+          if(brace<0||brace>=end)return {ok:false,stopped:false};
+          const labels=clean(raw.slice(cursor+when[0].length,brace));
+          const isElse=/^else$/i.test(labels);
+          if(isElse)seenElse=true;
+          else if(splitApexTopLevel(labels,",").some(label=>!(/^(?:-?\d+|null|'(?:\\.|[^'\\])*')$/i.test(clean(label)))))return {ok:false,stopped:false};
+          const close=matchingPair(masked,brace,"{","}");
+          if(close<0||close>=end)return {ok:false,stopped:false};
+          const branch=walk(parseApexStatements(source,node.start+brace+1,node.start+close));
+          if(!branch.ok||!branch.stopped)return {ok:false,stopped:false};
+          allStopped=allStopped&&branch.stopped;
+          cursor=close+1;
+        }
+        if(!arms||!allStopped)return {ok:false,stopped:false};
+        const trailing=clean(raw.slice(end+1));
+        if(seenElse)return trailing?{ok:false,stopped:false}:{ok:true,stopped:true};
+        if(!trailing)return {ok:false,stopped:false};
+        return walk(parseApexStatements(source,node.start+end+1,node.end));
       }else if(node.kind==="statement"){
         const ret=/^return\s+([\s\S]+);$/i.exec(clean(node.text??""));
         if(!ret)return {ok:false,stopped:false};

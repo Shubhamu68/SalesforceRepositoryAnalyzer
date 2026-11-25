@@ -264,9 +264,31 @@ export class ApexRepositoryMethodIndex {
     if(!owner||!owner.methods.includes(target))return [];
     const candidates=this.callers.get(this.methodKey(owner.className,target.name,target.parameters.length))??[];
     if(candidates.length>MAX_CALL_CONTEXTS)return [];
+    const direct=(call:Caller):boolean=>{
+      const at=(nodes:readonly import("./ApexSourceModel.js").SourceNode[]):import("./ApexSourceModel.js").SourceNode|undefined=>{
+        for(const n of nodes){
+          if(n.start>call.offset||call.offset>=n.end)continue;
+          if(n.kind==="statement")return n;
+          if(n.kind!=="if"&&n.kind!=="block")return undefined;
+          // Do not admit a call in a condition/header. Earlier operands may
+          // short-circuit or mutate arguments before this invocation.
+          if(n.kind==="if"&&/^false$/i.test((n.condition??"").trim())&&n.body?.some(c=>c.start<=call.offset&&call.offset<c.end))return undefined;
+          if(n.kind==="if"&&/^true$/i.test((n.condition??"").trim())&&n.otherwise?.some(c=>c.start<=call.offset&&call.offset<c.end))return undefined;
+          return at(n.body??[])??at(n.otherwise??[]);
+        }
+        return undefined;
+      };
+      const node=at(call.method.body);
+      if(!node)return false;
+      const text=maskApexSource(call.caller.source.slice(node.start,node.end));
+      const relative=call.offset-node.start,open=text.indexOf("(",relative);
+      if(open<0||!/^\s*(?:return\s+|(?:[\w\s<>,.\[\]]+\s+)?[A-Za-z_]\w*\s*=\s*)?$/i.test(text.slice(0,relative)))return false;
+      const close=matchingPair(text,open);
+      return close>=0&&/^\s*;\s*$/.test(text.slice(close+1));
+    };
     return candidates.filter(call=>call.targetStart===target.start&&
       (target.isStatic||call.privateInstanceEdge)&&
-      (call.caller===owner||target.visibility==="public"||target.visibility==="global"))
+      (call.caller===owner||target.visibility==="public"||target.visibility==="global")&&direct(call))
       .map(call=>({filePath:call.caller.filePath,source:call.caller.source,methods:call.caller.methods,
         method:call.method,offset:call.offset,expressions:[...call.expressions]}));
   }
