@@ -1,6 +1,8 @@
 import {maskApexSource,matchingPair,type IndexedApexMethod,type SourceNode} from "./ApexSourceModel.js";
 import {evaluateApexExpression,unknown,type ApexValue} from "./ApexValueEvaluator.js";
 import {canonicalApexType} from "./ApexTypeSystem.js";
+import {maskProvenSchemaReads,maskProvenListReads} from "./ApexSchemaModel.js";
+import {isBoundedStringOperation} from "./ApexBoundedStringOperations.js";
 
 interface ScalarMember {name:string;key:string;initial:ApexValue}
 const safeCall=/^(?:String\.(?:join|valueOf|isBlank|isNotBlank|isEmpty|escapeSingleQuotes)|Math\.(?:min|max)|System\.debug)$/i;
@@ -170,7 +172,7 @@ export class ApexMemberEffectModel{
     const type=this.types(method).get(receiver)??"";
     if(/^(?:List|Set)\s*<\s*String\s*>$|^Map\s*<\s*String\s*,\s*String\s*>$/i.test(type))
       return /^(?:get|contains|containsKey|isEmpty|size|keySet)$/i.test(operation);
-    if(/^String$/i.test(type))return /^(?:trim|length|substring|endsWith|startsWith|contains|split|isEmpty|toLowerCase|toUpperCase)$/i.test(operation);
+    if(/^String$/i.test(type))return isBoundedStringOperation(operation)||/^(?:trim|contains|split|isEmpty|toLowerCase|toUpperCase|equalsIgnoreCase|containsIgnoreCase|removeEnd)$/i.test(operation);
     return /^Schema\.FieldSetMember$/i.test(type)&&/^(?:getFieldPath|getLabel|getType)$/i.test(operation);
   }
   /** Strict replay subset: only local scalars/collections, direct member
@@ -182,6 +184,8 @@ export class ApexMemberEffectModel{
     const types=this.types(method);
     const check=(source:string,statement=false):boolean=>{
       let visible=maskApexSource(source);
+      const schemaAllowed=!this.locals(method).has("schema")&&!/\bclass\s+Schema\b/i.test(this.masked);
+      visible=maskProvenSchemaReads(visible,types,schemaAllowed);
       if(/\b(?:insert|update|upsert|delete|undelete|merge|throw|switch|try|while|do)\b/i.test(visible))return false;
       // Recognize only platform constructors and independently proven inert
       // nested DTOs. Unknown allocations are not safe effect evidence.
@@ -215,7 +219,7 @@ export class ApexMemberEffectModel{
         const tail=visible.slice(hit.index!+hit[0].length);
         if(/^\s*[.(]/.test(tail))continue; // the complete call is checked below
         const receiver=hit[1].toLowerCase(),member=hit[2].toLowerCase();
-        if(receiver==="label"||receiver==="schema"&&member==="fieldsetmember"||
+        if(receiver==="label"||receiver==="schema"&&schemaAllowed&&/^(?:fieldsetmember|sobjecttype|sobjectfield|describesobjectresult|describefieldresult|displaytype)$/.test(member)||
           this.key(method,hit[1]+"."+hit[2])||
           this.inertDtos.get((types.get(receiver)??"").toLowerCase())?.has(member))continue;
         return false;
@@ -236,7 +240,7 @@ export class ApexMemberEffectModel{
         if(dot>0&&safeMember.test(name.slice(dot+1))){
           const type=types.get(name.slice(0,dot).toLowerCase())??"";
           if(/^(?:String|List\s*<\s*String\s*>|Set\s*<\s*String\s*>|Map\s*<\s*String\s*,\s*String\s*>|Schema\.FieldSetMember|List\s*<\s*Object\s*>)$/i.test(type)){
-            if(/^(?:add|addAll|clear|put|putAll|remove)$/i.test(name.slice(dot+1))&&directEffectCall(source.trim().replace(/;$/,""))!==name.toLowerCase())return false;
+            if(/^(?:add|addAll|clear|put|putAll|remove)$/i.test(name.slice(dot+1))&&directEffectCall(visible.trim().replace(/;$/,""))!==name.toLowerCase())return false;
             continue;
           }
         }
@@ -283,7 +287,9 @@ export class ApexMemberEffectModel{
     const visit=(helper:IndexedApexMethod):boolean=>{
       if(checked.has(helper))return true;
       checked.add(helper);
-      const body=this.masked.slice(helper.start,helper.end);
+      const rawBody=this.masked.slice(helper.start,helper.end);
+      const schemaAllowed=!this.locals(helper).has("schema")&&!/\bclass\s+Schema\b/i.test(this.masked);
+      const body=maskProvenListReads(maskProvenSchemaReads(rawBody,this.types(helper),schemaAllowed),this.types(helper));
       const hasSet=[...this.types(helper).values()].some(t=>canonicalApexType(t)?.startsWith("set<"))||
         /\bnew\s+Set\s*</i.test(body);
       if(hasSet&&/\bfor\s*\(|\bString\s*\.\s*join\s*\(|\bnew\s+List\s*<|\.\s*get\s*\(|\[[^\]]*\]/i.test(body))return false;

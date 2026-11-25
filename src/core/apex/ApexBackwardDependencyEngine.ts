@@ -733,13 +733,14 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
                     if(++effectSummaries>MAX_EFFECT_SUMMARIES){note(frame,n.start,"WORK_LIMIT",helper.name);throw new Bounded("Helper effect summary limit");}
                     let engine=effectEngines.get(frame.filePath);
                     if(!engine){
-                      // Only source-proven allocations are resolved here.
-                      // Do not let an external return-only resolver bypass
-                      // local effect replay for nested application calls.
+                      // Permit only source-proven allocations and the same
+                      // authoritative Schema snapshot reads used by forward evaluation.
+                      // Never bypass local effect replay via application return summaries.
                       engine=new ApexDataFlowEngine(frame.source,{sourceMethods:[...frame.methods],maxOperations:500,
                         selectInvocation:()=>undefined,
                         resolveExternal:(call,values,types)=>call==="Apex.construct"&&values[0]?.kind==="text"&&values[0].values.length===1?
-                          index?.constructInstance(frame.filePath,values[0].values[0],values.slice(1),undefined,types?.slice(1)):undefined});
+                          index?.constructInstance(frame.filePath,values[0].values[0],values.slice(1),undefined,types?.slice(1)):
+                          /^(?:Schema\.objectSchema|Schema\.fieldMap)$/.test(call)?resolveExternal?.(call,values,types,frame.filePath):undefined});
                       effectEngines.set(frame.filePath,engine);
                     }
                     const updated=engine.summarizeArgumentEffects(helper,args.map(v=>v.value),(code,at)=>

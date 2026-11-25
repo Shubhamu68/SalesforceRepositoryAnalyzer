@@ -299,3 +299,70 @@ test("outer scalar loop reads retain correlated metadata and Field Set candidate
   assert.ok(events.includes("LOOP_OUTER_SCALAR_READ_PROVEN"));
   assert.equal(result.bounded,false);
 });
+
+
+test("metadata-driven helper effects recover real SELECT field identities through Describe and FORMAT",async()=>{
+  const filePath="ReportFixture.cls";
+  const source=[
+    "public class ReportFixture {",
+    " public class Column {public String name;public String label;public String type;}",
+    " public static void run(String reportName){",
+    "  Config__mdt cfg=getConfig(reportName);if(cfg==null){return;}",
+    "  String obj=cfg.Object__c;if(Schema.getGlobalDescribe().get(obj)==null){return;}",
+    "  List<String> paths=Utils.getFieldListFromFieldSet(obj,cfg.Field_Set__c);if(paths==null||paths.isEmpty()){return;}",
+    "  Set<String> selected=new Set<String>{'Id'};for(String path:paths){Column col=append(obj,path,selected);}",
+    "  String base='SELECT '+String.join(new List<String>(selected),',')+' FROM '+obj;",
+    "  Database.query(base+' WITH USER_MODE ORDER BY Id ASC');",
+    "  Database.query(base+' WITH USER_MODE ORDER BY Id DESC');",
+    " }",
+    " private static Config__mdt getConfig(String name){List<Config__mdt> rows=[SELECT DeveloperName,Object__c,Field_Set__c FROM Config__mdt WHERE DeveloperName=:name AND Active__c=true LIMIT 1];return rows.isEmpty()?null:rows[0];}",
+    " private static Column append(String objectName,String path,Set<String> selected){",
+    "  Schema.DescribeSObjectResult objectDescribe=Schema.getGlobalDescribe().get(objectName).getDescribe();",
+    "  Map<String,Schema.SObjectField> fmap=objectDescribe.fields.getMap();",
+    "  Column col=new Column();col.name=path;",
+    "  if(fmap.containsKey(path)){",
+    "   Schema.DescribeFieldResult d=fmap.get(path).getDescribe();",
+    "   col.label=d.getLabel();col.type=d.getType().name();",
+    "   if(d.getType()==Schema.DisplayType.DATETIME){selected.add('FORMAT('+path+')');}",
+    "   else{selected.add(path);}",
+    "   if(d.getType()==Schema.DisplayType.REFERENCE){List<Schema.SObjectType> targets=d.getReferenceTo();Schema.SObjectType target=targets[0];String related=target.getDescribe().getName();if(related=='Account'){String rel=d.getRelationshipName();selected.add(rel+'.Name');}}",
+    "  }",
+    "  return col;",
+    " }",
+    "}"
+  ].join("\n");
+  const configs=[{object:"Account",fields:["CreatedDate","Industry","Name","Phone","ParentId"]},{object:"Contact",fields:["CreatedDate","Email","FirstName","LastName","Phone","Title","AccountId"]},{object:"Case",fields:["CreatedDate","Subject","Status","Priority","Origin","Type","Reason","Description","CaseNumber","SuppliedEmail","SuppliedName","AccountId"]}];
+  const metadata={
+    scopeKey:"schema-effect-recovery-fixture",
+    getObjectFieldNames:async()=>({complete:false as const,source:"LIVE_ORG" as const}),
+    getObjectSchema:async(object:string)=>({complete:true as const,source:"LIVE_ORG" as const,value:{name:object,fields:[
+      {name:"Id",type:"id"},
+      ...(configs.find(c=>c.object===object)?.fields??[]).map(name=>({name,type:name==="CreatedDate"?"datetime":name.endsWith("Id")?"reference":"string",...(name.endsWith("Id")?{referenceTo:["Account"],relationshipName:name.slice(0,-2)}:{})}))
+    ]}}),
+    getCustomMetadataRecords:async()=>({complete:true as const,source:"LIVE_ORG" as const,value:configs.map(c=>({DeveloperName:c.object,Object__c:c.object,Field_Set__c:c.object+"Fields",Active__c:true}))}),
+    getFieldSetFields:async(object:string)=>({complete:true as const,source:"LIVE_ORG" as const,value:configs.find(c=>c.object===object)?.fields??[]})
+  };
+  const index=new ApexRepositoryMethodIndex([{filePath,source}]),engine=new ApexAnalysisEngine(index,metadata);
+  for(const site of discoverApexInvocations(source,dynamicDatabaseQuerySelector)){
+    const events:string[]=[];
+    const result=await engine.analyze(filePath,ctx=>backtrackSoqlPermissionShapes(source,filePath,site,index,ctx.resolveExternal,e=>events.push(e.code)));
+    assert.equal(result.queries.length,3,JSON.stringify({result,events}));
+    assert.ok(events.includes("SHARED_HELPER_EFFECT_RESOLVED"));
+    assert.equal(result.bounded,false);
+    for(const config of configs){
+      const actual=result.queries.filter(q=>q.includes(" FROM "+config.object+" "));
+      const rel=config.object==="Account"?"Parent.Name":"Account.Name";
+      assert.deepEqual(fields(actual),new Set(["SELECT:Id",...config.fields.map(f=>"SELECT:"+f),"SELECT:"+rel,"ORDER_BY:Id"]),JSON.stringify({result,events}));
+      assert.ok(actual[0].includes("FORMAT(CreatedDate)"));
+    }
+  }
+});
+
+test("Schema effect proof does not mask arbitrary application calls or unresolved mutation",()=>{
+  const filePath="Builder.cls";
+  const source="public class Builder {public static void run(){Set<String> cols=new Set<String>{'Id'};append('Account',cols);Database.query('SELECT '+String.join(cols,',')+' FROM Account');}private static void append(String obj,Set<String> cols){Schema.DescribeSObjectResult d=Schema.getGlobalDescribe().get(Other.name(obj)).getDescribe();cols.add(d.getName());}}";
+  const events:string[]=[],index=new ApexRepositoryMethodIndex([{filePath,source}]),site=discoverApexInvocations(source,dynamicDatabaseQuerySelector)[0];
+  const result=backtrackSoqlPermissionShapes(source,filePath,site,index,undefined,e=>events.push(e.code));
+  assert.deepEqual(result.queries,[]);
+  assert.ok(events.includes("HELPER_EFFECT_SOURCE_UNSUPPORTED"));
+});

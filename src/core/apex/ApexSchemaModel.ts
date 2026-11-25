@@ -1,6 +1,6 @@
 import type {ApexObjectSchema,ApexSchemaField,MetadataResult} from "../metadata/ApexMetadataProvider.js";
 import type {ApexValue} from "./ApexValueEvaluator.js";
-import type {ApexCallResolver} from "./ApexTypeSystem.js";
+import {canonicalApexType,type ApexCallResolver} from "./ApexTypeSystem.js";
 import {readApexMemberOperation} from "./ApexReadOperations.js";
 import {compareScalars,knownBoolean,splitScalarOperator} from "./ApexScalarOperators.js";
 
@@ -85,6 +85,7 @@ export function evaluateSchemaRead(receiver:ApexValue,operation:string,args:read
   if(receiver.schemaType==="objectToken"||receiver.schemaType==="objectDescribe"){
     if(op==="getdescribe"&&receiver.schemaType==="objectToken")return {...receiver,schemaType:"objectDescribe"};
     if(op==="getname"&&receiver.schemaType==="objectDescribe")return text(receiver.objectApiName);
+    if(op==="getlabel"&&receiver.schemaType==="objectDescribe")return unknown("Localized object label is not proven.");
     if(op==="getsobjecttype"&&receiver.schemaType==="objectDescribe")return {...receiver,schemaType:"objectToken"};
     return unknown("Unsupported Schema object operation.");
   }
@@ -92,6 +93,7 @@ export function evaluateSchemaRead(receiver:ApexValue,operation:string,args:read
   if(receiver.schemaType!=="fieldDescribe")return unknown("Field Describe result is required.");
   const f=receiver.field;
   if(op==="getname")return text(f.name);
+  if(op==="getlabel")return unknown("Localized field label is not proven.");
   if(op==="getsobjectfield")return {...receiver,schemaType:"fieldToken"};
   if(op==="gettype"){
     const value=typeof f.type==="string"?displayType(f.type):undefined;
@@ -116,7 +118,7 @@ export function schemaReceiverEligible(expression:string,type?:string):boolean{
     /^list\s*<\s*schema\.sobjecttype\s*>$/i.test(type??"")||
     /^map\s*<\s*string\s*,\s*schema\.sobjectfield\s*>$/i.test(type??"");
 }
-const operations=new Set(["getdescribe","gettype","getname","getrelationshipname","getreferenceto","isnamefield","getsobjecttype","getsobjectfield","name"]);
+const operations=new Set(["getdescribe","gettype","getname","getlabel","getrelationshipname","getreferenceto","isnamefield","getsobjecttype","getsobjectfield","name"]);
 export const isSchemaReadOperation=(operation:string)=>operations.has(operation.toLowerCase());
 export interface SchemaExpressionContext {
   evaluate:(expression:string)=>ApexValue;
@@ -245,4 +247,65 @@ export function evaluateSchemaExpression(expr:string,ctx:SchemaExpressionContext
     if(receiver.kind==="unknown"&&ctx.receiverEligible)return receiver;
   }
   return undefined;
+}
+
+
+/** Source-only proof for read-only typed Schema expressions used by helper
+ * effects. The original expression is still evaluated by the shared Schema
+ * interpreter; this function does not produce metadata or execute calls.
+ * Only mask complete typed chains with simple arguments, never application
+ * dispatch, unknown suffixes, or calls embedded in lookup arguments. */
+export function maskProvenSchemaReads(visible:string,types:ReadonlyMap<string,string>,schemaAllowed:boolean):string{
+  const mapType="map<string,schema.sobjectfield>";
+  const listType="list<schema.sobjecttype>";
+  const transitions:Record<string,Record<string,string>>={
+    "schema.sobjecttype":{getdescribe:"schema.describesobjectresult"},
+    "schema.describesobjectresult":{getname:"string",getlabel:"string",getsobjecttype:"schema.sobjecttype"},
+    [mapType]:{get:"schema.sobjectfield",containskey:"boolean",isempty:"boolean",size:"integer"},
+    "schema.sobjectfield":{getdescribe:"schema.describefieldresult"},
+    "schema.describefieldresult":{getname:"string",getlabel:"string",gettype:"schema.displaytype",getrelationshipname:"string",getreferenceto:listType,isnamefield:"boolean",getsobjectfield:"schema.sobjectfield"},
+    "schema.displaytype":{name:"string"},
+    [listType]:{get:"schema.sobjecttype",size:"integer",isempty:"boolean"}
+  };
+  const roots=/\b(?:Schema\s*\.\s*getGlobalDescribe\s*\(\s*\)\s*\.\s*(?:get|containsKey)\s*\(\s*(?:[A-Za-z_]\w*|\d+)?\s*\)|Schema\s*\.\s*DisplayType\s*\.\s*[A-Za-z_]\w*|[A-Za-z_]\w*(?=\s*(?:\.|\[)))/gi;
+  let out="",cursor=0;
+  for(const hit of visible.matchAll(roots)){
+    const start=hit.index!;if(start<cursor)continue;
+    let previous=start-1;while(previous>=0&&/\s/.test(visible[previous]))previous--;
+    if(visible[previous]===".")continue;
+    const root=hit[0];
+    const platform=/^Schema\s*\./i.test(root);
+    let type=platform?(schemaAllowed?(
+      /^Schema\s*\.\s*DisplayType/i.test(root)?(displayType(root.split(".").at(-1)!.trim())?"schema.displaytype":undefined):
+      /\.\s*containsKey\s*\(/i.test(root)?"boolean":"schema.sobjecttype"):undefined):canonicalApexType(types.get(root.toLowerCase()));
+    if(!type||!platform&&!transitions[type])continue;
+    let end=start+root.length,read=platform;
+    for(;;){
+      const rest=visible.slice(end);
+      const fieldMap=/^\s*\.\s*fields\s*\.\s*getMap\s*\(\s*\)/i.exec(rest);
+      if(fieldMap&&type==="schema.describesobjectresult"){type=mapType;end+=fieldMap[0].length;read=true;continue;}
+      const index=/^\s*\[\s*0\s*\]/.exec(rest);
+      if(index&&type===listType){type="schema.sobjecttype";end+=index[0].length;read=true;continue;}
+      const op=/^\s*\.\s*([A-Za-z_]\w*)\s*\(\s*([A-Za-z_]\w*|\d+)?\s*\)/i.exec(rest);
+      if(!op)break;
+      const action=op[1].toLowerCase();
+      const next:string|undefined=transitions[type]?.[action];
+      if(!next||!isSchemaReadOperation(action)&&!["get","containskey","isempty","size"].includes(action))break;
+      if(action!=="get"&&action!=="containskey"&&op[2]!==undefined)break;
+      if(type===listType&&action==="get"&&op[2]!=="0")break;
+      type=next;end+=op[0].length;read=true;
+    }
+    if(!read||/^\s*(?:\.|\[)/.test(visible.slice(end)))continue;
+    // A masked scalar placeholder preserves the surrounding statement
+    // structure without hiding a mutation or a nested application call.
+    out+=visible.slice(cursor,start)+"0";cursor=end;
+  }
+  return out+visible.slice(cursor);
+}
+
+/** Existing String read operations on proven receiver types; a read-only
+ * List position cannot observe the ordering of a Set. */
+export function maskProvenListReads(visible:string,types:ReadonlyMap<string,string>):string{
+  return visible.replace(/\b([A-Za-z_]\w*)\s*(?:\.\s*get\s*\(\s*(?:\d+|[A-Za-z_]\w*)\s*\)|\[\s*(?:\d+|[A-Za-z_]\w*)\s*\])/gi,(all,receiver:string)=>
+    canonicalApexType(types.get(receiver.toLowerCase()))==="list<string>"?"0":all);
 }

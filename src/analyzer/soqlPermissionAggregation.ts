@@ -8,6 +8,13 @@ export interface SoqlPermissionShape {
   fields:SoqlExpressionField[];
 }
 const fieldPath=/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/;
+/** FORMAT affects presentation, not the underlying field permission. This
+ * narrow parser projection is intentionally not a generic function bypass. */
+export function permissionSelectFieldPath(expression:string):string|undefined{
+  const trimmed=expression.trim();
+  if(fieldPath.test(trimmed))return trimmed;
+  return /^FORMAT\s*\(\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\)$/i.exec(trimmed)?.[1];
+}
 
 /** Simple root scopes only. Do not flatten subqueries, aggregates, aliases,
  * grouped expressions or unknown security modes into an incorrect scope. */
@@ -19,13 +26,13 @@ export function simplePermissionShape(text:string,line=1,onReject?:(code:string)
   if(!inventory.parsed)return reject("SOQL_PARSE_FAILED");
   if(inventory.limitations.length)return reject("FIELD_INVENTORY_LIMITATION");
   if(!inventory.fields.length)return reject("FIELD_INVENTORY_EMPTY");
-  if(inventory.fields.some(f=>f.functionName||!fieldPath.test(f.fieldPath)||
+  if(inventory.fields.some(f=>(f.functionName&&!(f.context==="SELECT"&&f.functionName.toUpperCase()==="FORMAT"))||!fieldPath.test(f.fieldPath)||
       !["SELECT","WHERE","ORDER_BY"].includes(f.context)))return reject("FIELD_CONTEXT_UNSUPPORTED");
   const visible=maskSoqlStringsAndComments(text);
   // Restrict to ordinary bare SELECT paths and a single unaliased root.
-  const match=/^\s*SELECT\s+([\w\s.,]+?)\s+FROM\s+([A-Za-z_]\w*)\b/i.exec(visible);
+  const match=/^\s*SELECT\s+([\w\s.,()]+?)\s+FROM\s+([A-Za-z_]\w*)\b/i.exec(visible);
   if(!match||match[2].toLowerCase()!==root.fromName.toLowerCase()||
-    match[1].split(",").some(f=>!fieldPath.test(f.trim())))return reject("SELECT_ROOT_SHAPE_UNSUPPORTED");
+    match[1].split(",").some(f=>!permissionSelectFieldPath(f)))return reject("SELECT_ROOT_SHAPE_UNSUPPORTED");
   const tail=visible.slice(match[0].length).trim();
   if(tail&&!/^(?:WHERE\b|WITH\b|ORDER\s+BY\b|LIMIT\b|OFFSET\b|FOR\b)/i.test(tail))return reject("ROOT_TAIL_UNSUPPORTED");
   if(/\b(?:GROUP\s+BY|HAVING|TYPEOF)\b/i.test(visible))return reject("GROUPED_SHAPE_UNSUPPORTED");
