@@ -8,18 +8,19 @@ type Resolver=ApexCallResolver;
 interface ClassShape {
   name:string;
   filePath:string;
-  fields:Array<{name:string;initializer?:string}>;
+  fields:Array<{name:string;type:string;initializer?:string}>;
   constructors:Array<{parameters:string[];parameterTypes:string[];body:SourceNode[]}>;
   initializationOrder:Array<{field:string;initializer?:string}|{block:SourceNode[]}>;
   supported:boolean;
 }
-const scalar=/^(?:(?:public|private|protected|global|final|transient)\s+)*(?:String|Boolean|Integer|Long|Decimal|Double|Id)\s+([A-Za-z_]\w*)\s*(?:=\s*([\s\S]+))?$/i;
+const fieldDeclaration=/^(?:(?:public|private|protected|global|final|transient)\s+)*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*(?:\s*<[\w\s,.<>\[\]]+>)?(?:\s*\[\s*\])*)\s+([A-Za-z_]\w*)\s*(?:=\s*([\s\S]+))?$/i;
 
 /** Small, explicit object domain: allocation identity is reference identity.
  * Only source-backed scalar fields and bounded, known-branch initialization are
  * modeled. No guessed inheritance, properties, dynamic dispatch or effects. */
 export class ApexInstanceIndex {
   private readonly shapes=new Map<string,ClassShape[]>();
+  private readonly activeAllocations=new Set<string>();
   constructor(files:readonly {filePath:string;source:string}[],syntax?:ApexRepositorySyntaxInventory){
     for(const file of files){
       const source=file.source,masked=syntax?.masked(source)??maskApexSource(source);
@@ -45,12 +46,19 @@ export class ApexInstanceIndex {
             if(paren===0&&bracket===0&&(ch===";"||ch==="{"))break;
           }
           if(boundary>=close){shape.supported=false;break;}
+          // Collection literal initializer braces belong to the declaration.
+          if(masked[boundary]==="{"&&/=\s*new\s+(?:List|Set|Map)\s*<[\w\s,.<>]+>\s*$/i.test(masked.slice(start,boundary))){
+            const literalEnd=matchingPair(masked,boundary,"{","}");
+            const tail=literalEnd<0?-1:masked.indexOf(";",literalEnd+1);
+            if(tail<0||tail>=close||masked.slice(literalEnd+1,tail).trim()){shape.supported=false;break;}
+            boundary=tail;
+          }
           const header=source.slice(start,boundary).trim();
           const visible=masked.slice(start,boundary).trim();
           if(masked[boundary]===";"){
             if(!/\bstatic\b/i.test(visible)){
-              const field=scalar.exec(header);
-              if(field){shape.fields.push({name:field[1],initializer:field[2]});shape.initializationOrder.push({field:field[1],initializer:field[2]});}
+              const field=fieldDeclaration.exec(header);
+              if(field){shape.fields.push({type:field[1],name:field[2],initializer:field[3]});shape.initializationOrder.push({field:field[2],initializer:field[3]});}
               else shape.supported=false;
             }
             start=boundary+1;continue;
@@ -91,6 +99,12 @@ export class ApexInstanceIndex {
     const shape=candidates[0];
     if(!shape.supported||shape.fields.length>100)
       return unknown("Unsupported instance declarations or initialization for "+name+".");
+    if(this.activeAllocations.has(shape.name.toLowerCase())||this.activeAllocations.size>=8)return unknown("Recursive or deeply nested instance initialization.");
+    this.activeAllocations.add(shape.name.toLowerCase());
+    try{return this.constructShape(shape,name,args,resolve,types);}
+    finally{this.activeAllocations.delete(shape.name.toLowerCase());}
+  }
+  private constructShape(shape:ClassShape,name:string,args:readonly ApexValue[],resolve?:Resolver,types?:ApexArgumentTypes):ApexValue{
     const constructor=selectApexOverload(shape.constructors,args.length,types);
     if(!constructor&&(shape.constructors.length||args.length))
       return unknown("Constructor overload is not uniquely proven for "+name+".");
@@ -102,11 +116,19 @@ export class ApexInstanceIndex {
       // are not modeled here. Pure scalar expressions and metadata constants
       // can be evaluated using the existing expression interpreter.
       const calls=[...maskApexSource(expr).matchAll(/\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(/g)];
-      if(calls.some(call=>!/^String\.(?:isBlank|isNotBlank|valueOf|escapeSingleQuotes)$/i.test(call[1]))){unsupportedEffect=true;return unknown("Constructor expression has unproven effects.");}
+      const allocation=/^new\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(/i.exec(expr.trim());
+      if(calls.some(call=>!/^String\.(?:isBlank|isNotBlank|valueOf|escapeSingleQuotes)$/i.test(call[1])&&!(allocation&&call===calls[0]&&call[1].toLowerCase()===allocation[1].toLowerCase()))){unsupportedEffect=true;return unknown("Constructor expression has unproven effects.");}
       const env=new Map<string,ApexValue>();
       for(const [key,value] of fields){env.set(key,value);env.set("this."+key,value);}
       for(const [key,value] of parameters)env.set(key,value);
-      return evaluateApexExpression(expr,{values:env,resolveCall:resolve});
+      return evaluateApexExpression(expr,{values:env,resolveCall:(method,inputs,hints)=>{
+        if(method==="Apex.construct"&&inputs[0]?.kind==="text"&&inputs[0].values.length===1){
+          const child=this.construct(inputs[0].values[0],inputs.slice(1),shape.filePath,resolve,hints?.slice(1));
+          if(child?.kind!=="instance"){unsupportedEffect=true;return unknown("Nested instance initialization is not proven.");}
+          return child;
+        }
+        return resolve?.(method,inputs,hints);
+      }});
     };
     for(const field of shape.fields)fields.set(field.name,unknown("Instance field has no proven assignment."));
     let operations=0;
