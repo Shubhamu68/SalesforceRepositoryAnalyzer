@@ -364,3 +364,34 @@ test("metadata candidate helpers with unsupported effects or filters remain unkn
     assert.ok(result.candidates.every(c=>c.value.kind==="unknown"),JSON.stringify(result));
   }
 });
+
+test("global Describe guard reads share typed Schema evidence in forward and backward analysis",()=>{
+  const context={values:new Map<string,ApexValue>([["obj",textValue("Account")]]),resolveCall:schemaResolver};
+  for(const [condition,expected] of [
+    ["Schema.getGlobalDescribe().get(obj) == null",false],
+    ["null != Schema.getGlobalDescribe().get(obj)",true],
+    ["Schema.getGlobalDescribe().containsKey(obj)",true],
+    ["!Schema.getGlobalDescribe().containsKey(obj)",false]
+  ] as const)assert.deepEqual(evaluateApexExpression(condition,context),booleanValue(expected),condition);
+  assert.equal(evaluateApexExpression("Schema.getGlobalDescribe().containsKey('Missing__c')",context).kind,"unknown");
+  for(const condition of ["Schema.getGlobalDescribe().get(obj)==null","!Schema.getGlobalDescribe().containsKey(obj)"]){
+    const source="public class Inspector {public static void run(){String obj='Account';if("+condition+"){System.debug(obj);return;}Inspector.consume(obj);}}";
+    const filePath="Inspector.cls",index=new ApexRepositoryMethodIndex([{filePath,source}]);
+    const events:string[]=[];
+    const result=traceApexDependencies(source,filePath,{expression:"obj",offset:source.indexOf("Inspector.consume")},index,schemaResolver,{observe:e=>events.push(e.code)});
+    assert.deepEqual(result.candidates.map(c=>c.value),[textValue("Account")],JSON.stringify(result));
+    assert.ok(events.includes("SCHEMA_GUARD_RESOLVED"));
+    const unavailable=traceApexDependencies(source,filePath,{expression:"obj",offset:source.indexOf("Inspector.consume")},index,()=>undefined);
+    assert.ok(unavailable.candidates.every(c=>c.value.kind==="unknown"));
+    const missing=traceApexDependencies(source,filePath,{expression:"obj",offset:source.indexOf("Inspector.consume")},index,(method)=>method==="Schema.objectSchema"?{kind:"null"}:undefined);
+    assert.ok(missing.candidates.every(c=>c.value.kind==="unknown"));
+  }
+});
+test("global Describe guard does not bypass a reachable mutation or shadowed Schema",()=>{
+  for(const middle of ["if(Schema.getGlobalDescribe().containsKey(obj)){obj='Contact';}","String Schema='custom';if(Schema.getGlobalDescribe().get(obj)==null){return;}"]){
+    const source="public class Inspector {public static void run(){String obj='Account';"+middle+"Inspector.consume(obj);}}";
+    const filePath="Inspector.cls",index=new ApexRepositoryMethodIndex([{filePath,source}]);
+    const result=traceApexDependencies(source,filePath,{expression:"obj",offset:source.indexOf("Inspector.consume")},index,schemaResolver);
+    assert.ok(result.candidates.every(c=>c.value.kind==="unknown"||JSON.stringify(c.value)===JSON.stringify(textValue("Contact"))),JSON.stringify(result));
+  }
+});

@@ -2,6 +2,7 @@ import type {ApexObjectSchema,ApexSchemaField,MetadataResult} from "../metadata/
 import type {ApexValue} from "./ApexValueEvaluator.js";
 import type {ApexCallResolver} from "./ApexTypeSystem.js";
 import {readApexMemberOperation} from "./ApexReadOperations.js";
+import {compareScalars,knownBoolean,splitScalarOperator} from "./ApexScalarOperators.js";
 
 /** Typed, immutable metadata facts. Do not encode a Schema token or enum as
  * an ordinary String; doing so invents Apex conversion/equality semantics. */
@@ -125,6 +126,45 @@ export interface SchemaExpressionContext {
    * or explicit Schema syntax; do not intercept arbitrary helper calls. */
   receiverEligible?:(expression:string)=>boolean;
 }
+const globalDescribe=/^Schema\s*\.\s*getGlobalDescribe\s*\(\s*\)$/i;
+const safeGlobalKey=/^(?:[A-Za-z_]\w*|'(?:\\.|[^'\\])*')$/s;
+/** Pure direct global Describe membership. A failed/partial Describe is
+ * unknown, never proof of absence. A provider may explicitly return null
+ * only when it has authoritative absence evidence. */
+function globalObjectRead(expr:string,ctx:SchemaExpressionContext,guardOnly=false):ApexValue|undefined{
+  const call=readApexMemberOperation(expr,n=>/^(?:get|containsKey)$/i.test(n));
+  if(!call||!globalDescribe.test(call.receiver))return undefined;
+  if(ctx.shadowed?.("Schema")||call.args.length!==1||guardOnly&&!safeGlobalKey.test(call.args[0].trim()))
+    return unknown("Schema global lookup receiver or argument is not proven.");
+  const object=one(ctx.evaluate(call.args[0]));
+  if(object===undefined||!name.test(object))return unknown("Schema object name is not known.");
+  const result=ctx.resolveCall?.("Schema.objectSchema",[text(object)])??unknown("Schema metadata is unavailable.");
+  if(result.kind==="unknown")return result;
+  if(result.kind!=="null"&&!(result.kind==="schema"&&result.schemaType==="objectToken"))
+    return unknown("Schema object identity is not proven.");
+  return call.name.toLowerCase()==="containskey"?bool(result.kind!=="null"):result;
+}
+/** Recognize only direct, side-effect-free global Describe conditions.
+ * Used by backward guard replay; forward comparisons use the same reads. */
+export function evaluateSchemaGlobalGuard(condition:string,ctx:SchemaExpressionContext):ApexValue|undefined{
+  const expr=condition.trim();
+  const comparison=splitScalarOperator(expr,["==","!="]);
+  if(comparison){
+    const leftNull=/^null$/i.test(comparison.left),rightNull=/^null$/i.test(comparison.right);
+    if(leftNull===rightNull)return undefined;
+    const read=globalObjectRead(leftNull?comparison.right:comparison.left,ctx,true);
+    if(read===undefined)return undefined;
+    if(read.kind!=="null"&&read.kind!=="schema"&&read.kind!=="unknown")return undefined;
+    return compareScalars(leftNull?{kind:"null"}:read,rightNull?{kind:"null"}:read,comparison.operator);
+  }
+  const negated=/^!\s*/.test(expr);
+  const read=globalObjectRead(negated?expr.replace(/^!\s*/,""):expr,ctx,true);
+  if(read===undefined)return undefined;
+  if(read.kind==="unknown")return read;
+  const truth=knownBoolean(read);
+  return truth===undefined?undefined:bool(negated?!truth:truth);
+}
+
 /** Shared syntactic adapter. Only explicit compile-time tokens, direct
  * dynamic object lookup, inline field-map lookup, and typed Schema receiver
  * reads are supported. Never interpret application properties as metadata. */
@@ -175,11 +215,9 @@ export function evaluateSchemaExpression(expr:string,ctx:SchemaExpressionContext
       return ctx.resolveCall?.("Schema.fieldMap",[text(object.objectApiName)])??unknown("Typed Schema field map unavailable.");
     if(object.kind==="unknown")return object;
   }
+  const globalRead=globalObjectRead(expr,ctx);
+  if(globalRead!==undefined)return globalRead;
   const fieldLookup=readApexMemberOperation(expr,n=>/^get$/i.test(n));
-  if(fieldLookup&&/^Schema\s*\.\s*getGlobalDescribe\s*\(\s*\)$/i.test(fieldLookup.receiver)){
-    const object=fieldLookup.args.length===1?one(ctx.evaluate(fieldLookup.args[0])):undefined;
-    return allowed("Schema")&&object&&name.test(object)?lookup(object):unknown("Schema object name is not known.");
-  }
   if(fieldLookup&&fieldLookup.args.length===1){
     const map=/^([\s\S]+)\.\s*fields\s*\.\s*getMap\s*\(\s*\)$/i.exec(fieldLookup.receiver);
     if(map){

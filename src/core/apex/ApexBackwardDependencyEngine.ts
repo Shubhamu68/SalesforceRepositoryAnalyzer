@@ -10,7 +10,7 @@ import {readApexReadOperation} from "./ApexReadOperations.js";
 import {evaluateApexReadOperation} from "./ApexValueEvaluator.js";
 import {applyApexStringCollectionMutation,apexIterationValues,mergeApexRuntimeMembers,proveApexAddOnlyIteration,type ApexRuntimeCollectionMembers} from "./ApexCollectionOperations.js";
 import {knownBoolean} from "./ApexScalarOperators.js";
-import {evaluateSchemaExpression,schemaReceiverEligible,isSchemaFieldMap,mutateSchemaFieldMap} from "./ApexSchemaModel.js";
+import {evaluateSchemaExpression,evaluateSchemaGlobalGuard,schemaReceiverEligible,isSchemaFieldMap,mutateSchemaFieldMap} from "./ApexSchemaModel.js";
 import {metadataSelectorHelper} from "./ApexCustomMetadataQueryModel.js";
 import {reportApexDependency,type ApexDependencyObserver} from "./ApexDependencyDiagnostics.js";
 
@@ -519,6 +519,35 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
                   const truth=(guard[1]??guard[2])==="!=";
                   if(!visit(truth?n.body??[]:n.otherwise??[],conditional,bindings))return false;
                   note(frame,n.start,"METADATA_NULL_GUARD_RESOLVED",name);
+                  continue;
+                }
+              }
+              // Evaluate a proven read-only Schema guard against the current
+              // reaching value, not the variable's eventual value at the use.
+              // An unknown metadata response does not authorize skipping it.
+              if(/\bSchema\s*\.\s*getGlobalDescribe\s*\(/i.test(maskApexSource(n.condition??""))){
+                const symbols=apexSymbols(frame.source,frame.methods);
+                const guard=evaluateSchemaGlobalGuard(clean(n.condition??""),{
+                  evaluate:part=>{
+                    const value=part.trim().toLowerCase()===name.toLowerCase()?
+                      (additions.length||conditional?ev(stop("Current guard value is not exact")):current):
+                      resolve(frame,part,n.start,bindings);
+                    return exactValue(value)?value.value:stop("Schema guard input is not exact");
+                  },
+                  resolveCall:resolveExternal,
+                  shadowed:root=>bindings.has(root.toLowerCase())||symbols.hasLocalBinding(frame.method,root,n.start)||
+                    !!index?.hasSourceClass(root)||new RegExp("\\bclass\\s+"+root+"\\b","i").test(maskApexSource(frame.source))
+                });
+                if(guard!==undefined){
+                  const truth=knownBoolean(guard);
+                  if(truth===undefined)return blocked("SCHEMA_GUARD_UNPROVEN");
+                  note(frame,n.start,"SCHEMA_GUARD_RESOLVED",name);
+                  const chosen=truth?n.body??[]:n.otherwise??[];
+                  // Do not claim a downstream use is reached if this path
+                  // terminates or has unsupported control flow.
+                  if(chosen.some(child=>/\b(?:return|throw|break|continue)\b/i.test(maskApexSource(frame.source.slice(child.start,child.end)))))
+                    return blocked("SCHEMA_GUARD_PATH_TERMINATES");
+                  if(!visit(chosen,conditional,bindings))return false;
                   continue;
                 }
               }
