@@ -198,6 +198,18 @@ export class ApexMemberEffectModel{
         const [receiver,property]=write[1].replace(/\s/g,"").toLowerCase().split(".");
         if(!property||!this.inertDtos.get((types.get(receiver)??"").toLowerCase())?.has(property))return false;
       }
+      // Arbitrary application property getters may execute code even without
+      // a call token. Only known members, standard metadata type tokens and
+      // automatic DTO properties are allowed as non-call qualified reads.
+      for(const hit of visible.matchAll(/\b([A-Za-z_]\w*)\s*\.\s*([A-Za-z_]\w*)\b/g)){
+        const tail=visible.slice(hit.index!+hit[0].length);
+        if(/^\s*[.(]/.test(tail))continue; // the complete call is checked below
+        const receiver=hit[1].toLowerCase(),member=hit[2].toLowerCase();
+        if(receiver==="label"||receiver==="schema"&&member==="fieldsetmember"||
+          this.key(method,hit[1]+"."+hit[2])||
+          this.inertDtos.get((types.get(receiver)??"").toLowerCase())?.has(member))continue;
+        return false;
+      }
       for(const hit of visible.matchAll(/\b([A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)*)\s*\(/g)){
         const name=hit[1].replace(/\s+/g,"");
         if(safeCall.test(name)||this.readOnlyCall(method,name))continue;
