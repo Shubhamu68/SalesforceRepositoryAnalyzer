@@ -392,7 +392,12 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
         const prefix=prefixAt(frame.method.body,offset,node=>{
           if(!iterating.has(node))return false;
           const local=node.body?.some(n=>n.kind==="statement"&&parseApexDeclaration(clean(n.text??""))?.name.toLowerCase()===name.toLowerCase()&&n.end<=offset);
-          return !!local||readOnlyMapUse(node);
+          if(local)return true;
+          if(apexSymbols(frame.source,frame.methods).isReadOnlyOuterScalar(frame.method,name,node,offset)){
+            note(frame,offset,"LOOP_OUTER_SCALAR_READ_PROVEN",name);
+            return true;
+          }
+          return readOnlyMapUse(node);
         });
         if(!prefix)return ev(reject("unsupported lexical path","LEXICAL_PATH_UNSUPPORTED"));
         const type=apexSymbols(frame.source,frame.methods).lookup(frame.method,name,offset);

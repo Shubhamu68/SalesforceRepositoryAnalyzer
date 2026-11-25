@@ -68,6 +68,39 @@ export class ApexSymbolTable{
     const scope=this.scopes.filter(c=>c.start<method.start&&method.start<c.end).at(-1);
     return scope?.fields.get(key.replace(/^this\./,""));
   }
+  /** A scalar local is passed by value. It can be read across a loop
+   * boundary only if its lexical binding predates that loop and no
+   * iteration (including a later iteration) can reassign or shadow it.
+   * This is a source proof, not a runtime-value or collection-alias proof. */
+  isReadOnlyOuterScalar(method:IndexedApexMethod,name:string,loop:SourceNode,offset:number):boolean{
+    if(loop.kind!=="for"||!loop.loopVariable||!loop.iterable||
+      !/^[A-Za-z_]\w*$/.test(name)||offset<=loop.start||offset>=loop.end)return false;
+    const key=name.toLowerCase();
+    const bindings=this.bindings(method).filter(b=>b.name===key);
+    const atEntry=bindings.filter(b=>b.start<=loop.start&&b.end>=loop.end).sort((a,b)=>b.depth-a.depth);
+    const atUse=bindings.filter(b=>b.start<=offset&&offset<b.end).sort((a,b)=>b.depth-a.depth);
+    if(!atEntry.length||!atUse.length||atEntry[0]!==atUse[0]||
+      (atEntry.length>1&&atEntry[0].depth===atEntry[1].depth)||
+      (atUse.length>1&&atUse[0].depth===atUse[1].depth)||
+      !/^(?:string|id|integer|long|decimal|double|boolean|date|datetime)$/.test(atEntry[0].type??"")||
+      bindings.some(b=>b.start>loop.start&&b.start<loop.end))return false;
+    const visible=maskApexSource(this.source.slice(loop.start,loop.end));
+    const writes=new RegExp("\\b"+name+"\\s*(?:=(?!=|>)|(?:[+\\-*/%&|^]|<<|>>>?)=|\\+\\+|--)|(?:\\+\\+|--)\\s*"+name+"\\b","i");
+    if(writes.test(visible))return false;
+    const safe=(nodes:readonly SourceNode[]):boolean=>nodes.every(n=>{
+      if(n.kind==="opaque"||n.condition==="__apex_exception_path_unknown__"||
+        (n.kind==="for"&&!n.loopVariable))return false;
+      if(n.kind==="statement"){
+        // Reject a shadow hidden in a multi-declarator statement that is
+        // not represented by the ordinary single-binding index.
+        const pieces=splitApexTopLevel(maskApexSource(n.text??""),",");
+        if(pieces.length>1&&parseApexDeclaration(pieces[0])&&
+          pieces.slice(1).some(p=>new RegExp("^\\s*"+name+"\\s*(?:=|;|$)","i").test(p)))return false;
+      }
+      return safe(n.body??[])&&safe(n.otherwise??[]);
+    });
+    return safe(loop.body??[]);
+  }
   argumentTypes(method:IndexedApexMethod|undefined,expressions:readonly string[],offset:number):ApexArgumentTypes{
     return expressions.map(expr=>this.expressionType(method,expr,offset));
   }

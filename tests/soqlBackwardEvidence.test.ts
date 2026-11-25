@@ -249,3 +249,53 @@ test("backward helper replay admits scalar-field DTO returns but rejects collect
   assert.deepEqual(unsafe.result.queries,[]);
   assert.ok(unsafe.events.includes("HELPER_EFFECT_RETURN_ALIAS_UNPROVEN"));
 });
+
+
+test("active loop helper replay reads unchanged outer scalar locals and keeps iteration bindings",()=>{
+  const filePath="Builder.cls";
+  const source="public class Builder {public static void run(){String obj='Account';Set<String> cols=new Set<String>{'Id'};List<String> paths=new List<String>{'Name','Phone'};for(String path:paths){String result=append(obj,path,cols);}Database.query('SELECT '+String.join(cols,',')+' FROM Account WITH USER_MODE');}private static String append(String obj,String path,Set<String> cols){if(obj=='Account'){cols.add(path);}return path;}}";
+  const analyze=(source:string)=>{
+    const index=new ApexRepositoryMethodIndex([{filePath,source}]);
+    const site=discoverApexInvocations(source,dynamicDatabaseQuerySelector)[0],events:string[]=[];
+    const result=backtrackSoqlPermissionShapes(source,filePath,site,index,undefined,e=>events.push(e.code));
+    return {result,events};
+  };
+  const good=analyze(source);
+  assert.deepEqual(fields(good.result.queries),new Set(["SELECT:Id","SELECT:Name","SELECT:Phone"]),JSON.stringify(good.result));
+  assert.ok(good.events.includes("LOOP_OUTER_SCALAR_READ_PROVEN"));
+  assert.ok(good.events.includes("SHARED_HELPER_EFFECT_RESOLVED"));
+  for(const changed of [
+    source.replace("append(obj,path,cols);","append(obj,path,cols);obj='Contact';"),
+    source.replace("append(obj,path,cols);","append(obj,path,cols);obj+='Other';"),
+    source.replace("String result=append","if(path=='Name'){obj='Contact';}String result=append"),
+    source.replace("String result=append","String spare, obj;String result=append")
+  ]){
+    const bad=analyze(changed);
+    assert.deepEqual(bad.result.queries,[],changed);
+    assert.ok(!bad.events.includes("LOOP_OUTER_SCALAR_READ_PROVEN"),changed);
+  }
+});
+test("outer scalar loop reads retain correlated metadata and Field Set candidates",async()=>{
+  const filePath="Report.cls";
+  const source="public class Report {public static void run(String reportName){Config__mdt cfg=Config__mdt.getInstance(reportName);String obj=cfg.Object__c;List<String> paths=Utils.getFieldListFromFieldSet(obj,cfg.Field_Set__c);if(paths==null||paths.isEmpty()){return;}Set<String> cols=new Set<String>{'Id'};for(String path:paths){String result=append(obj,path,cols);}Database.query('SELECT '+String.join(cols,',')+' FROM '+obj+' WITH USER_MODE');}private static String append(String obj,String path,Set<String> cols){if(obj=='Account'||obj=='Contact'){cols.add(path);}return path;}}";
+  const index=new ApexRepositoryMethodIndex([{filePath,source}]);
+  const site=discoverApexInvocations(source,dynamicDatabaseQuerySelector)[0],events:string[]=[];
+  const metadata={
+    scopeKey:"outer-scalar-loop-fixture",
+    getObjectFieldNames:async()=>({complete:false as const,source:"LIVE_ORG" as const}),
+    getCustomMetadataRecords:async()=>({complete:true as const,source:"LIVE_ORG" as const,value:[
+      {DeveloperName:"A",Object__c:"Account",Field_Set__c:"AccountFields"},
+      {DeveloperName:"B",Object__c:"Contact",Field_Set__c:"ContactFields"}
+    ]}),
+    getFieldSetFields:async(object:string,fieldSet:string)=>({complete:true as const,source:"LIVE_ORG" as const,value:
+      object==="Account"&&fieldSet==="AccountFields"?["Industry"]:
+      object==="Contact"&&fieldSet==="ContactFields"?["Email"]:[]})
+  };
+  const result=await new ApexAnalysisEngine(index,metadata).analyze(filePath,ctx=>
+    backtrackSoqlPermissionShapes(source,filePath,site,index,ctx.resolveExternal,e=>events.push(e.code)));
+  const account=result.queries.filter(q=>q.includes("FROM Account")),contact=result.queries.filter(q=>q.includes("FROM Contact"));
+  assert.deepEqual(fields(account),new Set(["SELECT:Id","SELECT:Industry"]),JSON.stringify(result));
+  assert.deepEqual(fields(contact),new Set(["SELECT:Id","SELECT:Email"]),JSON.stringify(result));
+  assert.ok(events.includes("LOOP_OUTER_SCALAR_READ_PROVEN"));
+  assert.equal(result.bounded,false);
+});
