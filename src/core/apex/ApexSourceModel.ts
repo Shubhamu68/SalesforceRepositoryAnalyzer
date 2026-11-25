@@ -230,7 +230,18 @@ export function parseApexStatements(
       nodes.push({kind:"if",start:at,end:cursorAfter,
         condition:"__apex_exception_path_unknown__",body:normal.nodes,otherwise});
       cursor=cursorAfter;
-    } else if (["while","switch","catch","do"].some(k=>keyword(masked,at,k))) {
+    } else if(keyword(masked,at,"while")){
+      // Keep the exact loop boundary even when iteration count is not
+      // supported. The shared unknown-loop effect summary handles this node,
+      // allowing subsequent statements to remain visible to the interpreter.
+      const open=skip(masked,at+5,end);
+      const close=masked[open]==="("?matchingPair(masked,open):-1;
+      if(close<0){nodes.push({kind:"opaque",start:at,end,text:"Invalid while"});break;}
+      const body=parseBody(source,masked,close+1,end);
+      nodes.push({kind:"for",start:at,end:body.next,text:source.slice(open+1,close),
+        body:body.nodes});
+      cursor=body.next;
+    } else if (["switch","catch","do"].some(k=>keyword(masked,at,k))) {
       // Unknown control flow never turns into an unconditional assignment.
       nodes.push({kind:"opaque",start:at,end,text:"Unsupported Apex control flow"});
       cursor=end;
