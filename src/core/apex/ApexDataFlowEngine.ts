@@ -192,7 +192,10 @@ export class ApexDataFlowEngine {
         if(depth>=this.options.maxDepth)return unknown("Apex helper recursion depth exceeded.");
         const key=candidates[0].start+"|"+apexStateIdentity(new Map(args.map((v,i)=>[String(i),v])),false);
         if(this.activeCalls.has(key))return unknown("Recursive Apex helper call.");
-        const cacheable=args.every(v=>v.kind==="text"||v.kind==="number"||v.kind==="null"||v.kind==="unknown");
+        // A target-bearing helper is an invocation probe, not a reusable
+        // return summary. A cached return would also suppress captures.
+        const capturesTarget=this.activeQueryOffset!==undefined&&candidates[0].start<=this.activeQueryOffset&&this.activeQueryOffset<candidates[0].end;
+        const cacheable=!capturesTarget&&args.every(v=>v.kind==="text"||v.kind==="number"||v.kind==="null"||v.kind==="unknown");
         const cached=cacheable?this.summaries.get(key):undefined;
         if(cached){countApex("helper.local_cache_hit");return cached;}
         countApex("helper.local_evaluations");
@@ -485,9 +488,20 @@ export class ApexDataFlowEngine {
   }
   private readonly guardOnlyCache=new Map<string,boolean>();
   private readonly targetLoopCache=new Map<string,boolean>();
+  private selectedStopOffset(depth:number):number|undefined{
+    if(depth===0)return this.activeStopOffset;
+    const method=this.currentMethod,offset=this.activeQueryOffset;
+    // Private caller fallback enters the actual target-bearing method as a
+    // helper. Stop only for non-loop targets; ordinary helper summaries and
+    // loop-carried queries still need their complete execution.
+    if(!method||offset===undefined||offset<method.start||offset>=method.end||this.loopContainsTarget(method,offset))return undefined;
+    return offset;
+  }
   private isLoopTarget(depth:number):boolean{
-    const method=this.currentMethod,offset=this.activeStopOffset;
-    if(depth!==0||!method||offset===undefined)return false;
+    const method=this.currentMethod,offset=this.selectedStopOffset(depth);
+    return !!method&&offset!==undefined&&this.loopContainsTarget(method,offset);
+  }
+  private loopContainsTarget(method:IndexedApexMethod,offset:number):boolean{
     const key=method.start+"|"+offset;
     const hit=this.targetLoopCache.get(key);
     if(hit!==undefined)return hit;
@@ -586,8 +600,9 @@ export class ApexDataFlowEngine {
       };
       // A branch that cannot contain the selected invocation cannot
       // contribute to its prefix. Never prune for a loop-carried target.
-      const selected=depth===0&&this.activeStopOffset!==undefined&&!this.isLoopTarget(depth)
-        ?targetBranch(node,this.activeStopOffset):undefined;
+      const stop=this.selectedStopOffset(depth);
+      const selected=stop!==undefined&&!this.isLoopTarget(depth)
+        ?targetBranch(node,stop):undefined;
       const paths=[...(known!==false&&selected!=="else"?[branch(true,node.body??[])]:[]),
         ...(known!==true&&selected!=="then"?[branch(false,node.otherwise??[])]:[])];
       return {states:paths.flatMap(x=>x.states),returns:paths.flatMap(x=>x.returns)};
@@ -739,19 +754,20 @@ export class ApexDataFlowEngine {
   private execute(nodes:SourceNode[],initial:State[],depth:number):FrameResult{
     let states=initial,returns:ApexValue[]=[];
     const owner=this.currentMethod;
+    const stop=this.selectedStopOffset(depth);
     let live:ApexLocalLiveness|undefined;
     if(owner){
-      if(depth===0&&this.activeStopOffset!==undefined)
-        live=sharedApexLocalLiveness(this.source,owner,this.activeStopOffset);
+      if(stop!==undefined)
+        live=sharedApexLocalLiveness(this.source,owner,stop);
       else {
         live=this.liveness.get(owner);
         if(!live){live=sharedApexLocalLiveness(this.source,owner);this.liveness.set(owner,live);}
       }
     }
     for(const node of nodes){
-      // Only the source prefix leading to this execution site can contribute
-      // to its query value. Helpers (depth>0) must evaluate their full body.
-      if(depth===0&&this.activeStopOffset!==undefined&&node.start>this.activeStopOffset)break;
+      // Only the target prefix contributes to invocation evidence. A helper
+      // without the target still executes its full body for return analysis.
+      if(stop!==undefined&&node.start>stop)break;
       if(this.exceeded||states.every(state=>state.stopped||state.loopControl))break;
       // Skip dead nodes once for the whole frontier, avoiding a clone/hash
       // and path-budget check for every otherwise unchanged state.
@@ -769,7 +785,7 @@ export class ApexDataFlowEngine {
       let distinct=mergeEquivalentStates(next);
       // The invocation has already been visited; its continuation is not a
       // live frontier. Earlier statements and branch work still obey budgets.
-      if(depth===0&&this.activeStopOffset!==undefined&&node.start<=this.activeStopOffset&&this.activeStopOffset<node.end&&!this.isLoopTarget(depth)){
+      if(stop!==undefined&&node.start<=stop&&stop<node.end&&!this.isLoopTarget(depth)){
         states=distinct;break;
       }
       if(distinct.filter(frame=>!frame.stopped).length>this.options.maxPaths){
