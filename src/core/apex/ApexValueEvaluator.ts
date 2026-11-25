@@ -10,7 +10,7 @@ import {evaluateBoundedStringOperation,isBoundedStringOperation} from "./ApexBou
 export type ApexValue =
   | { kind: "text"; values: string[]; scalarType?: "boolean" }
   | { kind: "collection"; items: string[]; unique: boolean }
-  | { kind: "map"; entries: Array<[string,ApexValue]> }
+  | { kind: "map"; entries: Array<[string,ApexValue]>; keyType?:"integer"|"string" }
   | { kind: "instance"; className:string; entries: Array<[string,ApexValue]> }
   | { kind: "instanceList"; elementType:string; items:ApexValue[] }
   | { kind: "record"; entries: Array<[string,ApexValue]> }
@@ -138,6 +138,13 @@ export function addApexValues(left: ApexValue,right: ApexValue): ApexValue {
     joined.push(a+b);
   }
   return merged(joined);
+}
+/** Legacy JSON maps remain string-keyed. Numeric keys are only accepted
+ * for a source-declared Integer map. */
+export function apexMapKey(map:Extract<ApexValue,{kind:"map"}>,value:ApexValue):string|null{
+  if(map.keyType==="integer")return value.kind==="number"&&Number.isInteger(value.value)&&value.value>=-2147483648&&value.value<=2147483647?String(value.value):null;
+  if(map.keyType==="string")return value.kind==="text"&&value.scalarType===undefined&&value.values.length===1?value.values[0]:null;
+  return onlyText(value);
 }
 function onlyText(value: ApexValue): string | null {
   return value.kind==="text"&&value.values.length===1?value.values[0]:
@@ -330,27 +337,31 @@ export function evaluateApexExpression(
   // a type cast directly attached to a JSON call, never arbitrary expressions.
   const cast=/^\(Map\s*<[\w\s,.<>]+>\)\s*(JSON\.deserialize\([\s\S]*\))$/i.exec(expr);
   if(cast)return evaluateApexExpression(cast[1],context,depth+1);
-  if(/^new\s+Map\s*<[\w\s,.<>]+>\s*\(\s*\)$/i.test(expr))
-    return {kind:"map",entries:[]};
-  const mapLiteral=/^new\s+Map\s*<[\w\s,.<>]+>\s*\{([\s\S]*)\}$/i.exec(expr);
+  const emptyMap=/^new\s+Map\s*<\s*(Integer|String)\s*,[\w\s,.<>]+>\s*\(\s*\)$/i.exec(expr);
+  if(emptyMap)return {kind:"map",entries:[],keyType:emptyMap[1].toLowerCase() as "integer"|"string"};
+  if(/^new\s+Map\s*<[\w\s,.<>]+>\s*\(\s*\)$/i.test(expr))return {kind:"map",entries:[]};
+  const mapLiteral=/^new\s+Map\s*<\s*([A-Za-z_]\w*)\s*,[\w\s,.<>]+>\s*\{([\s\S]*)\}$/i.exec(expr);
   if(mapLiteral){
-    const entries:Array<[string,ApexValue]>=[];
-    for(const item of splitApexTopLevel(mapLiteral[1],",")){
+    const keyType=mapLiteral[1].toLowerCase();
+    const map:Extract<ApexValue,{kind:"map"}>={kind:"map",entries:[],...((keyType==="integer"||keyType==="string")?{keyType}: {})};
+    const entries=map.entries;
+    for(const item of splitApexTopLevel(mapLiteral[2],",")){
       if(!item.trim())continue;
       const pair=splitApexTopLevel(item,"=>");
       if(pair.length!==2)return unknown("Apex map initializer is malformed.");
       const keyValue=evaluateApexExpression(pair[0],context,depth+1);
-      const key=onlyText(keyValue);
+      const key=apexMapKey(map,keyValue);
       const val=evaluateApexExpression(pair[1],context,depth+1);
       if(key===null)return unknown("Apex map initializer has an unproven key: "+
         pair[0].trim()+"; cause: "+
         (keyValue.kind==="unknown"?keyValue.reason:"Map key is not a single scalar."));
       if(val.kind==="unknown")
         return unknown("Apex map initializer for key "+key+" is unproven: "+val.reason);
+      if(entries.some(([existing])=>existing===key))return unknown("Duplicate map initializer key is not proven.");
       entries.push([key,val]);
       if(entries.length>MAX_MAP_ENTRIES)return unknown("Apex map entry limit exceeded.");
     }
-    return {kind:"map",entries};
+    return map;
   }
   const allocation=/^new\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(([\s\S]*)\)$/i.exec(expr);
   if(allocation){
@@ -431,7 +442,7 @@ export function evaluateApexExpression(
     }
     if(lname.endsWith(".keyset")&&args.length===0){
       const receiver=evaluateApexExpression(name.slice(0,-7),context,depth+1);
-      return receiver.kind==="map"?listValue(receiver.entries.map(([key])=>key),true):
+      return receiver.kind==="map"?receiver.keyType==="integer"?unknown("Integer map keySet is not a String collection."):listValue(receiver.entries.map(([key])=>key),true):
         // Schema Describe maps are represented by a known field-name collection.
         receiver.kind==="collection"?listValue(receiver.items,true):
         unknown("Map keySet() receiver is unresolved: "+
@@ -439,8 +450,8 @@ export function evaluateApexExpression(
     }
     if(lname.endsWith(".containskey")&&args.length===1){
       const receiver=evaluateApexExpression(name.slice(0,-12),context,depth+1);
-      const key=onlyText(args[0]);
-      if(key===null)return unknown("Map.containsKey depends on runtime key.");
+      const key=receiver.kind==="map"?apexMapKey(receiver,args[0]):onlyText(args[0]);
+      if(key===null)return unknown("Map.containsKey depends on runtime or incompatible key.");
       if(receiver.kind==="map")return booleanValue(receiver.entries.some(([k])=>k===key));
       if(receiver.kind==="collection")return booleanValue(receiver.items.includes(key));
       if(receiver.kind==="unknown")return receiver;
@@ -457,8 +468,8 @@ export function evaluateApexExpression(
           ?receiver.items[index.value]:unknown("Custom Apex list index is not proven.");
       }
       if(receiver.kind==="map"){
-        const key=onlyText(args[0]);
-        if(key===null)return unknown("Map.get key depends on runtime input: "+
+        const key=apexMapKey(receiver,args[0]);
+        if(key===null)return unknown("Map.get key depends on runtime or incompatible input: "+
           (args[0].kind==="unknown"?args[0].reason:"key is not a single scalar."));
         return receiver.entries.find(([item])=>item===key)?.[1] ??
           unknown("Map.get key "+key+" absent from proven configuration.");
