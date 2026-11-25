@@ -6,10 +6,12 @@ import {proveApexPartialStructure,type ApexPartialStructure} from "../core/apex/
  * expressions, quoted fragments or arbitrary predicates are safe. */
 export function provePartialSoql(value:ApexValue):ApexPartialStructure|undefined{
   return proveApexPartialStructure(value,(prefix,hole,suffix)=>{
-    if(!/^(?:integer|long)$/i.test(hole.symbol?.type??""))return undefined;
+    const type=hole.symbol?.type?.toLowerCase();
+    if(type!=="id"&&type!=="integer"&&type!=="long")return undefined;
     // Require a complete token boundary after the numeric value; a hole
     // within an identifier, a quoted value or punctuation is not a proof.
-    if(!/^(?:\s*$|\s+(?:AND\b|OR\b|GROUP\s+BY\b|ORDER\s+BY\b|LIMIT\b|OFFSET\b|WITH\b|HAVING\b|FOR\b)|\s*\))/i.test(suffix))return undefined;
+    const boundary=/^(?:\s*$|\s+(?:AND\b|OR\b|GROUP\s+BY\b|ORDER\s+BY\b|LIMIT\b|OFFSET\b|WITH\b|HAVING\b|FOR\b)|\s*\))/i;
+    if(type==="id"?suffix[0]!=="\x27"||!boundary.test(suffix.slice(1)):!boundary.test(suffix))return undefined;
     let visible="",quoted=false;
     for(let i=0;i<prefix.length;i++){
       const ch=prefix[i];
@@ -18,7 +20,14 @@ export function provePartialSoql(value:ApexValue):ApexPartialStructure|undefined
       if(!quoted&&((ch==="/"&&["/","*"].includes(prefix[i+1]))||(ch==="-"&&prefix[i+1]==="-")))return undefined;
       visible+=quoted?" ":ch;
     }
-    if(quoted||!/^SELECT\b/i.test(visible.trim()))return undefined;
+    if(!/^SELECT\b/i.test(visible.trim()))return undefined;
+    if(type==="id"){
+      // Hole must occupy the entire literal. Id is an Apex source type,
+      // not a String that happens to resemble a Salesforce Id.
+      if(!quoted||!prefix.endsWith("\x27")||!/\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\s*(?:!=|=)\s*$/i.test(visible))return undefined;
+      return "000000000000000";
+    }
+    if(quoted)return undefined;
     // Require that a literal space separates a numeric slot from a LIMIT
     // or OFFSET keyword. For simple predicates, the parser must separately
     // establish the field and complete expression.
