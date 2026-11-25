@@ -3,9 +3,10 @@ import type {ApexEnvironment,ApexValue} from "./ApexValueEvaluator.js";
 /** Canonical state identity must preserve collection aliases as well as their
  * contents: two equal-but-independent Lists are not interchangeable with
  * two names for one List. Scalar values are immutable. */
-export function apexStateIdentity(values:ApexEnvironment,stopped:boolean):string {
+export function apexStateIdentity(values:ApexEnvironment,stopped:boolean,abstractUnknowns=false):string {
   const references=new Map<ApexValue,number>();
   const encode=(value:ApexValue):unknown=>{
+    if(abstractUnknowns&&value.kind==="unknown")return ["unknown",value.symbol??null];
     if(value.kind!=="collection"&&value.kind!=="map"&&value.kind!=="instance"&&value.kind!=="instanceList")return value;
     const previous=references.get(value);
     if(previous!==undefined)return ["alias",previous];
