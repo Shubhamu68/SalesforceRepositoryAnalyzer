@@ -58,12 +58,12 @@ function mapUse(masked:string,start:number,end:number,methods:readonly IndexedAp
   const type=model.valueType.replace(/\./g,"\\s*\\.\\s*");
   const local=new RegExp("\\b"+type+"\\s+([A-Za-z_]\\w*)\\s*=\\s*$","i").exec(masked.slice(method.start,start));
   if(!local)return false;
-  const name=local[1],declarationAt=method.start+local.index+local[0].toLowerCase().lastIndexOf(name.toLowerCase());
+  const name=local[1],declarationStart=method.start+local.index;
   const body=masked.slice(method.start,method.end);
   if(method.parameters.some(p=>p.toLowerCase()===name.toLowerCase()))return false;
   for(const hit of body.matchAll(new RegExp("\\b"+name+"\\b","gi"))){
     const at=method.start+hit.index!;
-    if(at===declarationAt)continue;
+    if(at>=declarationStart&&at<start)continue;
     if(/\.\s*$/.test(masked.slice(Math.max(method.start,at-20),at))||/(?:\+\+|--)\s*$/.test(masked.slice(Math.max(method.start,at-20),at)))return false;
     if(!scalarMemberRead(masked,at+name.length,model.fields))return false;
   }
