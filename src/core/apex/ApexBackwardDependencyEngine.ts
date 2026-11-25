@@ -383,6 +383,7 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
         let base:Evidence,after:SourceNode[],freshCollection=false;
         const collection=/^(?:list|set)<string>$/i.test(type??"");
         const map=/^map</i.test(type??"");
+        const schemaReferenceList=/^list<schema\.sobjecttype>$/i.test(type??"");
         if(defs.length){
           let def=defs[0];
           // Latest unconditional scalar assignment is the reaching
@@ -397,12 +398,13 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
           if(!def.expression)return ev(reject("no initializer","NO_INITIALIZER"));
           // A direct collection alias may be mutated via another name. Only
           // a fresh collection or a proven read-only getter is supported.
-          if((collection||map)&&identifier.test(clean(def.expression)))return ev(reject("mutable collection alias","COLLECTION_ALIAS"));
+          if((collection||map||schemaReferenceList)&&identifier.test(clean(def.expression)))return ev(reject("mutable collection alias","COLLECTION_ALIAS"));
           note(frame,def.node.start,"REACHING_DEFINITION",name);
           base=resolve(frame,def.expression,def.node.start,locals,members);
           freshCollection=collection&&/^new\s+(?:List|Set)\s*</i.test(clean(def.expression))&&exact(base);
           after=prefix.slice(def.index+1);
         }else if(param>=0){
+          if(schemaReferenceList)return ev(reject("reference-list caller alias not proven","SCHEMA_REFERENCE_LIST_ALIAS_OR_WRITE"));
           note(frame,offset,"PARAMETER_USE",name,param);
           const choice=choices.get(frame.key+"|caller");
           if(choice?.kind==="caller"){
@@ -459,6 +461,9 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
             const visible=maskApexSource(frame.source.slice(n.start,n.end));
             if(!rx(name).test(visible))continue;
             const blocked=(code:string):false=>{note(frame,n.start,code,name);return false;};
+            // Until typed reference-list mutation replay is implemented, any
+            // intervening use can escape or change the positional snapshot.
+            if(schemaReferenceList)return blocked("SCHEMA_REFERENCE_LIST_ALIAS_OR_WRITE");
             if(map){
               // Map snapshots must stay immutable; no aliases or writes.
               if(!rx(name).test(visible.replace(new RegExp("\\b"+name+"\\s*\\.\\s*(?:containsKey|isEmpty|size)\\s*\\(","gi"),"(")))continue;

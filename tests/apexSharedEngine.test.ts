@@ -214,7 +214,8 @@ const schemaFixture:Record<string,ApexObjectSchema>={
     {name:"Name",type:"string",nameField:true},
     {name:"Incomplete__c"}
   ]},
-  account:{name:"Account",fields:[{name:"Name",type:"string",nameField:true},{name:"Id",type:"id",nameField:false}]}
+  account:{name:"Account",fields:[{name:"Name",type:"string",nameField:true},{name:"Id",type:"id",nameField:false},
+    {name:"ParentId",type:"reference",relationshipName:"Parent",referenceTo:["Account"],nameField:false}]}
 };
 const schemaResolver=(method:string,args:ApexValue[])=>{
   if(method!=="Schema.objectSchema"||args.some(a=>a.kind!=="text"||a.values.length!==1))return undefined;
@@ -266,4 +267,29 @@ test("known metadata can select the appropriate field transformation in generic 
   const source="public class Inspector {public static void run(){Set<String> fields=new Set<String>{'Id'};Schema.DescribeFieldResult dfr=Contact.Birthdate.getDescribe();if(dfr.getType()==Schema.DisplayType.DATE){fields.add('FORMAT(Birthdate)');}else{fields.add('Birthdate');}Inspector.consume(String.join(fields,','));}}";
   const result=analyzeApexInvocations(source,"Inspector.cls",name=>name==="Inspector.consume"?{method:name,argumentIndices:[0]}:undefined,schemaResolver);
   assert.deepEqual(result.captures.get(result.sites[0].offset)?.map(c=>c.arguments?.[0]),[textValue("Id,FORMAT(Birthdate)")]);
+});
+
+test("Schema relationship traversal resolves typed local receivers and nested reference reads without guessing targets",()=>{
+  const context={values:new Map<string,ApexValue>(),resolveCall:schemaResolver};
+  const ref=evaluateApexExpression("Contact.AccountId.getDescribe().getReferenceTo()",context);
+  const desc=evaluateApexExpression("Contact.AccountId.getDescribe().getReferenceTo()[0].getDescribe()",context);
+  const local={...context,values:new Map<string,ApexValue>([["refs",ref],["desc",desc]]),
+    argumentTypes:(parts:readonly string[])=>parts.map(p=>p==="refs"?"List<Schema.SObjectType>":p==="desc"?"Schema.DescribeSObjectResult":undefined)};
+  for(const expression of [
+    "refs[0].getDescribe().getName()",
+    "refs.get(0).getDescribe().getName()",
+    "desc.fields.getMap().get('ParentId').getDescribe().getReferenceTo()[0].getDescribe().getName()",
+    "Contact.AccountId.getDescribe().getReferenceTo()[0].getDescribe().fields.getMap().get('ParentId').getDescribe().getReferenceTo()[0].getDescribe().getName()"
+  ])assert.deepEqual(evaluateApexExpression(expression,local),textValue("Account"),expression);
+  assert.equal(evaluateApexExpression("refs[1].getDescribe().getName()",local).kind,"unknown");
+  assert.equal(evaluateApexExpression("Contact.OwnerId.getDescribe().getReferenceTo().get(0).getDescribe().getName()",local).kind,"unknown");
+});
+test("backward Schema traversal follows a local reference list and rejects a mutated list",()=>{
+  for(const mutation of ["","refs.clear();"]){
+    const source="public class Inspector {public static void run(){List<Schema.SObjectType> refs=Contact.AccountId.getDescribe().getReferenceTo();"+mutation+"Inspector.consume(refs[0].getDescribe().getName());}}";
+    const filePath="Inspector.cls",index=new ApexRepositoryMethodIndex([{filePath,source}]);
+    const back=traceApexDependencies(source,filePath,{expression:"refs[0].getDescribe().getName()",offset:source.indexOf("Inspector.consume")},index,schemaResolver);
+    if(mutation)assert.ok(back.candidates.every(c=>c.value.kind==="unknown"),JSON.stringify(back));
+    else assert.deepEqual(back.candidates.map(c=>c.value),[textValue("Account")],JSON.stringify(back));
+  }
 });

@@ -76,7 +76,8 @@ export function evaluateSchemaRead(receiver:ApexValue,operation:string,args:read
 /** Recognize schema-specific source types and explicit token/chain syntax. */
 export function schemaReceiverEligible(expression:string,type?:string):boolean{
   return /^Schema\s*\.|\.SObjectType\b|\.getDescribe\s*\(|\.getReferenceTo\s*\(/i.test(expression)||
-    /^schema\.(?:sobjecttype|sobjectfield|describesobjectresult|describefieldresult|displaytype)$/i.test(type??"");
+    /^schema\.(?:sobjecttype|sobjectfield|describesobjectresult|describefieldresult|displaytype)$/i.test(type??"")||
+    /^list\s*<\s*schema\.sobjecttype\s*>$/i.test(type??"");
 }
 const operations=new Set(["getdescribe","gettype","getname","getrelationshipname","getreferenceto","isnamefield","getsobjecttype","getsobjectfield","name"]);
 export const isSchemaReadOperation=(operation:string)=>operations.has(operation.toLowerCase());
@@ -93,6 +94,26 @@ export interface SchemaExpressionContext {
  * reads are supported. Never interpret application properties as metadata. */
 export function evaluateSchemaExpression(expr:string,ctx:SchemaExpressionContext):ApexValue|undefined{
   const allowed=(root:string)=>!ctx.shadowed?.(root);
+  // A typed local can lead to a field token through an inline Describe map,
+  // or to an object token through an exact reference-list read. Preserve
+  // normal helper dispatch: prove the base receiver before probing a chain.
+  const eligible=(receiver:string):boolean=>{
+    if(!ctx.receiverEligible||ctx.receiverEligible(receiver))return true;
+    const indexed=/^([\s\S]+)\s*\[\s*\d+\s*\]$/.exec(receiver);
+    if(indexed)return eligible(indexed[1].trim());
+    const get=readApexMemberOperation(receiver,n=>/^get$/i.test(n));
+    if(get&&get.args.length===1){
+      const map=/^([\s\S]+)\.\s*fields\s*\.\s*getMap\s*\(\s*\)$/i.exec(get.receiver);
+      return eligible(map?map[1].trim():get.receiver);
+    }
+    return false;
+  };
+  const referenceAt=(list:ApexValue,index:ApexValue):ApexValue|undefined=>{
+    if(list.kind!=="instanceList"||list.elementType.toLowerCase()!=="schema.sobjecttype")return undefined;
+    return list.items.length===1&&index.kind==="number"&&index.value===0&&
+      list.items[0].kind==="schema"&&list.items[0].schemaType==="objectToken"
+      ?list.items[0]:unknown("Schema reference target position is not proven.");
+  };
   const lookup=(object:string,field?:string)=>ctx.resolveCall?.("Schema.objectSchema",[text(object),...(field===undefined?[]:[text(field)])])??unknown("Schema metadata is unavailable.");
   const enumToken=/^Schema\s*\.\s*DisplayType\s*\.\s*([A-Za-z_]\w*)$/i.exec(expr);
   if(enumToken){
@@ -125,14 +146,19 @@ export function evaluateSchemaExpression(expr:string,ctx:SchemaExpressionContext
       if(object.kind==="unknown")return object;
     }
   }
-  const targetIndex=/^([\s\S]+\.getReferenceTo\s*\(\s*\))\s*\[\s*(\d+)\s*\]$/i.exec(expr);
-  if(targetIndex){
-    const list=ctx.evaluate(targetIndex[1]);
-    return list.kind==="instanceList"&&list.elementType==="Schema.SObjectType"&&list.items.length===1&&Number(targetIndex[2])===0?
-      list.items[0]:unknown("Schema reference target position is not proven.");
+  const targetIndex=/^([\s\S]+)\s*\[\s*(\d+)\s*\]$/.exec(expr);
+  if(targetIndex&&eligible(targetIndex[1].trim())){
+    const list=ctx.evaluate(targetIndex[1].trim());
+    const result=referenceAt(list,{kind:"number",value:Number(targetIndex[2])});
+    if(result!==undefined)return result;
+    if(list.kind==="unknown"&&/\.getReferenceTo\s*\(\s*\)$/i.test(targetIndex[1].trim()))return list;
+  }
+  if(fieldLookup&&fieldLookup.args.length===1&&eligible(fieldLookup.receiver)){
+    const result=referenceAt(ctx.evaluate(fieldLookup.receiver),ctx.evaluate(fieldLookup.args[0]));
+    if(result!==undefined)return result;
   }
   const call=readApexMemberOperation(expr,isSchemaReadOperation);
-  if(call&&(!ctx.receiverEligible||ctx.receiverEligible(call.receiver))){
+  if(call&&eligible(call.receiver)){
     const receiver=ctx.evaluate(call.receiver);
     if(receiver.kind==="schema")return evaluateSchemaRead(receiver,call.name,call.args.map(ctx.evaluate));
     if(receiver.kind==="unknown"&&ctx.receiverEligible)return receiver;
