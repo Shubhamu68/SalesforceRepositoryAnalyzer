@@ -1,3 +1,4 @@
+import {isLiteralMapFactory} from "./ApexPureFactory.js";
 import {supportsReceiverPrefix,receiverMapSamples} from "./ApexFrameworkReceiver.js";
 import {outerApexClass} from "./ApexClassModel.js";
 import path from "node:path";
@@ -213,7 +214,19 @@ export class ApexRepositoryMethodIndex {
   }
 
   constructInstance(filePath:string,name:string,args:ApexValue[],resolveExternal?: ApexCallResolver,types?:ApexArgumentTypes):ApexValue|undefined{
-    return this.instances.construct(name,args,filePath,resolveExternal,types);
+    const resolver:ApexCallResolver=(method,inputs,hints)=>{
+      if(method==="Apex.constructorFactory"&&inputs[0]?.kind==="text"&&inputs[0].values.length===1){
+        const qualified=inputs[0].values[0];
+        const match=/^([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/.exec(qualified);
+        if(!match)return undefined;
+        const methods=this.findMethods(match[1],match[2],inputs.length-1);
+        if(methods.length!==1||!isLiteralMapFactory(methods[0].method))return undefined;
+        const result=this.evaluateReturn(filePath,qualified,inputs.slice(1),resolveExternal,hints?.slice(1));
+        return result?.kind==="map"?result:undefined;
+      }
+      return resolveExternal?.(method,inputs,hints);
+    };
+    return this.instances.construct(name,args,filePath,resolver,types);
   }
 
   /** Source-backed scalar initializers; unresolved/mutable values fail closed. */
