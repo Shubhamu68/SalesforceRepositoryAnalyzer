@@ -255,6 +255,12 @@ export class ApexStaticValueIndex {
             args[0].kind==="text"&&args[0].values.length===1)
             return this.compute(args[0].values[0].toLowerCase(),active,depth+1,false,metadata);
           if(method==="System.Label")return metadata?.(method,args);
+          if(method==="Apex.construct"&&args[0]?.kind==="text"&&args[0].values.length===1){
+            const name=args[0].values[0];
+            // Resolve nested class relative to its declaring class, not the
+            // file currently consuming this static initializer.
+            return metadata?.(method,[{kind:"text",values:[name.includes(".")?name:entry.owner+"."+name]},...args.slice(1)]);
+          }
           return undefined;
         },
       });
@@ -399,6 +405,7 @@ function completeInitializer(value:ApexValue,depth=0):boolean{
     case "number": return Number.isFinite(value.value);
     case "collection": return value.items.length<=2000;
     case "map": return value.entries.length<=200&&value.entries.every(([,v])=>completeInitializer(v,depth+1));
+    case "instance": return value.entries.length<=100&&value.entries.every(([,v])=>v.kind==="null"||completeInitializer(v,depth+1));
     default: return false;
   }
 }
