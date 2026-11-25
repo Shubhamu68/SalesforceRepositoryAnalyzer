@@ -563,3 +563,8 @@ Remaining source gaps: live confirmation of the five supplied batches, broader r
 - Constructor failures now distinguish unsupported expression calls, unproven private helpers, unknown conditions, unsupported control flow/statements/assignments, local shadows, nested allocation, delegation and operation/depth limits. Lifecycle REVIEW diagnostics retain the broad rejected_constructor code and attach the more specific constructor code when available.
 - Target-prefix proof supports platform String.join only for lifecycle query paths with no indexed String class or visible shadow. Query parsing and conditional coverage rules are unchanged.
 - Generic fixtures exercise a metadata-backed collection utility, missing metadata, an unsafe callback, an unrelated runtime constructor field, and specific failure codes. No proprietary business code is included. Static collection initialization and finish() analysis remain separate work.
+
+
+## Coverage-led milestone plan (2026-11-25)
+
+See [Milestone 2 coverage roadmap](milestone-2-coverage-roadmap.md) for the diagnostic-led audit, cross-consumer integration gate, prioritized increments and stopping criteria. This replaces further class-by-class speculative expansion as the immediate next step.
