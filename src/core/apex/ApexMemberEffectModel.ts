@@ -118,7 +118,7 @@ export class ApexMemberEffectModel{
     }};visit(method.body);this.localNames.set(method,names);return names;
   }
   key(method:IndexedApexMethod|undefined,name:string):string|undefined{
-    if(!method)return undefined;
+    if(!method||!this.outerMethods.has(method))return undefined;
     const n=name.toLowerCase(),dot=n.indexOf(".");
     if(dot>=0)return n.slice(0,dot)===this.owner?.toLowerCase()?this.fields.get(n.slice(dot+1))?.key:undefined;
     return this.locals(method).has(n)?undefined:this.fields.get(n)?.key;
@@ -172,7 +172,9 @@ export class ApexMemberEffectModel{
       if(/\b(?:insert|update|upsert|delete|undelete|merge|throw|switch|try|while|do)\b/i.test(visible))return false;
       // Recognize only platform constructors and independently proven inert
       // nested DTOs. Unknown allocations are not safe effect evidence.
-      for(const allocation of visible.matchAll(/\bnew\s+([A-Za-z_]\w*)(?:\s*<([^<>]+)>)?\s*\(/gi)){
+      const allocations=[...visible.matchAll(/\bnew\s+([A-Za-z_]\w*)(?:\s*<([^<>]+)>)?\s*\(/gi)];
+      if(allocations.length!==[...visible.matchAll(/\bnew\b/gi)].length)return false;
+      for(const allocation of allocations){
         if(/^(?:List|Set)$/i.test(allocation[1])&&/^\s*(?:String|Object)\s*$/i.test(allocation[2]??""))continue;
         if(!allocation[2]&&this.inertDtos.has(allocation[1].toLowerCase()))continue;
         return false;
@@ -247,4 +249,10 @@ export function directEffectCall(source:string):string|undefined{
   const open=visible.indexOf("(");
   if(matchingPair(visible,open)!==visible.length-1||/[()]/.test(visible.slice(open+1,-1)))return undefined;
   return call[1].toLowerCase();
+}
+
+/** Exact metadata access, with no embedded executable arguments. */
+export function isLiteralFieldSetRead(source:string):boolean{
+  const expr=source.trim();
+  return /^(?:Schema\.SObjectType\.[A-Za-z_]\w*|[A-Za-z_]\w*\.SObjectType\.getDescribe\s*\(\s*\))\s*\.fieldSets\s*\.getMap\s*\(\s*\)\s*\.get\s*\(\s*'[A-Za-z_]\w*'\s*\)(?:\s*\.getFields\s*\(\s*\))?$/i.test(expr);
 }
