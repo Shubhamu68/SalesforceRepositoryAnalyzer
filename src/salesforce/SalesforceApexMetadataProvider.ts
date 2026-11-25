@@ -1,5 +1,6 @@
 import type { ApexMetadataProvider, MetadataResult, CustomMetadataFilter, CustomMetadataResult } from "../core/metadata/ApexMetadataProvider.js";
 import type { SalesforceOrgConnection } from "./SalesforceOrgConnection.js";
+import {recordSoqlCount,timeSoqlPhase} from "../services/SoqlPerformanceMetrics.js";
 
 const VALID_NAME=/^[A-Za-z_][A-Za-z0-9_]*$/;
 const MAX_RECORDS=20000;
@@ -68,10 +69,32 @@ export class SalesforceApexMetadataProvider implements ApexMetadataProvider {
     Promise<MetadataResult<string[]>> {
     if(!VALID_NAME.test(objectApiName)||!VALID_NAME.test(fieldSetDeveloperName))
       return {complete:false,source:"LIVE_ORG",reason:"Invalid Field Set object/name."};
+    // Metadata API accepts the full object-qualified identity directly.
+    // Prefer it over a two-step Tooling inventory/Metadata lookup: live
+    // profiling found eight INVALID_FIELD responses in that older route.
+    // Keep the fallback for connections where Metadata API is unavailable.
+    let metadataIssue="Metadata API Field Set reader unavailable.";
+    if(typeof this.connection.readFieldSetMetadata==="function"){
+      recordSoqlCount("org.field_set.soap.calls");
+      try{
+        const fields=await timeSoqlPhase("org.field_set.soap.cumulative_ms",()=>
+          this.connection.readFieldSetMetadata(objectApiName,fieldSetDeveloperName));
+        if(!Array.isArray(fields)||fields.length>200||fields.some(field=>
+          typeof field!=="string"||!/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/.test(field)))
+          throw new Error("Metadata API Field Set members are invalid.");
+        recordSoqlCount("org.field_set.soap.successes");
+        return {complete:true,source:"LIVE_ORG",value:fields};
+      }catch(error){
+        recordSoqlCount("org.field_set.soap.failures");
+        metadataIssue=error instanceof Error?error.message:"Field Set metadata read unavailable.";
+      }
+    }
+    recordSoqlCount("org.field_set.tooling_fallbacks");
     let toolingIssue="Field Set Tooling inventory unavailable.";
     try{
       const q="SELECT Id, DeveloperName, EntityDefinition.QualifiedApiName "+
         "FROM FieldSet WHERE DeveloperName = '"+fieldSetDeveloperName+"' LIMIT 100";
+      recordSoqlCount("org.field_set.tooling_inventory.calls");
       const all=await this.connection.queryAll<Record<string,unknown>>(q,"tooling",100);
       const matches=all.filter(row=>row.DeveloperName===fieldSetDeveloperName &&
         row.EntityDefinition!==null && typeof row.EntityDefinition==="object" &&
@@ -79,6 +102,7 @@ export class SalesforceApexMetadataProvider implements ApexMetadataProvider {
       if(matches.length===1 && typeof matches[0].Id==="string" &&
          /^[A-Za-z0-9]{15,18}$/.test(matches[0].Id)){
         try{
+          recordSoqlCount("org.field_set.tooling_detail.calls");
           const full=await this.connection.queryAll<Record<string,unknown>>(
             "SELECT Metadata FROM FieldSet WHERE Id = '"+matches[0].Id+"' LIMIT 1",
             "tooling",1);
@@ -98,29 +122,24 @@ export class SalesforceApexMetadataProvider implements ApexMetadataProvider {
               }
               fields.push(field);
             }
-            if(valid)return {complete:true,source:"LIVE_ORG",value:fields};
+            if(valid){
+              recordSoqlCount("org.field_set.tooling_fallback_successes");
+              return {complete:true,source:"LIVE_ORG",value:fields};
+            }
           }
           toolingIssue="Field Set displayedFields was incomplete or invalid in Tooling API.";
         }catch(error){
+          recordSoqlCount("org.field_set.tooling_detail.failures");
           toolingIssue=error instanceof Error?error.message:"Field Set Tooling metadata query unavailable.";
         }
       }else toolingIssue="Field Set not found or ambiguous in Tooling API for the specified object.";
     }catch(error){
+      recordSoqlCount("org.field_set.tooling_inventory.failures");
       toolingIssue=error instanceof Error?error.message:"Field Set Tooling API unavailable.";
     }
-    // Some orgs expose the FieldSet record through Tooling but omit complete
-    // displayedFields. The Metadata API readMetadata SOAP call is read-only;
-    // it requires metadata permissions of the already connected Salesforce user.
-    try{
-      if(typeof this.connection.readFieldSetMetadata!=="function")
-        return {complete:false,source:"LIVE_ORG",reason:toolingIssue};
-      const fields=await this.connection.readFieldSetMetadata(objectApiName,fieldSetDeveloperName);
-      return {complete:true,source:"LIVE_ORG",value:fields};
-    }catch(error){
-      return {complete:false,source:"LIVE_ORG",
-        reason:toolingIssue+" Metadata API fallback: "+
-          (error instanceof Error?error.message:"Field Set metadata read unavailable.")};
-    }
+    recordSoqlCount("org.field_set.unresolved");
+    return {complete:false,source:"LIVE_ORG",
+      reason:"Metadata API: "+metadataIssue+" Tooling API fallback: "+toolingIssue};
   }
 
   async getCustomMetadataRecords(objectApiName:string,fields:readonly string[],filters:readonly CustomMetadataFilter[]=[]):
