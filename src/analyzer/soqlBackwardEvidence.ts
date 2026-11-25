@@ -7,7 +7,7 @@ import type {ApexCallResolver} from "../core/apex/ApexTypeSystem.js";
 import {maskApexSource} from "../core/apex/ApexSourceModel.js";
 import {reportApexDependency,type ApexDependencyObserver} from "../core/apex/ApexDependencyDiagnostics.js";
 import {provePartialSoql} from "./soqlPartialStructure.js";
-import {aggregatePermissionShapes,simplePermissionShape,permissionSelectFieldPath,type SoqlPermissionShape} from "./soqlPermissionAggregation.js";
+import {aggregatePermissionShapes,simplePermissionShape,type SoqlPermissionShape} from "./soqlPermissionAggregation.js";
 const one=(v:ApexValue)=>v.kind==="text"&&v.values.length===1&&!v.scalarType?v.values[0]:undefined;
 const stop=(reason:string)=>unknown("SOQL backward evidence: "+reason);
 const path=/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/;
@@ -138,10 +138,9 @@ export function backtrackSoqlPermissionShapes(source:string,filePath:string,site
     observe,
     abstractExpression:abstractSoqlExpression,
     allowMetadataCandidateRows:true,
-    allowConditionalScalarCandidates:true,
     join:(list,separator)=>{
-      if(list.value.kind!=="collection"||!/^,\s*$/.test(separator)||list.value.items.length>MAX_FIELDS||list.value.items.some(s=>!permissionSelectFieldPath(s)))return undefined;
-      const annotations:Use[]=list.value.items.map(field=>({fieldPath:permissionSelectFieldPath(field)!,context:"SELECT"}));
+      if(list.value.kind!=="collection"||!/^,\s*$/.test(separator)||list.value.items.length>MAX_FIELDS||list.value.items.some(s=>!path.test(s.trim())))return undefined;
+      const annotations:Use[]=list.value.items.map(fieldPath=>({fieldPath:fieldPath.trim(),context:"SELECT"}));
       if(list.runtimeMembers){
         // Do not fill arbitrary runtime identifiers. The core has proven
         // only optional additions constrained by a specific Describe map.

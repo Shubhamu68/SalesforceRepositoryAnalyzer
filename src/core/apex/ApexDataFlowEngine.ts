@@ -1,5 +1,5 @@
 import {apexMapKey} from "./ApexValueEvaluator.js";
-import {isSchemaFieldMap,mutateSchemaFieldMap,schemaEffectArgument,schemaNameFieldLoop} from "./ApexSchemaModel.js";
+import {isSchemaFieldMap,mutateSchemaFieldMap} from "./ApexSchemaModel.js";
 import {applyApexStringCollectionMutation,apexIterationValues} from "./ApexCollectionOperations.js";
 import {collectApexReferences,isApexReference,referenceMember,replaceApexReferences} from "./ApexReferenceState.js";
 import {proveInstanceArgumentEffects} from "./ApexInstanceEffects.js";
@@ -266,7 +266,6 @@ export class ApexDataFlowEngine {
     const referenceInputsSafe=args.every((v,i)=>{
       const type=method.parameterTypes?.[i]??"";
       if(v.kind==="collection")return /^(?:List|Set)\s*<\s*String\s*>$|^List\s*<\s*Schema\.FieldSetMember\s*>$/i.test(type);
-      if(v.kind==="schema"||isSchemaFieldMap(v))return schemaEffectArgument(v,type);
       if(v.kind==="map")return /^Map\s*<\s*String\s*,\s*String\s*>$/i.test(type)&&v.entries.every(([,item])=>item.kind==="text"||item.kind==="null"||item.kind==="unknown");
       return v.kind!=="instance"&&v.kind!=="instanceList";
     });
@@ -292,8 +291,8 @@ export class ApexDataFlowEngine {
    */
   summarizeArgumentEffects(method:IndexedApexMethod,args:readonly ApexValue[]):ApexValue[]|undefined{
     if(!this.methods.includes(method)||method.parameters.length!==args.length||this.effects.fields.size||
-      args.some((v,i)=>v.kind!=="collection"&&v.kind!=="number"&&v.kind!=="null"&&
-        !(v.kind==="text"&&v.values.length===1)&&!schemaEffectArgument(v,method.parameterTypes?.[i])))return undefined;
+      args.some(v=>v.kind!=="collection"&&v.kind!=="number"&&v.kind!=="null"&&
+        !(v.kind==="text"&&v.values.length===1)))return undefined;
     // A modeled String Set and List cannot be interchanged for a source
     // signature. Avoid order-sensitive Set observations in exact summaries.
     if(args.some((v,i)=>v.kind==="collection"&&canonicalApexType(method.parameterTypes?.[i])!==(v.unique?"set<string>":"list<string>")))return undefined;
@@ -716,9 +715,6 @@ export class ApexDataFlowEngine {
       // A query may itself occur in the for-loop header.
       const headEnd=node.body?.[0]?.start??node.end;
       this.captureCalls(node.start,headEnd,state,depth);
-      const nameField=schemaNameFieldLoop(node,expr=>this.evaluate(expr,state,depth));
-      if(nameField?.kind==="text"){state.stopped=true;return {states:[state],returns:[nameField]};}
-      if(nameField?.kind==="null")return {states:[state],returns:[]};
       const iterable=node.iterable?this.evaluate(node.iterable,state,depth):unknown("Unsupported for-loop header");
       if(iterable.kind==="instanceList"&&node.loopVariable&&iterable.items.length<=MAX_LOOP_ITEMS){
         // Pin the original iterable as an alias, so member writes through the

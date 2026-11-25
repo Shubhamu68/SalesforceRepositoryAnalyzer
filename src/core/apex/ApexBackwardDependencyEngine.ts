@@ -3,17 +3,14 @@ import {apexSymbols} from "./ApexSymbolTable.js";
 import {canonicalApexType,parseApexDeclaration,selectApexOverload,type ApexCallResolver} from "./ApexTypeSystem.js";
 import {ApexDataFlowEngine} from "./ApexDataFlowEngine.js";
 import {directEffectInvocation,memberEffectModel} from "./ApexMemberEffectModel.js";
-import {addApexValues,evaluateApexExpression,listValue,runtimeParameter,textValue,booleanValue,unknown,type ApexValue} from "./ApexValueEvaluator.js";
+import {addApexValues,evaluateApexExpression,listValue,runtimeParameter,textValue,unknown,type ApexValue} from "./ApexValueEvaluator.js";
 import type {ApexRepositoryMethodIndex,ApexCallerSource} from "./ApexRepositoryMethodIndex.js";
 import {countApex} from "./ApexPerformance.js";
 import {readApexReadOperation} from "./ApexReadOperations.js";
 import {evaluateApexReadOperation} from "./ApexValueEvaluator.js";
 import {applyApexStringCollectionMutation,apexIterationValues,mergeApexRuntimeMembers,proveApexAddOnlyIteration,evaluateApexCollectionGuard,isExactMetadataStringList,type ApexRuntimeCollectionMembers} from "./ApexCollectionOperations.js";
-import {knownBoolean,integerArithmetic,splitScalarOperator} from "./ApexScalarOperators.js";
-import {findApexTernary} from "./ApexConditionalInvocation.js";
-import {evaluateReadOnlyApexGuard,readApexFiniteMembershipGuard,readApexStringPredicate} from "./ApexGuardModel.js";
-import {apexStateIdentity} from "./ApexStateIdentity.js";
-import {evaluateSchemaExpression,evaluateSchemaGlobalGuard,schemaReceiverEligible,isSchemaFieldMap,mutateSchemaFieldMap,schemaEffectArgument,maskSchemaEffectReads} from "./ApexSchemaModel.js";
+import {knownBoolean} from "./ApexScalarOperators.js";
+import {evaluateSchemaExpression,evaluateSchemaGlobalGuard,schemaReceiverEligible,isSchemaFieldMap,mutateSchemaFieldMap} from "./ApexSchemaModel.js";
 import {metadataSelectorHelper} from "./ApexCustomMetadataQueryModel.js";
 import {reportApexDependency,type ApexDependencyObserver} from "./ApexDependencyDiagnostics.js";
 
@@ -58,8 +55,6 @@ export interface ApexDependencyPolicy<A=never>{
   join?(collection:ApexDependencyEvidence<A>,separator:string):ApexDependencyEvidence<A>|undefined;
   mergeConditionalAppends?(base:ApexDependencyEvidence<A>,additions:readonly ApexDependencyAppend<A>[]):ApexDependencyEvidence<A>|undefined;
   allowMetadataCandidateRows?:boolean;
-  /** Consumer opt-in for bounded permission candidates, not runtime certainty. */
-  allowConditionalScalarCandidates?:boolean;
   /** Diagnostic-only observer; not consulted by any proof or selection rule. */
   observe?:ApexDependencyObserver;
 }
@@ -72,7 +67,7 @@ export interface ApexDependencyTrace<A=never>{
 }
 interface Frame {filePath:string;source:string;methods:readonly IndexedApexMethod[];method:IndexedApexMethod;key:string;depth:number;ancestors:readonly string[]}
 type Row=Array<[string,ApexValue]>;
-type Choice={kind:"caller";edge:ApexCallerSource}|{kind:"row";row:Row}|{kind:"branch";truth:boolean}|{kind:"scalar";value?:string;excluded?:readonly string[]}|{kind:"predicate";predicate:string;truth:boolean};
+type Choice={kind:"caller";edge:ApexCallerSource}|{kind:"row";row:Row};
 class Expand {constructor(readonly key:string,readonly choices:readonly Choice[]){}}
 class Bounded extends Error{}
 
@@ -114,9 +109,8 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
     return empty;
   }
   const root:Frame={filePath,source,methods,method,key:"root",depth:0,ancestors:[]};
-  let work=0,edges=0,metadataRows=0,branchEdges=0,bounded=false,effectSummaries=0;
+  let work=0,edges=0,metadataRows=0,bounded=false,effectSummaries=0;
   const effectEngines=new Map<string,ApexDataFlowEngine>();
-  const effectSummariesCache=new Map<string,ApexValue>();
   const found=new Map<string,Evidence>();
   const note=(frame:Frame,offset:number,code:string,symbol?:string,count?:number)=>
     reportApexDependency(policy.observe,code,frame,offset,symbol,count);
@@ -130,68 +124,6 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
     const exact=(e:Evidence)=>e.value.kind==="collection"&&exactCollections.has(e.value)&&!e.annotations.length&&!e.runtimeMembers&&!e.describeObject;
     const exactValue=(e:Evidence)=>!e.annotations.length&&!e.runtimeMembers&&!e.describeObject&&scalarEffectInput(e.value);
     const mark=(value:ApexValue)=>{if(value.kind==="collection")exactCollections.add(value);return value;};
-    const chooseBranch=(key:string):boolean=>{
-      const prior=choices.get(key);
-      if(prior?.kind==="branch")return prior.truth;
-      throw new Expand(key,[{kind:"branch",truth:true},{kind:"branch",truth:false}]);
-    };
-    const immutableParameter=(frame:Frame,name:string,type:string):boolean=>{
-      const at=frame.method.parameters.findIndex(p=>p.toLowerCase()===name.toLowerCase());
-      if(at<0||canonicalApexType(frame.method.parameterTypes?.[at])!==type)return false;
-      const body=maskApexSource(frame.source.slice(frame.method.start,frame.method.end));
-      const write=new RegExp("\\b"+name+"\\s*(?:=(?!=|>)|[+\\-*/%&|^]=|\\+\\+|--)|(?:\\+\\+|--)\\s*"+name+"\\b|\\b(?:Boolean|String)\\s+"+name+"\\b","i");
-      return !write.test(body);
-    };
-    const guardAt=(frame:Frame,condition:string,offset:number,locals:Locals,current?:{key:string;evidence:Evidence}):boolean|undefined=>{
-      const symbols=apexSymbols(frame.source,frame.methods);
-      const stringPlatformAllowed=!symbols.hasLocalBinding(frame.method,"String",offset)&&!index?.hasSourceClass("String");
-      const seen=new Map<string,Evidence>();
-      const proof=(id:string):Evidence=>{
-        const key=id.toLowerCase();
-        if(current?.key===key)return current.evidence;
-        const old=seen.get(key);if(old)return old;
-        const next=resolve(frame,id,offset,locals);seen.set(key,next);return next;
-      };
-      const guard=evaluateReadOnlyApexGuard(condition,{
-        typeOf:id=>symbols.lookup(frame.method,id,offset),
-        valueOf:id=>{
-          const p=proof(id);
-          if(exactValue(p)||exact(p))return p.value;
-          if(policy.allowConditionalScalarCandidates&&p.value.kind==="unknown"&&immutableParameter(frame,id,"boolean"))
-            return booleanValue(chooseBranch(frame.key+"|parameter|"+id.toLowerCase()));
-          return stop("Conditional input not exact");
-        },
-        stringPlatformAllowed
-      });
-      if(guard===undefined)return undefined;
-      const known=knownBoolean(guard);
-      if(known!==undefined||!policy.allowConditionalScalarCandidates)return known;
-      const membership=readApexFiniteMembershipGuard(condition,stringPlatformAllowed);
-      if(membership&&immutableParameter(frame,membership.parameter,"string")){
-        const receiver=proof(membership.receiver);
-        if(exact(receiver)&&receiver.value.kind==="collection"){
-          const domain=[...new Set(receiver.value.items)].sort();
-          const key=frame.key+"|parameter|"+membership.parameter.toLowerCase();
-          const choice=choices.get(key);
-          const predicate=choices.get(frame.key+"|predicate|"+membership.parameter.toLowerCase());
-          if(!domain.length)return membership.negated;
-          if(choice?.kind==="scalar"&&choice.value===undefined&&domain.every(v=>choice.excluded?.includes(v)))return membership.negated;
-          if(!choice&&!predicate&&domain.length<=24&&proof(membership.parameter).value.kind==="unknown"){
-            note(frame,offset,"SCALAR_MEMBERSHIP_CANDIDATES",membership.parameter,domain.length);
-            throw new Expand(key,[...domain.map(value=>({kind:"scalar" as const,value})),{kind:"scalar",excluded:domain}]);
-          }
-        }
-      }
-      const predicate=readApexStringPredicate(condition,stringPlatformAllowed);
-      if(predicate&&immutableParameter(frame,predicate.parameter,"string")&&
-         !choices.has(frame.key+"|parameter|"+predicate.parameter.toLowerCase())&&
-         proof(predicate.parameter).value.kind==="unknown"){
-        const key=frame.key+"|predicate|"+predicate.parameter.toLowerCase(),prior=choices.get(key);
-        if(prior?.kind==="predicate")return prior.predicate===predicate.predicate?(prior.truth!==predicate.negated):undefined;
-        throw new Expand(key,[{kind:"predicate",predicate:predicate.predicate,truth:true},{kind:"predicate",predicate:predicate.predicate,truth:false}]);
-      }
-      return undefined;
-    };
     const resolve=(frame:Frame,expression:string,offset:number,locals:Locals=new Map(),members:readonly string[]=[]):Evidence=>{
       tick();
       const expr=clean(expression);
@@ -207,30 +139,11 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
         if(local){note(frame,offset,"LOCAL_BINDING",expr);return local;}
         return variable(frame,expr,offset,locals,members);
       }
-      const ternary=findApexTernary(maskApexSource(expr));
-      if(ternary){
-        const truth=guardAt(frame,expr.slice(0,ternary.question),offset,locals);
-        if(truth!==undefined)return resolve(frame,truth?expr.slice(ternary.question+1,ternary.colon):expr.slice(ternary.colon+1),offset,locals,members);
-        return ev(reject("conditional expression is not proven","TERNARY_UNPROVEN"));
-      }
       const terms=splitApexTopLevel(expr,"+");
       if(terms.length>1){
         let result=resolve(frame,terms[0],offset,locals);
         for(const term of terms.slice(1))result=concat(result,resolve(frame,term,offset,locals));
         return result;
-      }
-      const arithmetic=splitScalarOperator(expr,["-"])??splitScalarOperator(expr,["*","/"]);
-      if(arithmetic){
-        const left=resolve(frame,arithmetic.left,offset,locals),right=resolve(frame,arithmetic.right,offset,locals);
-        if(exactValue(left)&&exactValue(right))return ev(integerArithmetic(left.value,right.value,arithmetic.operator));
-        return ev(reject("numeric operation is not exact","ARITHMETIC_UNPROVEN"));
-      }
-      const conversion=/^String\s*\.\s*valueOf\s*\(([\s\S]*)\)$/i.exec(expr);
-      if(conversion&&!apexSymbols(frame.source,frame.methods).hasLocalBinding(frame.method,"String",offset)&&!index?.hasSourceClass("String")){
-        const input=resolve(frame,conversion[1],offset,locals);
-        if(exactValue(input))return ev(evaluateApexExpression("String.valueOf(value)",{values:new Map([["value",input.value]])}));
-        if(!input.annotations.length&&input.value.kind==="unknown"&&/^(?:integer|long|decimal|double|boolean)$/i.test(input.value.symbol?.type??""))
-          return input;
       }
       const join=/^String\s*\.\s*join\s*\(([\s\S]*)\)$/i.exec(expr);
       if(join){
@@ -383,7 +296,7 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
         if(name&&(index||resolveExternal)&&frame.depth<MAX_DEPTH){
           const args=pieces.map(arg=>resolve(frame,arg,offset,locals));
           const exact=args.every(a=>!a.annotations.length&&!a.runtimeMembers&&!a.describeObject&&
-            (scalarEffectInput(a.value)||a.value.kind==="schema"));
+            (a.value.kind==="number"||a.value.kind==="null"||a.value.kind==="text"&&a.value.values.length===1));
           if(!exact&&policy.allowMetadataCandidateRows&&target&&resolveExternal&&members.length&&
             args.length===1&&args[0].value.kind==="unknown"&&!args[0].annotations.length&&!args[0].runtimeMembers&&
             !args[0].describeObject&&!index?.hasSourceClass("String")&&
@@ -472,35 +385,8 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
         // Only enter loops currently being enumerated. A local declared
         // within this iteration can be read. An outer symbol must be read
         // only throughout the loop, including subsequent iterations.
-        const symbolTable=apexSymbols(frame.source,frame.methods);
-        const trackedType=symbolTable.lookup(frame.method,name,offset);
-        const schemaMapReadOnly=(node:SourceNode):boolean=>{
-          const body=maskApexSource(frame.source.slice(node.start,node.end));
-          if(!rx(name).test(body))return true;
-          if(!rx(name).test(maskSchemaEffectReads(body,new Map([[name.toLowerCase(),trackedType??""]]),false)))return true;
-          if(node.kind==="statement"){
-            const text=clean(node.text??"").replace(/;\s*$/,"");
-            const declaration=parseApexDeclaration(text);
-            const eq=declaration?maskApexSource(text).indexOf("="):-1;
-            const call=directEffectInvocation(eq>=0?text.slice(eq+1):text);
-            if(!call||!identifier.test(call.name))return false;
-            const pieces=call.argumentText.trim()?splitApexTopLevel(call.argumentText,","):[];
-            const positions=pieces.flatMap((p,i)=>clean(p).toLowerCase()===name.toLowerCase()?[i]:[]);
-            const hints=symbolTable.argumentTypes(frame.method,pieces,node.start);
-            const helper=selectApexOverload(frame.methods.filter(m=>symbolTable.sameOwner(frame.method,m)&&m.name.toLowerCase()===call.name),pieces.length,hints);
-            return !!helper&&positions.length>0&&hints.every((t,i)=>!!canonicalApexType(t)&&canonicalApexType(t)===canonicalApexType(helper.parameterTypes?.[i]))&&
-              pieces.every((p,i)=>positions.includes(i)||!rx(name).test(maskApexSource(p)))&&
-              positions.every(i=>memberEffectModel(frame.source,frame.methods).schemaArgumentReadOnly(helper,i));
-          }
-          if(node.kind!=="for"&&node.kind!=="if"&&node.kind!=="block")return false;
-          const header=maskApexSource((node.condition??"")+" "+(node.iterable??""));
-          return !rx(name).test(header)&&(node.body??[]).every(schemaMapReadOnly)&&(node.otherwise??[]).every(schemaMapReadOnly);
-        };
         const readOnlyMapUse=(node:SourceNode)=>{
           const body=maskApexSource(frame.source.slice(node.start,node.end));
-          if(trackedType==="string"||scalar.test(trackedType??""))
-            return !new RegExp("\\b"+name+"\\s*(?:=(?!=|>)|[+\\-*/%&|^]=|\\+\\+|--)|(?:\\+\\+|--)\\s*"+name+"\\b|\\b(?:String|Boolean|Integer|Long|Decimal|Double|Id|Date|Datetime)\\s+"+name+"\\b","i").test(body);
-          if(trackedType==="map<string,schema.sobjectfield>"&&schemaMapReadOnly(node))return true;
           return !rx(name).test(body.replace(new RegExp("\\b"+name+"\\s*\\.\\s*(?:containsKey|isEmpty|size)\\s*\\(","gi"),"("));
         };
         const prefix=prefixAt(frame.method.body,offset,node=>{
@@ -549,17 +435,12 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
           if(schemaReferenceList||schemaFieldMap)return ev(reject("Schema collection caller alias not proven","SCHEMA_COLLECTION_ALIAS_OR_WRITE"));
           note(frame,offset,"PARAMETER_USE",name,param);
           const choice=choices.get(frame.key+"|caller");
-          const parameterChoice=choices.get(frame.key+"|parameter|"+key);
           if(choice?.kind==="caller"){
             const edge=choice.edge;
             const parent:Frame={filePath:edge.filePath,source:edge.source,methods:edge.methods,method:edge.method,key:frame.key+"|"+edge.filePath+"@"+edge.offset,
               depth:frame.depth+1,ancestors:[...frame.ancestors,frameIdentity(frame)]};
             note(parent,edge.offset,"CALLER_ARGUMENT",name,param);
             base=resolve(parent,edge.expressions[param],edge.offset,new Map(),members);
-          }else if(parameterChoice?.kind==="branch"&&type==="boolean"&&immutableParameter(frame,name,"boolean")){
-            base=ev(booleanValue(parameterChoice.truth));
-          }else if(parameterChoice?.kind==="scalar"&&parameterChoice.value!==undefined&&type==="string"&&immutableParameter(frame,name,"string")){
-            base=ev(textValue(parameterChoice.value));
           }else if(scalar.test(type??"")){
             note(frame,offset,"TYPED_RUNTIME_SCALAR",name);
             base=ev(runtimeParameter(name,type,"Runtime scalar parameter"));
@@ -629,7 +510,6 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
               }
               // Other map snapshots must stay immutable; no aliases or writes.
               if(!rx(name).test(visible.replace(new RegExp("\\b"+name+"\\s*\\.\\s*(?:containsKey|isEmpty|size)\\s*\\(","gi"),"(")))continue;
-              if(schemaFieldMap&&isSchemaFieldMap(current.value)&&schemaMapReadOnly(n))continue;
               return blocked("MAP_ALIAS_OR_WRITE");
             }
             if(n.kind==="if"){
@@ -669,23 +549,6 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
                   // terminates or has unsupported control flow.
                   if(chosen.some(child=>/\b(?:return|throw|break|continue)\b/i.test(maskApexSource(frame.source.slice(child.start,child.end)))))
                     return blocked("SCHEMA_GUARD_PATH_TERMINATES");
-                  if(!visit(chosen,conditional,bindings))return false;
-                  continue;
-                }
-              }
-              // A scalar replacement under a pure guard is not a
-              // collection union or an arbitrary skipped write. Select
-              // the known branch, or enumerate correlated candidate paths
-              // only for an explicit inventory consumer.
-              const scalarWrites=new RegExp("\\b"+name+"\\s*=(?!=|>)","i");
-              if(type==="string"&&!conditional&&scalarWrites.test(visible)&&!additions.some(a=>a.conditional)){
-                let reaching=current;
-                for(const a of additions)reaching=concat(reaching,a.evidence);
-                const truth=guardAt(frame,n.condition??"",n.start,bindings,{key,evidence:reaching});
-                if(truth!==undefined){
-                  const chosen=truth?n.body??[]:n.otherwise??[];
-                  if(chosen.some(child=>/\b(?:return|throw|break|continue)\b/i.test(maskApexSource(frame.source.slice(child.start,child.end)))))return blocked("SCALAR_GUARD_PATH_TERMINATES");
-                  note(frame,n.start,"SCALAR_GUARD_RESOLVED",name);
                   if(!visit(chosen,conditional,bindings))return false;
                   continue;
                 }
@@ -801,16 +664,6 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
                 current=ev(listValue(merged,updated.unique),current.annotations,runtimeMembers?{runtimeMembers}:{});
                 continue;
               }
-              const assignment=new RegExp("^"+name+"\\s*=(?!=|>)\\s*([\\s\\S]+);$","i").exec(statement);
-              if(type==="string"&&assignment&&!conditional&&!additions.some(a=>a.conditional)){
-                let reaching=current;
-                for(const a of additions)reaching=concat(reaching,a.evidence);
-                const inputs=new Map(bindings);inputs.set(key,reaching);
-                current=resolve(frame,assignment[1],n.start,inputs);
-                additions.length=0;
-                note(frame,n.start,"SCALAR_ASSIGNMENT_RESOLVED",name);
-                continue;
-              }
               const append=new RegExp("^"+name+"\\s*\\+=\\s*([\\s\\S]+);$","i").exec(statement);
               if(type==="string"&&append){
                 if(rx(name).test(maskApexSource(append[1])))return blocked("SELF_REFERENTIAL_APPEND");
@@ -853,18 +706,7 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
                         frame.methods.some(m=>effects.locals(m).has(p.toLowerCase()))))
                       return blocked("SHARED_HELPER_EFFECT_UNPROVEN");
                     const args=pieces.map((p,i)=>targetPositions.includes(i)?current:resolve(frame,p,n.start,bindings));
-                    if(args.some((v,i)=>!targetPositions.includes(i)&&!exactValue(v)&&
-                      (v.annotations.length||v.runtimeMembers||!schemaEffectArgument(v.value,helper.parameterTypes?.[i])||
-                       isSchemaFieldMap(v.value)&&!effects.schemaArgumentReadOnly(helper,i))))return blocked("SHARED_HELPER_EFFECT_UNPROVEN");
-                    const values=args.map(v=>v.value);
-                    const effectKey=frame.filePath+"|"+helper.start+"|"+targetPositions[0]+"|"+
-                      apexStateIdentity(new Map(values.map((v,i)=>[String(i),v])),false);
-                    const cached=effectSummariesCache.get(effectKey);
-                    if(cached?.kind==="collection"){
-                      current=ev(mark(listValue([...cached.items],cached.unique)));
-                      note(frame,n.start,"SHARED_HELPER_EFFECT_RESOLVED",helper.name);
-                      continue;
-                    }
+                    if(args.some((v,i)=>!targetPositions.includes(i)&&!exactValue(v)))return blocked("SHARED_HELPER_EFFECT_UNPROVEN");
                     if(++effectSummaries>MAX_EFFECT_SUMMARIES){note(frame,n.start,"WORK_LIMIT",helper.name);throw new Bounded("Helper effect summary limit");}
                     let engine=effectEngines.get(frame.filePath);
                     if(!engine){
@@ -874,13 +716,11 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
                       engine=new ApexDataFlowEngine(frame.source,{sourceMethods:[...frame.methods],maxOperations:500,
                         selectInvocation:()=>undefined,
                         resolveExternal:(call,values,types)=>call==="Apex.construct"&&values[0]?.kind==="text"&&values[0].values.length===1?
-                          index?.constructInstance(frame.filePath,values[0].values[0],values.slice(1),undefined,types?.slice(1)):
-                          /^(?:Schema\.objectSchema|Schema\.fieldMap)$/.test(call)?resolveExternal?.(call,values,types,frame.filePath):undefined});
+                          index?.constructInstance(frame.filePath,values[0].values[0],values.slice(1),undefined,types?.slice(1)):undefined});
                       effectEngines.set(frame.filePath,engine);
                     }
-                    const updated=engine.summarizeArgumentEffects(helper,values)?.[targetPositions[0]];
+                    const updated=engine.summarizeArgumentEffects(helper,args.map(v=>v.value))?.[targetPositions[0]];
                     if(updated?.kind!=="collection"||updated.items.length>MAX_COLLECTION_ITEMS)return blocked("SHARED_HELPER_EFFECT_UNPROVEN");
-                    effectSummariesCache.set(effectKey,updated);
                     current=ev(mark(updated));
                     note(frame,n.start,"SHARED_HELPER_EFFECT_RESOLVED",helper.name);
                     continue;
@@ -930,9 +770,9 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
     }catch(error){
       if(error instanceof Bounded){bounded=true;note(root,use.offset,"WORK_LIMIT");break;}
       if(!(error instanceof Expand))throw error;
-      if(choices.has(error.key)||queue.length+error.choices.length>MAX_EDGES||edges+metadataRows+branchEdges+error.choices.length>MAX_EDGES){bounded=true;note(root,use.offset,"EDGE_OR_ROW_LIMIT");continue;}
+      if(choices.has(error.key)||queue.length+error.choices.length>MAX_EDGES||edges+metadataRows+error.choices.length>MAX_EDGES){bounded=true;note(root,use.offset,"EDGE_OR_ROW_LIMIT");continue;}
       for(const choice of error.choices){
-        if(choice.kind==="caller")edges++;else if(choice.kind==="row")metadataRows++;else branchEdges++;
+        if(choice.kind==="caller")edges++;else metadataRows++;
         const next=new Map(choices);next.set(error.key,choice);queue.push(next);
       }
     }
