@@ -46,6 +46,8 @@ export type SalesforceSObjectDescribe = {
     permissionable?: boolean | null;
     relationshipName?: string | null;
     referenceTo?: string[];
+    /** True only when REST Describe identifies this as a name field. */
+    nameField?: boolean;
     namePointing?: boolean;
     polymorphicForeignKey?: boolean;
   }>;

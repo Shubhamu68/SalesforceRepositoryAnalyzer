@@ -128,6 +128,7 @@ export class ApexDataFlowEngine {
   private evaluate(expr:string, state:State, depth:number,allowEffects=false):ApexValue {
     const context:ApexExpressionContext={values:state.values,
       argumentTypes:expressions=>this.symbols.argumentTypes(this.currentMethod,expressions,this.evaluationOffset),
+      schemaShadowed:name=>!!this.currentMethod&&this.symbols.hasLocalBinding(this.currentMethod,name,this.evaluationOffset)||new RegExp("\\bclass\\s+"+name+"\\b","i").test(maskApexSource(this.source)),
       resolveCall:(name,args,argumentTypes)=>{
         if(name==="Apex.thisField"||name==="Apex.unqualifiedField"){
           const field=args[0];

@@ -10,6 +10,7 @@ import {readApexReadOperation} from "./ApexReadOperations.js";
 import {evaluateApexReadOperation} from "./ApexValueEvaluator.js";
 import {applyApexStringCollectionMutation,apexIterationValues,mergeApexRuntimeMembers,proveApexAddOnlyIteration,type ApexRuntimeCollectionMembers} from "./ApexCollectionOperations.js";
 import {knownBoolean} from "./ApexScalarOperators.js";
+import {evaluateSchemaExpression} from "./ApexSchemaModel.js";
 import {reportApexDependency,type ApexDependencyObserver} from "./ApexDependencyDiagnostics.js";
 
 const clean=(s:string)=>stripApexComments(s).trim();
@@ -189,6 +190,25 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
         const value=evaluateApexExpression(expr,{values:new Map(),resolveCall:resolveExternal});
         note(frame,offset,value.kind==="collection"?"DESCRIBE_RESOLVED":"DESCRIBE_UNAVAILABLE");
         return ev(value,[],value.kind==="collection"?{describeObject:describe[1]}:{});
+      }
+      // Schema reads share the forward evaluator's typed metadata semantics.
+      // Candidate unions, synthetic fragments and runtime collections never
+      // become exact object/field identities.
+      const symbolsForSchema=apexSymbols(frame.source,frame.methods);
+      const schema=evaluateSchemaExpression(expr,{
+        evaluate:part=>{
+          const v=resolve(frame,part,offset,locals);
+          return v.annotations.length||v.runtimeMembers||v.describeObject?stop("Schema input is not exact"):v.value;
+        },
+        resolveCall:resolveExternal,
+        shadowed:root=>!!locals.get(root.toLowerCase())||symbolsForSchema.hasLocalBinding(frame.method,root,offset)||
+          !!index?.hasSourceClass(root)||new RegExp("\\bclass\\s+"+root+"\\b","i").test(maskApexSource(frame.source)),
+        receiverEligible:part=>/^Schema\s*\.|\.SObjectType\b|\.getDescribe\s*\(|\.getReferenceTo\s*\(/i.test(part)||
+          /^schema\.(?:sobjecttype|sobjectfield|describesobjectresult|describefieldresult|displaytype)$/i.test(symbolsForSchema.lookup(frame.method,part,offset)??"")
+      });
+      if(schema!==undefined){
+        note(frame,offset,schema.kind==="unknown"?"SCHEMA_READ_UNPROVEN":"SCHEMA_READ_RESOLVED");
+        return ev(schema);
       }
       const operation=readApexReadOperation(expr);
       if(operation&&!/^(?:String|Integer|Long|Decimal|Math|System|Schema)$/i.test(operation.receiver)){

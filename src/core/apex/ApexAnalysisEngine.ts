@@ -6,10 +6,12 @@ import {listValue,textValue,unknown,type ApexValue} from "./ApexValueEvaluator.j
 import type {ApexRepositoryMethodIndex} from "./ApexRepositoryMethodIndex.js";
 import {planCustomMetadataRequest,resolveCustomMetadataRows,type CustomMetadataRequest,type CustomMetadataInventory} from "./ApexCustomMetadataQueries.js";
 import type {ApexMetadataProvider} from "../metadata/ApexMetadataProvider.js";
+import {resolveSchemaSnapshot} from "./ApexSchemaModel.js";
 
 type LabelResult=Awaited<ReturnType<NonNullable<ApexMetadataProvider["getCustomLabelValue"]>>>;
 type FieldSetResult=Awaited<ReturnType<NonNullable<ApexMetadataProvider["getFieldSetFields"]>>>;
 type DescribeResult=Awaited<ReturnType<ApexMetadataProvider["getObjectFieldNames"]>>;
+type SchemaResult=Awaited<ReturnType<NonNullable<ApexMetadataProvider["getObjectSchema"]>>>;
 
 // Fresh for each repository scan. Concurrent consumers share a read, but
 // changing a label between user-triggered scans never reuses its old value.
@@ -17,6 +19,7 @@ interface ScanMetadataReads {
   labels:Map<string,Promise<LabelResult>>;
   fieldSets:Map<string,Promise<FieldSetResult>>;
   describes:Map<string,Promise<DescribeResult>>;
+  schemas:Map<string,Promise<SchemaResult>>;
   customMetadata:Map<string,Promise<CustomMetadataInventory>>;
 }
 function memoRead<T>(cache:Map<string,Promise<T>>,key:string,read:()=>Promise<T>):Promise<T>{
@@ -55,7 +58,7 @@ export interface ApexAnalysisContext {
  * The caller supplies an analysis consumer; no security/reporting dependency. */
 export class ApexAnalysisEngine {
   private readonly reads:ScanMetadataReads={
-    labels:new Map(),fieldSets:new Map(),describes:new Map(),customMetadata:new Map()
+    labels:new Map(),fieldSets:new Map(),describes:new Map(),schemas:new Map(),customMetadata:new Map()
   };
   constructor(readonly repositoryIndex?:ApexRepositoryMethodIndex,
     private readonly metadata?:ApexMetadataProvider){}
@@ -72,6 +75,8 @@ export class ApexAnalysisEngine {
   const labelResults=new Map<string,LabelResult>();
   const fieldSetValues=new Map<string,FieldSetResult>();
   const describeSnapshots=new Map<string,DescribeResult>();
+  const schemaSnapshots=new Map<string,SchemaResult>();
+  const requestedSchemas=new Map<string,string>();
   const requestedLabels=new Set<string>();
   const requestedFieldSets=new Map<string,[string,string]>();
   const requested=new Set<string>();
@@ -160,6 +165,16 @@ export class ApexAnalysisEngine {
       return unknown("Complete Custom Metadata "+request.type+
         (metadata?" rows have not been loaded for this filter context.":" requires a connected authoritative org."));
     }
+    if(name==="Schema.objectSchema"){
+      if((args.length!==1&&args.length!==2)||args.some(v=>v.kind!=="text"||v.scalarType||v.values.length!==1||!/^[A-Za-z_]\w*$/.test(v.values[0])))
+        return unknown("Schema object or field identity is not proven.");
+      const [object,field]=args.map(v=>v.kind==="text"?v.values[0]:"");
+      if(repositoryIndex?.hasSourceClass("Schema")||repositoryIndex?.hasSourceClass(object))
+        return unknown("Schema token may be shadowed by repository Apex.");
+      const key=object.toLowerCase();
+      if(!schemaSnapshots.has(key))requestedSchemas.set(key,object);
+      return resolveSchemaSnapshot(schemaSnapshots.get(key),object,field);
+    }
     if(name==="Schema.describeFields"){
       const object=args[0];
       if(object?.kind!=="text"||object.values.length!==1)
@@ -185,7 +200,7 @@ export class ApexAnalysisEngine {
   // Never fabricate data for failed lookups or silently use partial results.
   const MAX_PASSES=5,MAX_LABELS=40,MAX_FIELDSETS=30,MAX_DESCRIBES=40,MAX_METADATA=30;
   for(let pass=0;;pass++){
-    requestedLabels.clear();requestedFieldSets.clear();requested.clear();requestedMetadata.clear();
+    requestedLabels.clear();requestedFieldSets.clear();requested.clear();requestedSchemas.clear();requestedMetadata.clear();
     const {baseResolver,resolver}=makeResolver();
     countApex("metadata.analysis_passes");
     const analysis=consumer({repositoryIndex,resolveExternal:resolver,resolveLocal:baseResolver});
@@ -194,14 +209,16 @@ export class ApexAnalysisEngine {
     const labels=[...requestedLabels].filter(k=>!labelResults.has(k));
     const sets=[...requestedFieldSets].filter(([k])=>!fieldSetValues.has(k));
     const objects=[...requested].filter(k=>!describeSnapshots.has(k));
+    const schemas=[...requestedSchemas].filter(([k])=>!schemaSnapshots.has(k));
     const mdts=[...requestedMetadata.values()].filter(r=>!metadataInventories.has(r.key));
     const canReadLabels=!!metadata.getCustomLabelValue&&labels.length>0&&
       labelResults.size+labels.length<=MAX_LABELS;
     const canReadSets=!!metadata.getFieldSetFields&&sets.length>0&&
       fieldSetValues.size+sets.length<=MAX_FIELDSETS;
     const canReadObjects=objects.length>0&&describeSnapshots.size+objects.length<=MAX_DESCRIBES;
+    const canReadSchemas=!!metadata.getObjectSchema&&schemas.length>0&&schemaSnapshots.size+schemas.length<=MAX_DESCRIBES;
     const canReadMetadata=mdts.length>0&&metadataInventories.size+mdts.length<=MAX_METADATA;
-    if(!canReadLabels&&!canReadSets&&!canReadObjects&&!canReadMetadata)
+    if(!canReadLabels&&!canReadSets&&!canReadObjects&&!canReadSchemas&&!canReadMetadata)
       return analysis;
     await Promise.all([
       ...(canReadLabels?labels.map(async name=>labelResults.set(name,
@@ -210,6 +227,8 @@ export class ApexAnalysisEngine {
         await memoRead(reads.fieldSets,key,()=>metadata.getFieldSetFields!(object,name)))):[]),
       ...(canReadObjects?objects.map(async object=>describeSnapshots.set(object,
         await memoRead(reads.describes,object,()=>metadata.getObjectFieldNames(object)))):[]),
+      ...(canReadSchemas?schemas.map(async ([key,object])=>schemaSnapshots.set(key,
+        await memoRead(reads.schemas,key,()=>metadata.getObjectSchema!(object)))):[]),
       ...(canReadMetadata?mdts.map(async request=>metadataInventories.set(request.key,
         await memoRead(reads.customMetadata,request.key,()=>metadata.getCustomMetadataRecords(request.type,request.selected,request.filters)))):[]),
     ]);

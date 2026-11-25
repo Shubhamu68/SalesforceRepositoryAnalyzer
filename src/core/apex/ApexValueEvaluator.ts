@@ -6,9 +6,11 @@ import {findApexTernary} from "./ApexConditionalInvocation.js";
 import { parseCustomMetadataQuery } from "./ApexCustomMetadataQueryModel.js";
 import {evaluateBoundedStringOperation,isBoundedStringOperation} from "./ApexBoundedStringOperations.js";
 import {readApexReadOperation} from "./ApexReadOperations.js";
+import {evaluateSchemaExpression,evaluateSchemaRead,type ApexSchemaValue} from "./ApexSchemaModel.js";
 
 /** Portable abstract Apex values: no Salesforce API calls and no eval(). */
 export type ApexValue =
+  | ApexSchemaValue
   | { kind: "text"; values: string[]; scalarType?: "boolean" }
   | { kind: "collection"; items: string[]; unique: boolean }
   | { kind: "map"; entries: Array<[string,ApexValue]>; keyType?:"integer"|"string" }
@@ -107,6 +109,7 @@ export interface ApexExpressionContext {
   values: ReadonlyMap<string,ApexValue>;
   resolveCall?: ApexCallResolver;
   argumentTypes?: (expressions:readonly string[])=>ApexArgumentTypes;
+  schemaShadowed?: (name:string)=>boolean;
 }
 
 function unescapeApex(token: string): string | null {
@@ -129,7 +132,7 @@ export function addApexValues(left: ApexValue,right: ApexValue): ApexValue {
      left.kind==="map"||right.kind==="map"||
      left.kind==="record"||right.kind==="record"||left.kind==="instance"||right.kind==="instance"||
      left.kind==="records"||right.kind==="records"||left.kind==="instanceList"||right.kind==="instanceList"||
-     left.kind==="fieldSet"||right.kind==="fieldSet")
+     left.kind==="fieldSet"||right.kind==="fieldSet"||left.kind==="schema"||right.kind==="schema")
     return unknown("Cannot concatenate an Apex collection as text.");
   const from=(x:ApexValue):string[]=>
     x.kind==="text"?x.values:x.kind==="number"?[String(x.value)]:[];
@@ -207,6 +210,14 @@ export function evaluateApexExpression(
     if(record.kind==="record")
       return record.entries.find(([key])=>key.toLowerCase()===instanceMember[2].toLowerCase())?.[1] ??
         unknown("Metadata row field "+instanceMember[2]+" was not completely retrieved.");
+  }
+  const schemaContext={
+    evaluate:(part:string)=>evaluateApexExpression(part,context,depth+1),
+    resolveCall:context.resolveCall,
+    shadowed:(root:string)=>lexicalValue(context.values,root)!==undefined||!!context.schemaShadowed?.(root)
+  };
+  if(/^[A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)+$/.test(expr)){
+    const schema=evaluateSchemaExpression(expr,schemaContext);if(schema!==undefined)return schema;
   }
   const constant=/^([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/.exec(expr);
   if(constant&&lexicalValue(context.values,constant[1])!==undefined)
@@ -336,6 +347,10 @@ export function evaluateApexExpression(
     return context.resolveCall?.("Schema.describeFields",[object]) ??
       unknown("Schema Describe fields are unavailable for the target object.");
   }
+  // Rich Schema reads use the same metadata boundary as the legacy
+  // field-name inventory above. No change to existing map/Field Set values.
+  const schema=evaluateSchemaExpression(expr,schemaContext);
+  if(schema!==undefined)return schema;
   // Apex allows a generic Map cast on JSON.deserialize results. Only remove
   // a type cast directly attached to a JSON call, never arbitrary expressions.
   const cast=/^\(Map\s*<[\w\s,.<>]+>\)\s*(JSON\.deserialize\([\s\S]*\))$/i.exec(expr);
@@ -572,6 +587,7 @@ export function evaluateApexExpression(
 /** Apply an existing built-in to already resolved values without inserting
  * synthetic bindings in an execution frame or consulting external helpers. */
 export function evaluateApexReadOperation(receiver:ApexValue,name:string,args:readonly ApexValue[]):ApexValue{
+  const schema=evaluateSchemaRead(receiver,name,args);if(schema!==undefined)return schema;
   if(isBoundedStringOperation(name))return evaluateBoundedStringOperation(receiver,name,args);
   const values=new Map<string,ApexValue>([["receiver",receiver]]);
   const names=args.map((value,i)=>{const key="arg"+i;values.set(key,value);return key;});

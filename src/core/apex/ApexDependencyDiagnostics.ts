@@ -39,7 +39,7 @@ const blockerGroups:readonly {codes:readonly string[];label:string;limit?:number
   {codes:["SHARED_HELPER_ARGUMENT_UNPROVEN","HELPER_ARGUMENT_UNPROVEN","HELPER_MUTABLE_ARGUMENT"],label:"Could not determine inputs to helper methods",limit:3},
   {codes:["CLASS_MEMBER_UNPROVEN","NO_LOCAL_OR_PARAMETER_DEFINITION","CONSTANT_UNRESOLVED","NO_INITIALIZER","DECLARATION_AMBIGUOUS"],label:"Could not determine class member or variable values",limit:3},
   {codes:["CALLER_DEPTH_LIMIT","WORK_LIMIT","EDGE_OR_ROW_LIMIT","COLLECTION_SIZE_LIMIT","VARIABLE_CYCLE"],label:"Analysis reached a depth or size limit"},
-  {codes:["DESCRIBE_UNAVAILABLE","DESCRIBE_OBJECT_UNPROVEN","LABEL_UNAVAILABLE","GUARD_MAP_UNPROVEN","RUNTIME_LOOP_DOMAIN_UNPROVEN"],label:"Could not verify required metadata or schema"},
+  {codes:["SCHEMA_READ_UNPROVEN","DESCRIBE_UNAVAILABLE","DESCRIBE_OBJECT_UNPROVEN","LABEL_UNAVAILABLE","GUARD_MAP_UNPROVEN","RUNTIME_LOOP_DOMAIN_UNPROVEN"],label:"Could not verify required metadata or schema"},
   {codes:["LOOP_EFFECT_UNSUPPORTED","RUNTIME_LOOP_EFFECT_UNPROVEN","RUNTIME_LOOP_TYPE_UNPROVEN","LOOP_SHAPE_UNSUPPORTED"],label:"Could not determine how the loop changes values"},
   {codes:["MAP_ALIAS_OR_WRITE","METADATA_ALIAS_OR_WRITE","COLLECTION_ALIAS_OR_WRITE","COLLECTION_ALIAS","SCALAR_WRITE_UNSUPPORTED","SELF_REFERENTIAL_APPEND","GUARD_DEPENDS_ON_TARGET","GUARD_CALL_UNSUPPORTED"],label:"Could not verify assignments, shared references or conditions",limit:2},
   {codes:["SHARED_HELPER_UNPROVEN","HELPER_RETURN_UNPROVEN","HELPER_INPUT_MODIFIED","SHARED_HELPER_EFFECT_UNPROVEN"],label:"Could not verify helper results or changes to inputs"},
