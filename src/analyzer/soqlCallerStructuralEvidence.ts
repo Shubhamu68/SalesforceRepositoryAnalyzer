@@ -1,6 +1,6 @@
 import {indexApexMethods,maskApexSource,matchingPair,splitApexTopLevel,stripApexComments,type IndexedApexMethod,type SourceNode} from "../core/apex/ApexSourceModel.js";
 import {apexSymbols} from "../core/apex/ApexSymbolTable.js";
-import {addApexValues,evaluateApexExpression,textValue,type ApexValue} from "../core/apex/ApexValueEvaluator.js";
+import {addApexValues,evaluateApexExpression,textValue,runtimeParameter,type ApexValue} from "../core/apex/ApexValueEvaluator.js";
 import type {ApexCallSite} from "../core/apex/ApexInvocationModel.js";
 import {provePartialSoql} from "./soqlPartialStructure.js";
 import {simplePermissionShape} from "./soqlPermissionAggregation.js";
@@ -12,7 +12,7 @@ const MAX_SEEDS=64;
 const MAX_PARTS=64;
 
 interface Template {owner:IndexedApexMethod;expression:string;prefix:SourceNode[]}
-function directTemplate(source:string,site:ApexCallSite,methods:IndexedApexMethod[]):Template|undefined{
+export function directTemplate(source:string,site:ApexCallSite,methods:IndexedApexMethod[]):Template|undefined{
   const owner=methods.filter(m=>m.start<=site.offset&&site.offset<m.end).sort((a,b)=>(a.end-a.start)-(b.end-b.start))[0];
   if(!owner)return undefined;
   const target=owner.body.find(n=>n.kind==="statement"&&n.start<=site.offset&&site.offset<n.end);
@@ -41,6 +41,26 @@ function directTemplate(source:string,site:ApexCallSite,methods:IndexedApexMetho
   return {owner,expression:argument,prefix:prior};
 }
 
+/** Only the fixed ISO GMT formatter of a source-typed Date is abstracted.
+ * Its output cannot contain a field name or a security clause. */
+function dateFormatterSlot(source:string,owner:IndexedApexMethod,expression:string,methods:IndexedApexMethod[]):ApexValue|undefined{
+  const call=/^([A-Za-z_]\w*)\s*\(\s*\)$/.exec(clean(expression));
+  if(!call)return undefined;
+  const symbols=apexSymbols(source,methods);
+  const matches=methods.filter(m=>m.name.toLowerCase()===call[1].toLowerCase()&&!m.parameters.length&&symbols.sameOwner(owner,m));
+  if(matches.length!==1)return undefined;
+  const helper=matches[0];
+  if(helper.visibility!=="private"||helper.returnType?.toLowerCase()!=="string"||helper===owner||(!helper.isStatic&&owner.isStatic)||
+    helper.body.length!==2||helper.body.some(n=>n.kind!=="statement"))return undefined;
+  if(/\bclass\s+(?:DateTime|Time)\b/i.test(maskApexSource(source))||["DateTime","Time"].some(n=>symbols.lookup(helper,n,helper.start)))return undefined;
+  const init=/^DateTime\s+([A-Za-z_]\w*)\s*=\s*DateTime\s*\.\s*newInstance\s*\(\s*([A-Za-z_]\w*)\s*,\s*Time\s*\.\s*newInstance\s*\(\s*0\s*,\s*0\s*,\s*0\s*,\s*0\s*\)\s*\)\s*;$/i.exec(clean(helper.body[0].text??""));
+  if(!init||symbols.lookup(helper,init[2],helper.body[0].start)?.toLowerCase()!=="date")return undefined;
+  const ret=new RegExp("^return\\s+"+init[1]+"\\s*\\.\\s*formatGMT\\s*\\(\\s*('(?:\\\\.|[^'\\\\])*')\\s*\\)\\s*;$","i").exec(clean(helper.body[1].text??""));
+  const format=ret?literal(ret[1]):undefined;
+  if(format?.kind!=="text"||format.values.length!==1||format.values[0]!=="yyyy-MM-dd'T'HH:mm:ss'Z'")return undefined;
+  return runtimeParameter(call[1],"datetime","Fixed ISO GMT date formatter; parser-only value slot.");
+}
+
 /** Consume already collected exact caller vectors without re-running Apex or
  * raising its eight-seed execution budget. Only straight-line templates made
  * of literals, unmodified incoming parameters and String.join(parameter)
@@ -59,6 +79,8 @@ export function proveCallerPermissionShapes(source:string,site:ApexCallSite,seed
     const expr=clean(piece);
     const value=literal(expr);
     if(value)return {value};
+    const slot=dateFormatterSlot(source,owner,expr,methods);
+    if(slot)return {value:slot};
     const i=parameters.get(expr.toLowerCase());
     if(i!==undefined){used.add(i);return {parameter:i};}
     const join=/^String\s*\.\s*join\s*\(\s*([A-Za-z_]\w*)\s*,\s*('(?:\\.|[^'\\])*')\s*\)$/i.exec(expr);

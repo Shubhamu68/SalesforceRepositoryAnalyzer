@@ -5,6 +5,7 @@ import type { ApexRepositoryMethodIndex } from "../core/apex/ApexRepositoryMetho
 import {provePartialSoql} from "../analyzer/soqlPartialStructure.js";
 import {proveLocalSoqlPermissionShape} from "../analyzer/soqlSourceStructuralEvidence.js";
 import {proveCallerPermissionShapes,proveLiteralHelperPermissionShapes} from "../analyzer/soqlCallerStructuralEvidence.js";
+import {proveLabelBackedPermissionShapes} from "../analyzer/soqlLabelStructuralEvidence.js";
 import {aggregatePermissionShapes,simplePermissionShape,type SoqlPermissionShape} from "../analyzer/soqlPermissionAggregation.js";
 import {describePartialApexText,type ApexValue} from "../core/apex/ApexValueEvaluator.js";
 import {describeMalformedSoql} from "../analyzer/soqlReconstructionDiagnostics.js";
@@ -152,7 +153,8 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
         // permission evidence (unknown loops may expose only zero iterations).
         const local=variants.size===0?[
           ...proveLocalSoqlPermissionShape(source,site,methods),
-          ...proveLiteralHelperPermissionShapes(source,site,methods)
+          ...proveLiteralHelperPermissionShapes(source,site,methods),
+          ...proveLabelBackedPermissionShapes(source,site,resolveExternal,methods)
         ]:[];
         const callers=callerSeeds.length?proveCallerPermissionShapes(source,site,callerSeeds,methods):[];
         const shapes=[...local,...callers].flatMap(text=>{

@@ -4,6 +4,7 @@ import {extractDynamicSoqlQueries} from "../src/scanner/dynamicSoqlScanner.js";
 import {proveLocalSoqlPermissionShape} from "../src/analyzer/soqlSourceStructuralEvidence.js";
 import {proveCallerPermissionShapes,proveLiteralHelperPermissionShapes} from "../src/analyzer/soqlCallerStructuralEvidence.js";
 import {ApexRepositoryMethodIndex} from "../src/core/apex/ApexRepositoryMethodIndex.js";
+import {proveLabelBackedPermissionShapes} from "../src/analyzer/soqlLabelStructuralEvidence.js";
 import {aggregatePermissionShapes,simplePermissionShape} from "../src/analyzer/soqlPermissionAggregation.js";
 import {dynamicDatabaseQuerySelector,discoverApexInvocations} from "../src/core/apex/ApexInvocationModel.js";
 import {extractSoqlExpressionFields} from "../src/analyzer/soqlExpressionInventory.js";
@@ -126,4 +127,36 @@ test("literal helper alternatives stay grouped by object and mode and retain unk
   assert.equal(result.unresolved.length,1);
   const unknown=code.replace("return null;","return Other.load();");
   assert.deepEqual(proveLiteralHelperPermissionShapes(unknown,discoverApexInvocations(unknown,dynamicDatabaseQuerySelector)[0]),[]);
+});
+
+test("read-only label-backed cache is resolved independently of batch static lifetime and runtime dates",()=>{
+  const code=[
+    "public class Worker {",
+    " private static List<String> cached;",
+    " private Date sinceDate;",
+    " private void detect(){List<String> fields=getFields();if(fields.isEmpty())return;fetch(fields);}",
+    " private void display(){List<String> fields=getFields();if(fields.isEmpty())return;for(String field:fields){System.debug(field);}}",
+    " private List<Account> fetch(List<String> fields){String q='SELECT '+String.join(fields,',')+' FROM Account WHERE CreatedDate >= '+dateFilter();return (List<Account>)Database.query(q);}",
+    " private String dateFilter(){DateTime dt=DateTime.newInstance(sinceDate,Time.newInstance(0,0,0,0));return dt.formatGMT('yyyy-MM-dd\\'T\\'HH:mm:ss\\'Z\\'');}",
+    " private static List<String> getFields(){if(cached!=null)return cached;cached=new List<String>();if(String.isBlank(Label.Fields))return cached;String normalized=Label.Fields.replace(';',',');for(String field:normalized.split(',')){if(!String.isBlank(field)){cached.add(field.trim());}}return cached;}",
+    "}"
+  ].join("\n");
+  let reads=0;
+  const resolver=(name:string,args:import("../src/core/apex/ApexValueEvaluator.js").ApexValue[])=>{
+    if(name==="System.Label"){reads++;assert.deepEqual(args,[textValue("Fields")]);return textValue("Id; Name,  Industry ,");}
+    return undefined;
+  };
+  const site=discoverApexInvocations(code,dynamicDatabaseQuerySelector)[0];
+  const result=proveLabelBackedPermissionShapes(code,site,resolver);
+  assert.equal(result.length,1,JSON.stringify(result));
+  assert.deepEqual(new Set(extractSoqlExpressionFields(result[0]).fields.map(f=>f.context+":"+f.fieldPath)),new Set(["SELECT:Id","SELECT:Name","SELECT:Industry","WHERE:CreatedDate"]));
+  assert.equal(reads,1);
+  for(const changed of [
+    code.replace("fetch(fields);","fields.add('Secret__c');fetch(fields);"),
+    code.replace("System.debug(field);","Other.mutate(fields);"),
+    code.replace("private Date sinceDate;","private String sinceDate;"),
+    code.replace("private static List<String> cached;","public static List<String> cached;")
+  ]){
+    assert.deepEqual(proveLabelBackedPermissionShapes(changed,discoverApexInvocations(changed,dynamicDatabaseQuerySelector)[0],resolver),[],changed);
+  }
 });
