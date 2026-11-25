@@ -703,7 +703,7 @@ export class ApexDataFlowEngine {
     let states=initial,returns:ApexValue[]=[];
     const owner=this.currentMethod;
     let live:ApexLocalLiveness|undefined;
-    if(owner&&nodes===owner.body){
+    if(owner){
       if(depth===0&&this.activeStopOffset!==undefined)
         live=sharedApexLocalLiveness(this.source,owner,this.activeStopOffset);
       else {
@@ -728,7 +728,7 @@ export class ApexDataFlowEngine {
       if(this.exceeded)break;
       // Drop proven dead root-local and declared scalar parameter bindings,
       // not mutable aliases, fields or loop-carried values, before deduplication.
-      if(live)for(const frame of next)live.discardDeadScalars(frame.values,node.end);
+      if(live)for(const frame of next)live.discardDeadScalars(frame.values,node.end,node.start);
       const distinct=mergeEquivalentStates(next);
       if(!this.budget.checkPaths(distinct.filter(frame=>!frame.stopped).length,node.start,owner?.name??"(unknown method)")){
         states=[{values:new Map([...distinct[0].values.keys()].map((k):[string,ApexValue]=>[k,
