@@ -704,7 +704,9 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
                       helper.parameterTypes?.length!==pieces.length||
                       hints.some((t,i)=>!canonicalApexType(t)||canonicalApexType(t)!==canonicalApexType(helper.parameterTypes?.[i])))
                       return effectBlocked("HELPER_EFFECT_SIGNATURE_UNPROVEN");
-                    if(declaration&&(eq<0||declaration.name.toLowerCase()===key||declaration.type!==canonicalApexType(helper.returnType)||!effects.resultCannotExposeReference(helper)))
+                    if(declaration&&(eq<0||declaration.name.toLowerCase()===key||declaration.type!==canonicalApexType(helper.returnType)))
+                      return effectBlocked("HELPER_EFFECT_RETURN_BINDING_UNPROVEN",helper.name);
+                    if(declaration&&!effects.resultCannotExposeReference(helper))
                       return effectBlocked("HELPER_EFFECT_RETURN_ALIAS_UNPROVEN",helper.name);
                     if(!exactCurrent||conditional||current.runtimeMembers||current.annotations.length||current.value.kind!=="collection")
                       return effectBlocked("HELPER_EFFECT_REACHING_STATE_UNPROVEN",helper.name);

@@ -168,3 +168,31 @@ test("helper effect replay still rejects opaque nested calls and reports the sou
   assert.equal(result,undefined);
   assert.deepEqual(events,[{code:"HELPER_EFFECT_SOURCE_UNSUPPORTED",offset:source.indexOf("String name=")}]);
 });
+
+
+test("inert DTO proof includes ordinary scalar instance fields alongside automatic properties",()=>{
+  for(const members of [
+    "@AuraEnabled public String name; public Boolean editable;",
+    "public String name; public Boolean editable {get;set;}",
+    "public String name; public Boolean editable; public Column(String name){this.name=name;this.editable=false;}"
+  ]){
+    const source="public class Builder {public class Column {"+members+"}private static Column make(Set<String> fields){fields.add('Name');return null;}}";
+    const methods=indexApexMethods(source),helper=methods.find(m=>m.name==="make")!;
+    assert.ok(memberEffectModel(source,methods).resultCannotExposeReference(helper),members);
+  }
+});
+test("ordinary DTO fields do not admit mutable references or executable initialization",()=>{
+  for(const members of [
+    "public String name; public Set<String> selected;",
+    "public String name; public Object value;",
+    "public String name; public Column other;",
+    "public String name; public static String state;",
+    "public String name=Other.read();",
+    "public String name {get{return Other.read();}set;}",
+    "public String name; public Column(String name){this.name=Other.read();}"
+  ]){
+    const source="public class Builder {public class Column {"+members+"}private static Column make(Set<String> fields){fields.add('Name');return null;}}";
+    const methods=indexApexMethods(source),helper=methods.find(m=>m.name==="make")!;
+    assert.equal(memberEffectModel(source,methods).resultCannotExposeReference(helper),false,members);
+  }
+});

@@ -76,8 +76,8 @@ export class ApexMemberEffectModel{
       if(!writes)this.fields.delete(name);
     }
   }
-  /** A narrow DTO proof: nested non-inheriting class, scalar automatic
-   * properties, and at most one constructor assigning only those properties
+  /** A narrow DTO proof: nested non-inheriting class, scalar instance fields
+   * or automatic properties, and at most one constructor assigning only those members
    * from its parameters or literal scalars. No custom accessors or callbacks. */
   private indexInertDtos(open:number,close:number,top:Int16Array):void{
     for(const hit of this.masked.matchAll(/\bclass\s+([A-Za-z_]\w*)\s*\{/gi)){
@@ -88,6 +88,14 @@ export class ApexMemberEffectModel{
       const name=hit[1],props=new Set<string>();
       let body=this.masked.slice(start+1,end);
       body=body.replace(/(?:@\w+\s*)?(?:public|private|global)\s+(?:String|Boolean|Integer|Long|Decimal|Double|Id)\s+([A-Za-z_]\w*)\s*\{\s*get\s*;\s*set\s*;\s*\}/gi,(_all,prop:string)=>{
+        props.add(prop.toLowerCase());return "";
+      });
+      // Ordinary scalar instance fields have the same no-alias property as
+      // automatic scalar properties. Admit only declarations without an
+      // initializer, not static fields, collection members, custom accessors
+      // or arbitrary executable initialization. Remaining text is checked
+      // by the existing constructor proof below.
+      body=body.replace(/(?:@\w+\s*)?(?:public|private|global)\s+(?:String|Boolean|Integer|Long|Decimal|Double|Id)\s+([A-Za-z_]\w*)\s*;/gi,(_all,prop:string)=>{
         props.add(prop.toLowerCase());return "";
       });
       const constructor=new RegExp("^\\s*(?:public|private|global)\\s+"+name+"\\s*\\(([^()]*)\\)\\s*\\{([\\s\\S]*)\\}\\s*$","i").exec(body);

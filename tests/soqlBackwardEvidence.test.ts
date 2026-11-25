@@ -231,3 +231,21 @@ test("backward replay uses nested local scalar helper results and identifies unp
   assert.ok(bad.events.includes("HELPER_EFFECT_SOURCE_UNSUPPORTED"));
   assert.ok(bad.events.includes("SHARED_HELPER_EFFECT_UNPROVEN"));
 });
+
+
+test("backward helper replay admits scalar-field DTO returns but rejects collection-bearing returns",()=>{
+  const filePath="Builder.cls";
+  const source="public class Builder {public class Column {public String name;public Boolean editable;public Column(String name){this.name=name;this.editable=false;}}public static void run(){Set<String> cols=new Set<String>{'Id'};List<String> paths=new List<String>{'Name','Phone'};for(String path:paths){Column result=addColumn('Account',path,cols);}Database.query('SELECT '+String.join(cols,',')+' FROM Account WITH USER_MODE');}private static Column addColumn(String objectName,String path,Set<String> cols){cols.add(path);Column col=new Column(path);return col;}}";
+  const analyze=(source:string)=>{
+    const index=new ApexRepositoryMethodIndex([{filePath,source}]);
+    const site=discoverApexInvocations(source,dynamicDatabaseQuerySelector)[0],events:string[]=[];
+    const result=backtrackSoqlPermissionShapes(source,filePath,site,index,undefined,e=>events.push(e.code));
+    return {result,events};
+  };
+  const safe=analyze(source);
+  assert.deepEqual(fields(safe.result.queries),new Set(["SELECT:Id","SELECT:Name","SELECT:Phone"]),JSON.stringify(safe.result));
+  assert.ok(safe.events.includes("SHARED_HELPER_EFFECT_RESOLVED"));
+  const unsafe=analyze(source.replace("public Boolean editable;","public Boolean editable;public Set<String> selected;"));
+  assert.deepEqual(unsafe.result.queries,[]);
+  assert.ok(unsafe.events.includes("HELPER_EFFECT_RETURN_ALIAS_UNPROVEN"));
+});
