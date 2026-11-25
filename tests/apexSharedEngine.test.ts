@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import {test} from "node:test";
 import {ApexAnalysisEngine,analyzeApexInvocations} from "../src/core/apex/ApexAnalysisEngine.js";
 import {ApexRepositoryMethodIndex} from "../src/core/apex/ApexRepositoryMethodIndex.js";
-import {evaluateApexExpression,textValue,unknown,listValue} from "../src/core/apex/ApexValueEvaluator.js";
+import {evaluateApexExpression,textValue,unknown,listValue,booleanValue,type ApexValue} from "../src/core/apex/ApexValueEvaluator.js";
+import {resolveSchemaSnapshot} from "../src/core/apex/ApexSchemaModel.js";
+import {traceApexDependencies} from "../src/core/apex/ApexBackwardDependencyEngine.js";
+import type {ApexObjectSchema} from "../src/core/metadata/ApexMetadataProvider.js";
 import {planCustomMetadataRequest,resolveCustomMetadataRows} from "../src/core/apex/ApexCustomMetadataQueries.js";
 import {extractDynamicSoqlQueries} from "../src/scanner/dynamicSoqlScanner.js";
 import type {ApexMetadataProvider,CustomMetadataFilter} from "../src/core/metadata/ApexMetadataProvider.js";
@@ -199,4 +202,68 @@ test("36-row mapping with 13 source mappings and 12 unique fields stays within n
   ].join("\n");
   const result=await analyzeFixture(code,inventory);
   verifyFields(result,{Account:["Id",...fields(9)],Contact:fields(12),Case:fields(14)});
+});
+
+
+const schemaFixture:Record<string,ApexObjectSchema>={
+  contact:{name:"Contact",fields:[
+    {name:"Id",type:"id",nameField:false},
+    {name:"Birthdate",type:"date",nameField:false,referenceTo:[],relationshipName:null},
+    {name:"AccountId",type:"reference",nameField:false,relationshipName:"Account",referenceTo:["Account"]},
+    {name:"OwnerId",type:"reference",nameField:false,relationshipName:"Owner",referenceTo:["User","Group"]},
+    {name:"Name",type:"string",nameField:true},
+    {name:"Incomplete__c"}
+  ]},
+  account:{name:"Account",fields:[{name:"Name",type:"string",nameField:true},{name:"Id",type:"id",nameField:false}]}
+};
+const schemaResolver=(method:string,args:ApexValue[])=>{
+  if(method!=="Schema.objectSchema"||args.some(a=>a.kind!=="text"||a.values.length!==1))return undefined;
+  const [object,field]=args.map(a=>a.kind==="text"?a.values[0]:"");
+  return resolveSchemaSnapshot({complete:true,source:"LIVE_ORG",value:schemaFixture[object.toLowerCase()]},object,field);
+};
+test("typed Schema field reads preserve enum equality, relationship names, singleton reference tokens and name fields",()=>{
+  const context={values:new Map<string,ApexValue>(),resolveCall:schemaResolver};
+  for(const expression of [
+    "Contact.Birthdate.getDescribe().getType() == Schema.DisplayType.DATE",
+    "Schema.SObjectType.Contact.fields.Birthdate.getDescribe().getType() == Schema.DisplayType.DATE",
+    "Contact.Name.getDescribe().isNameField()",
+    "Schema.getGlobalDescribe().get('Contact').getDescribe().fields.getMap().get('Name').getDescribe().isNameField()"
+  ])assert.deepEqual(evaluateApexExpression(expression,context),booleanValue(true),expression);
+  assert.deepEqual(evaluateApexExpression("Contact.AccountId.getDescribe().getRelationshipName()",context),textValue("Account"));
+  assert.deepEqual(evaluateApexExpression("Contact.AccountId.getDescribe().getReferenceTo()[0].getDescribe().getName()",context),textValue("Account"));
+  assert.deepEqual(evaluateApexExpression("Contact.Birthdate.getDescribe().getType() == Schema.DisplayType.DATETIME",context),booleanValue(false));
+  assert.equal(evaluateApexExpression("Contact.Birthdate.getDescribe().getType() == 'DATE'",context).kind,"unknown");
+});
+test("unavailable and polymorphic Schema metadata never invents facts or permissions",()=>{
+  const context={values:new Map<string,ApexValue>(),resolveCall:schemaResolver};
+  for(const expression of [
+    "Contact.Incomplete__c.getDescribe().isNameField()",
+    "Contact.Incomplete__c.getDescribe().getType()",
+    "Contact.OwnerId.getDescribe().getReferenceTo()[0].getDescribe().getName()",
+    "Contact.Missing__c.getDescribe().getType()",
+    "Contact.Name.getDescribe().isAccessible()",
+    "Contact.Name.getDescribe().getType() == 'STRING'"
+  ])assert.equal(evaluateApexExpression(expression,context).kind,"unknown",expression);
+  assert.deepEqual(evaluateApexExpression("Contact.Birthdate.getDescribe().getRelationshipName()",context),{kind:"null"});
+  assert.equal(evaluateApexExpression("Contact.Name.getDescribe().getType()",{...context,values:new Map([["Contact",unknown("runtime object")]])}).kind,"unknown");
+});
+test("AUE shares a case-insensitive Schema snapshot across independent non-SOQL forward and backward consumers",async()=>{
+  const source="public class Inspector {public static void run(){Schema.DescribeFieldResult field=Contact.AccountId.getDescribe();String rel=field.getRelationshipName();Schema.DisplayType typ=field.getType();Inspector.consume(rel,typ==Schema.DisplayType.REFERENCE);} }";
+  const filePath="Inspector.cls",index=new ApexRepositoryMethodIndex([{filePath,source}]);
+  let reads=0;
+  const metadata:ApexMetadataProvider={scopeKey:"fixture-schema",getObjectFieldNames:async()=>({complete:false,source:"LIVE_ORG"}),
+    getCustomMetadataRecords:async()=>({complete:false,source:"LIVE_ORG"}),
+    getObjectSchema:async object=>{reads++;return {complete:true,source:"LIVE_ORG",value:schemaFixture[object.toLowerCase()]};}};
+  const session=new ApexAnalysisEngine(index,metadata);
+  const result=await session.analyzeInvocations(source,filePath,name=>name==="Inspector.consume"?{method:name,argumentIndices:[0,1]}:undefined);
+  assert.deepEqual(result.captures.get(result.sites[0].offset)?.[0].arguments,[textValue("Account"),booleanValue(true)]);
+  const back=await session.analyze(filePath,ctx=>traceApexDependencies(source,filePath,{expression:"rel",offset:source.indexOf("Inspector.consume")},index,ctx.resolveExternal));
+  assert.deepEqual(back.candidates.map(c=>c.value),[textValue("Account")],JSON.stringify(back));
+  await session.analyze(filePath,ctx=>evaluateApexExpression("contact.Birthdate.getDescribe().getType()",{values:new Map(),resolveCall:ctx.resolveExternal}));
+  assert.equal(reads,1);
+});
+test("known metadata can select the appropriate field transformation in generic AUE flow",()=>{
+  const source="public class Inspector {public static void run(){Set<String> fields=new Set<String>{'Id'};Schema.DescribeFieldResult dfr=Contact.Birthdate.getDescribe();if(dfr.getType()==Schema.DisplayType.DATE){fields.add('FORMAT(Birthdate)');}else{fields.add('Birthdate');}Inspector.consume(String.join(fields,','));}}";
+  const result=analyzeApexInvocations(source,"Inspector.cls",name=>name==="Inspector.consume"?{method:name,argumentIndices:[0]}:undefined,schemaResolver);
+  assert.deepEqual(result.captures.get(result.sites[0].offset)?.map(c=>c.arguments?.[0]),[textValue("Id,FORMAT(Birthdate)")]);
 });

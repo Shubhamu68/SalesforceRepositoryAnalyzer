@@ -6,7 +6,7 @@ import {findApexTernary} from "./ApexConditionalInvocation.js";
 import { parseCustomMetadataQuery } from "./ApexCustomMetadataQueryModel.js";
 import {evaluateBoundedStringOperation,isBoundedStringOperation} from "./ApexBoundedStringOperations.js";
 import {readApexReadOperation} from "./ApexReadOperations.js";
-import {evaluateSchemaExpression,evaluateSchemaRead,type ApexSchemaValue} from "./ApexSchemaModel.js";
+import {evaluateSchemaExpression,evaluateSchemaRead,schemaReceiverEligible,type ApexSchemaValue} from "./ApexSchemaModel.js";
 
 /** Portable abstract Apex values: no Salesforce API calls and no eval(). */
 export type ApexValue =
@@ -214,7 +214,9 @@ export function evaluateApexExpression(
   const schemaContext={
     evaluate:(part:string)=>evaluateApexExpression(part,context,depth+1),
     resolveCall:context.resolveCall,
-    shadowed:(root:string)=>lexicalValue(context.values,root)!==undefined||!!context.schemaShadowed?.(root)
+    shadowed:(root:string)=>lexicalValue(context.values,root)!==undefined||!!context.schemaShadowed?.(root),
+    receiverEligible:(part:string)=>lexicalValue(context.values,part)?.kind==="schema"||
+      schemaReceiverEligible(part,context.argumentTypes?.([part])?.[0])
   };
   if(/^[A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)+$/.test(expr)){
     const schema=evaluateSchemaExpression(expr,schemaContext);if(schema!==undefined)return schema;

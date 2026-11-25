@@ -10,7 +10,7 @@ import {readApexReadOperation} from "./ApexReadOperations.js";
 import {evaluateApexReadOperation} from "./ApexValueEvaluator.js";
 import {applyApexStringCollectionMutation,apexIterationValues,mergeApexRuntimeMembers,proveApexAddOnlyIteration,type ApexRuntimeCollectionMembers} from "./ApexCollectionOperations.js";
 import {knownBoolean} from "./ApexScalarOperators.js";
-import {evaluateSchemaExpression} from "./ApexSchemaModel.js";
+import {evaluateSchemaExpression,schemaReceiverEligible} from "./ApexSchemaModel.js";
 import {reportApexDependency,type ApexDependencyObserver} from "./ApexDependencyDiagnostics.js";
 
 const clean=(s:string)=>stripApexComments(s).trim();
@@ -203,8 +203,8 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
         resolveCall:resolveExternal,
         shadowed:root=>!!locals.get(root.toLowerCase())||symbolsForSchema.hasLocalBinding(frame.method,root,offset)||
           !!index?.hasSourceClass(root)||new RegExp("\\bclass\\s+"+root+"\\b","i").test(maskApexSource(frame.source)),
-        receiverEligible:part=>/^Schema\s*\.|\.SObjectType\b|\.getDescribe\s*\(|\.getReferenceTo\s*\(/i.test(part)||
-          /^schema\.(?:sobjecttype|sobjectfield|describesobjectresult|describefieldresult|displaytype)$/i.test(symbolsForSchema.lookup(frame.method,part,offset)??"")
+        receiverEligible:part=>locals.get(part.toLowerCase())?.value.kind==="schema"||
+          schemaReceiverEligible(part,symbolsForSchema.lookup(frame.method,part,offset))
       });
       if(schema!==undefined){
         note(frame,offset,schema.kind==="unknown"?"SCHEMA_READ_UNPROVEN":"SCHEMA_READ_RESOLVED");

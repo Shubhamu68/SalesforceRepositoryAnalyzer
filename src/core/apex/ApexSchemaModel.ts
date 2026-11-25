@@ -2,7 +2,6 @@ import type {ApexObjectSchema,ApexSchemaField,MetadataResult} from "../metadata/
 import type {ApexValue} from "./ApexValueEvaluator.js";
 import type {ApexCallResolver} from "./ApexTypeSystem.js";
 import {readApexMemberOperation} from "./ApexReadOperations.js";
-import {maskApexSource,matchingPair} from "./ApexSourceModel.js";
 
 /** Typed, immutable metadata facts. Do not encode a Schema token or enum as
  * an ordinary String; doing so invents Apex conversion/equality semantics. */
@@ -74,6 +73,11 @@ export function evaluateSchemaRead(receiver:ApexValue,operation:string,args:read
   return unknown("Unsupported Schema field operation.");
 }
 
+/** Recognize schema-specific source types and explicit token/chain syntax. */
+export function schemaReceiverEligible(expression:string,type?:string):boolean{
+  return /^Schema\s*\.|\.SObjectType\b|\.getDescribe\s*\(|\.getReferenceTo\s*\(/i.test(expression)||
+    /^schema\.(?:sobjecttype|sobjectfield|describesobjectresult|describefieldresult|displaytype)$/i.test(type??"");
+}
 const operations=new Set(["getdescribe","gettype","getname","getrelationshipname","getreferenceto","isnamefield","getsobjecttype","getsobjectfield","name"]);
 export const isSchemaReadOperation=(operation:string)=>operations.has(operation.toLowerCase());
 export interface SchemaExpressionContext {
@@ -107,12 +111,11 @@ export function evaluateSchemaExpression(expr:string,ctx:SchemaExpressionContext
     const token=lookup(direct[1],direct[2]);
     return evaluateSchemaRead(token,"getDescribe",[])??token;
   }
-  const global=/^Schema\s*\.\s*getGlobalDescribe\s*\(\s*\)\s*\.\s*get\s*\(([\s\S]*)\)$/i.exec(expr);
-  if(global&&matchingPair(maskApexSource(expr),expr.lastIndexOf("(",expr.indexOf(global[1])))===expr.length-1){
-    const object=one(ctx.evaluate(global[1]));
+  const fieldLookup=readApexMemberOperation(expr,n=>/^get$/i.test(n));
+  if(fieldLookup&&/^Schema\s*\.\s*getGlobalDescribe\s*\(\s*\)$/i.test(fieldLookup.receiver)){
+    const object=fieldLookup.args.length===1?one(ctx.evaluate(fieldLookup.args[0])):undefined;
     return allowed("Schema")&&object&&name.test(object)?lookup(object):unknown("Schema object name is not known.");
   }
-  const fieldLookup=readApexMemberOperation(expr,n=>/^get$/i.test(n));
   if(fieldLookup&&fieldLookup.args.length===1){
     const map=/^([\s\S]+)\.\s*fields\s*\.\s*getMap\s*\(\s*\)$/i.exec(fieldLookup.receiver);
     if(map){
