@@ -33,7 +33,7 @@ export function resolveSchemaSnapshot(result:MetadataResult<ApexObjectSchema>|un
   const details:ApexSchemaField={name:match.name,
     ...(typeof match.type==="string"?{type:match.type}:{}),
     ...(typeof match.relationshipName==="string"||match.relationshipName===null?{relationshipName:match.relationshipName}:{}),
-    ...(Array.isArray(match.referenceTo)&&match.referenceTo.every(v=>typeof v==="string"&&name.test(v))?{referenceTo:[...match.referenceTo]}:{}),
+    ...(Array.isArray(match.referenceTo)&&match.referenceTo.every((v:unknown)=>typeof v==="string"&&name.test(v))?{referenceTo:[...match.referenceTo]}:{}),
     ...(typeof match.nameField==="boolean"?{nameField:match.nameField}:{})};
   return {kind:"schema",schemaType:"fieldToken",objectApiName:snapshot.name,field:details};
 }
