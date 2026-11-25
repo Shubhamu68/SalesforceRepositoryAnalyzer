@@ -366,7 +366,7 @@ async function writeSummaryWorkbook(
 
   summarySheet.addRow([]);
   summarySheet.mergeCells("A5:H5");
-  summarySheet.getCell("A5").value = "High = confirmed missing Read with enforced SOQL access; Low = advisory or org-verified Read. Mixed findings show the highest severity. Dynamic SOQL uses repository initializer snapshots; detected static writes and direct collection aliases invalidate those snapshots. Indirect effects may remain unresolved; reconstructed queries are repository-based, not runtime traces.";
+  summarySheet.getCell("A5").value = "High = confirmed missing Read with enforced SOQL access; Unable to verify = REVIEW, manual assessment required (also red); Low = advisory or org-verified Read. Mixed findings show the highest severity. Dynamic SOQL uses repository initializer snapshots; detected static writes and direct collection aliases invalidate those snapshots. Indirect effects may remain unresolved; reconstructed queries are repository-based, not runtime traces.";
   summarySheet.getCell("A5").font = { italic: true, color: { argb: "FF60748D" }, size: 10 };
   summarySheet.getCell("A5").alignment = { wrapText: true, vertical: "middle" };
   summarySheet.getRow(5).height = 32;
@@ -448,8 +448,7 @@ function appendSummaryFindingRows(sheet: ExcelJS.Worksheet, findings: ConciseFin
       vertical: "top",
     };
     row.getCell(5).font = { bold: true, color: {
-      argb: finding.criticality === "High" ? "FFB42332" :
-        finding.criticality === "Low" ? "FF167349" : "FF916514",
+      argb: finding.criticality === "Low" ? "FF167349" : "FFB42332",
     } };
     row.getCell(6).alignment = { wrapText: true, vertical: "top" };
     row.getCell(7).alignment = { wrapText: true, vertical: "top" };

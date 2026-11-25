@@ -121,3 +121,7 @@ Audit follow-up: consolidate identical Stack Trace lexer/offset utilities with s
 ### Diagnostic checkpoint after shared architecture validation
 
 Live 211108f: 674 variants / 5 partial / 2 aggregate / 1813 fields / 822 raw findings / 314 unique findings; 14 backward caller edges, 63.239s wall time. No additional live coverage from the recursive tracer. Next increment is instrumentation only: trace source candidate lifecycle and final SOQL acceptance for every unresolved site, preserving existing evidence and budgets. Inspect actual blockers before extending further. Run with SALESFORCE_SOQL_TRACE=1; share final BEGIN/END block plus performance counters and summary report. No claims of new coverage until tested.
+
+### Issue 1: conflicting explicit SOQL execution modes
+
+Live trace confirmed a structurally validated 20-reference candidate with `WITH SECURITY_ENFORCED` supplied by a caller and `AccessLevel.SYSTEM_MODE` at the Database.queryWithBinds invocation. User confirmed this should be REVIEW, not a fabricated permission denial or an assumed effective runtime mode. Report both explicit declarations for every observed validated conflict (direct, caller, framework, partial and backward evidence). Keep conflicting candidates excluded from permission assessment and preserve one site-level REVIEW (QUERY_MODE). Existing Excel Unable to verify severity text uses the same red as High; High-only output remains High-only. No execution semantics or Apex core changes. The business source is not committed.

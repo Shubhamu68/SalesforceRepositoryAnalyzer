@@ -52,18 +52,18 @@ function unresolvedDynamicFindings(sites: readonly UnresolvedDynamicSoql[]): Soq
     severity: "REVIEW",
     criticality: "Unable to verify",
     verificationSource: "UNVERIFIED",
-    findingType: "PARSER",
+    findingType: site.securityModeConflict ? "QUERY_MODE" : "PARSER",
     filePath: site.filePath,
     lineNumber: site.lineNumber,
     ...(site.siteId ? { queryVariantId: site.siteId } : {}),
     object: "Dynamic SOQL",
-    field: `(Unresolved query: ${path.basename(site.filePath)}:${site.lineNumber}${site.siteId ? "@" + site.siteId.split("@").at(-1) : ""})`,
-    query: "(dynamic SOQL could not be reconstructed)",
+    field: `(${site.securityModeConflict ? "Security mode conflict" : "Unresolved query"}: ${path.basename(site.filePath)}:${site.lineNumber}${site.siteId ? "@" + site.siteId.split("@").at(-1) : ""})`,
+    query: site.securityModeConflict ? "(dynamic SOQL security-mode conflict)" : "(dynamic SOQL could not be reconstructed)",
     withUserMode: false,
     declaredMode: "UNSPECIFIED",
     effectiveMode: "UNKNOWN",
-    runtimeImpact: "Not assessed",
-    reason: site.aggregatedPermissionInventories ? `Aggregated permission structure available (${site.aggregatedPermissionInventories} parser-only inventory/inventories). ${site.reason} OLS/FLS analysis covers established references; exhaustive structure and runtime execution are not certified.` : site.knownVariants || site.partialStructureVariants || site.conditionalFrameworkVariants ? `Dynamic SOQL execution coverage is incomplete: ${site.reason} OLS/FLS findings apply only to the proven caller variants, conditional framework scenarios or proven partial structures; unproven paths were not assessed.` : `Dynamic SOQL could not be parsed and verified because ${site.reason} OLS/FLS analysis was not performed for this query.`,
+    runtimeImpact: site.securityModeConflict ? "Undetermined" : "Not assessed",
+    reason: site.securityModeConflict ? site.reason + (site.knownVariants || site.partialStructureVariants || site.conditionalFrameworkVariants ? " OLS/FLS findings apply only to separately accepted variants." : " OLS/FLS analysis was not performed for this query site.") : site.aggregatedPermissionInventories ? `Aggregated permission structure available (${site.aggregatedPermissionInventories} parser-only inventory/inventories). ${site.reason} OLS/FLS analysis covers established references; exhaustive structure and runtime execution are not certified.` : site.knownVariants || site.partialStructureVariants || site.conditionalFrameworkVariants ? `Dynamic SOQL execution coverage is incomplete: ${site.reason} OLS/FLS findings apply only to the proven caller variants, conditional framework scenarios or proven partial structures; unproven paths were not assessed.` : `Dynamic SOQL could not be parsed and verified because ${site.reason} OLS/FLS analysis was not performed for this query.`,
   }));
 }
 

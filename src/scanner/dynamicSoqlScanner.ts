@@ -11,7 +11,7 @@ import {backtrackSoqlPermissionShapes} from "../analyzer/soqlBackwardEvidence.js
 import {aggregatePermissionShapes,simplePermissionShape,type SoqlPermissionShape} from "../analyzer/soqlPermissionAggregation.js";
 import {describePartialApexText,type ApexValue} from "../core/apex/ApexValueEvaluator.js";
 import {describeMalformedSoql} from "../analyzer/soqlReconstructionDiagnostics.js";
-import { classifySoqlMode } from "../analyzer/soqlExecutionMode.js";
+import { classifySoqlMode, type DeclaredSoqlMode } from "../analyzer/soqlExecutionMode.js";
 import { extractSoqlExpressionFields } from "../analyzer/soqlExpressionInventory.js";
 import { parseNestedSoql } from "../analyzer/nestedSoqlScopes.js";
 import type { SoqlQuery } from "../models/SoqlQuery.js";
@@ -23,6 +23,8 @@ export interface UnresolvedDynamicSoql {
   /** Immutable call-site identity, even if two sites share a source line. */
   siteId?: string;
   reason: string;
+  /** Structurally validated source candidates with conflicting explicit declarations. */
+  securityModeConflict?: boolean;
   /** Known variants coexist with this unresolved execution site. */
   knownVariants?: number;
   partialStructureVariants?:number;
@@ -52,7 +54,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
   const unresolved:UnresolvedDynamicSoql[]=[];
   for(const site of flow.sites){
     const siteId=filePath+"@"+site.offset;
-    const fail=(reason:string,partialValues:readonly ApexValue[]=[])=>{
+    const fail=(reason:string,partialValues:readonly ApexValue[]=[],initialConflict?:DeclaredSoqlMode)=>{
       let explanation=reason;
       const trace=traceEnabled?newSoqlTraceReport(filePath,site.line,site.offset,site.argument):undefined;
       const observe=trace?collectSoqlTrace(trace):undefined;
@@ -63,6 +65,12 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
       const variants=new Set<string>();
       const owner=repositoryIndex?.methodAt(filePath,site.offset);
       const mode=explicitMode(site);
+      const conflicts=new Set<DeclaredSoqlMode>();
+      const hasModeConflict=(declared:DeclaredSoqlMode):boolean=>{
+        if(!mode||declared==="UNSPECIFIED"||declared===mode)return false;
+        conflicts.add(declared);note("ACCESS_MODE_CONFLICT");return true;
+      };
+      if(initialConflict)hasModeConflict(initialConflict);
       if(owner && (owner.arity>0||(owner.visibility==="private"&&!owner.isStatic)) && (/dependency|runtime|symbol|join|parameter|helper|unsupported/i.test(reason)||
         (owner.visibility==="private"&&/budget/i.test(reason)))){
         const evidence=repositoryIndex!.inspectCallers(owner.className,owner.methodName,owner.arity);
@@ -88,8 +96,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
               const parsed=parseNestedSoql(text,site.line);
               const fields=extractSoqlExpressionFields(text);
               const declared=classifySoqlMode(text);
-              if(!parsed||!fields.parsed||fields.limitations.length||
-                (mode&&declared!=="UNSPECIFIED"&&declared!==mode))continue;
+              if(!parsed||!fields.parsed||fields.limitations.length||hasModeConflict(declared))continue;
               variants.add(text);
               queries.push({filePath,lineNumber:site.line,query:text,object:parsed.fromName,
                 fields:parsed.fields,subqueries:parsed.subqueries,
@@ -107,7 +114,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
               const text=value.trim();
               if(!/^SELECT\b/i.test(text)||variants.has(text)||variants.size>=MAX_VARIANTS)continue;
               const parsed=parseNestedSoql(text,site.line),fields=extractSoqlExpressionFields(text),declared=classifySoqlMode(text);
-              if(!parsed||!fields.parsed||fields.limitations.length||(mode&&declared!=="UNSPECIFIED"&&declared!==mode))continue;
+              if(!parsed||!fields.parsed||fields.limitations.length||hasModeConflict(declared))continue;
               variants.add(text);conditionalFrameworkVariants++;
               queries.push({filePath,lineNumber:site.line,query:text,object:parsed.fromName,fields:parsed.fields,subqueries:parsed.subqueries,
                 withUserMode:declared==="USER_MODE"||mode==="USER_MODE",securityMode:declared,dynamicOrigin:true,querySiteId:siteId,
@@ -138,8 +145,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
         const parsed=parseNestedSoql(text,site.line);
         const fields=extractSoqlExpressionFields(text);
         const declared=classifySoqlMode(text);
-        if(!parsed||!fields.parsed||fields.limitations.length||
-          (mode&&declared!=="UNSPECIFIED"&&declared!==mode))continue;
+        if(!parsed||!fields.parsed||fields.limitations.length||hasModeConflict(declared))continue;
         variants.add(text);partialStructureVariants++;
         queries.push({filePath,lineNumber:site.line,query:text,object:parsed.fromName,
           fields:parsed.fields,subqueries:parsed.subqueries,securityMode:declared,
@@ -172,8 +178,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
         if(traced?.bounded)explanation+=" Backward dependency trace reached its work bound.";
         const shapes=[...local,...callers,...(traced?.queries??[])].flatMap(text=>{
           const shape=simplePermissionShape(text,site.line,trace?(code)=>note(code):undefined);
-          if(shape&&mode&&shape.mode!=="UNSPECIFIED"&&shape.mode!==mode)note("ACCESS_MODE_CONFLICT");
-          return shape&&(!mode||shape.mode==="UNSPECIFIED"||shape.mode===mode)?[shape]:[];
+          return shape&&!hasModeConflict(shape.mode)?[shape]:[];
         });
         // A whole validated group is kept if it introduces a new reference.
         // Avoid stripping SELECT scaffolding or changing clause usage.
@@ -210,7 +215,14 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
       }
       if(partialStructureVariants)explanation+=" Proven partial structural variants: "+partialStructureVariants+
         ". Typed value slots use synthetic parser placeholders, not actual runtime values; only those proven field and object references are submitted for access analysis. Complete execution coverage remains unverified.";
-      unresolved.push({filePath,lineNumber:site.line,siteId,reason:explanation,...(knownVariants?{knownVariants}:{}),
+      if(conflicts.size&&mode){
+        const declarations=[...conflicts].sort().map(m=>"WITH "+m).join(" / ");
+        explanation="REVIEW — Security-mode conflict: a structurally validated query candidate contains "+declarations+
+          ", but Database."+site.method+" specifies AccessLevel."+mode+
+          ". Verify the intended Salesforce execution mode and align the declarations. Runtime enforcement is not established; conflicting candidates were excluded from OLS/FLS analysis. "+
+          explanation;
+      }
+      unresolved.push({filePath,lineNumber:site.line,siteId,reason:explanation,...(conflicts.size?{securityModeConflict:true}:{}),...(knownVariants?{knownVariants}:{}),
         ...(partialStructureVariants?{partialStructureVariants}:{}),...(conditionalFrameworkVariants?{conditionalFrameworkVariants}:{}),...(aggregatedPermissionInventories?{aggregatedPermissionInventories}:{}),...(trace?{trace}:{})});
     };
     const failure=flow.failures.get(site.offset);
@@ -223,6 +235,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
     if(mode===null){fail("Dynamic Database AccessLevel expression could not be established.");continue;}
     const strings:string[]=[];
     let reason:string|undefined;
+    let initialConflict:DeclaredSoqlMode|undefined;
     for(const capture of captures){
       if(capture.query.kind!=="text"){
         reason=capture.query.kind==="unknown"?capture.query.reason+describePartialApexText(capture.query):"Database query argument was not a String.";
@@ -254,6 +267,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
       const declared=classifySoqlMode(queryText);
       if(mode&&declared!=="UNSPECIFIED"&&declared!==mode){
         reason="Explicit Database AccessLevel conflicts with the query WITH clause.";
+        initialConflict=declared;
         break;
       }
       candidates.push({
@@ -267,7 +281,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
         ...(mode?{dynamicAccessLevel:mode}:{})
       });
     }
-    if(reason){fail(reason);continue;}
+    if(reason){fail(reason,[],initialConflict);continue;}
     queries.push(...candidates);
   }
   return {queries,unresolved};

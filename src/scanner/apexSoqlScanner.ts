@@ -108,7 +108,7 @@ function preserveDynamicFailureDiagnostics(
   const local=extractDynamicSoqlQueries(source,filePath,standaloneResolver);
   const localReasons=new Map(local.unresolved.map(finding=>[finding.siteId,finding.reason]));
   return {...analysis,unresolved:analysis.unresolved.map(finding=>{
-    if(!/Invocation is outside a supported method or execution path/i.test(finding.reason))
+    if(finding.securityModeConflict||!/Invocation is outside a supported method or execution path/i.test(finding.reason))
       return finding;
     const original=localReasons.get(finding.siteId);
     if(!original || /Invocation is outside a supported method or execution path/i.test(original))

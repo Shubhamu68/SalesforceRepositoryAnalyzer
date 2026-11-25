@@ -46,3 +46,27 @@ test('Excel summary has one sheet and 8 columns, retaining mixed-mode risk warni
     assert.deepEqual(await readdir(dir), [path.basename(paths.summaryReportPath)]);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+
+test('Review and High severity cells use identical red text without changing classification', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'sf-review-excel-'));
+  try {
+    const findings: SoqlSecurityFinding[] = [
+      { ...shared, filePath: '/repo/High.cls', lineNumber: 10 },
+      { ...shared, object: 'Dynamic SOQL', field: '(Security mode conflict: Review.cls:20)', filePath: '/repo/Review.cls', lineNumber: 20,
+        severity: 'REVIEW', criticality: 'Unable to verify', verificationSource: 'UNVERIFIED', findingType: 'QUERY_MODE',
+        reason: 'REVIEW — WITH SECURITY_ENFORCED conflicts with AccessLevel.SYSTEM_MODE.', effectiveMode: 'UNKNOWN', runtimeImpact: 'Undetermined' },
+      { ...shared, object: 'Contact', filePath: '/repo/Low.cls', lineNumber: 30, severity: 'INFO', criticality: 'Low' },
+    ];
+    const paths = await writeSoqlReport(dir, 'Test', 2, findings);
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.readFile(paths.summaryReportPath);
+    const sheet = workbook.getWorksheet('Summary')!;
+    assert.equal(sheet.getCell('E7').value,'High');
+    assert.equal(sheet.getCell('E8').value,'Unable to verify');
+    assert.equal(sheet.getCell('E7').font.color?.argb,'FFB42332');
+    assert.equal(sheet.getCell('E8').font.color?.argb,sheet.getCell('E7').font.color?.argb);
+    assert.match(String(sheet.getCell('F8').value),/WITH SECURITY_ENFORCED.*AccessLevel\.SYSTEM_MODE/);
+    assert.equal(sheet.getCell('E9').font.color?.argb,'FF167349');
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
