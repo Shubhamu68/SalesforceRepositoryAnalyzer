@@ -470,3 +470,14 @@ Shared core changes (no business-specific execution rules):
 - Synthetic regression fixtures mirror the source patterns and exercise non-SOQL invocation selectors. The supplied business classes are not committed.
 
 The Field Set SOAP-first patch has passed its prior CI. Final combined CI and live report comparison are required. Do not interpret a changed budget diagnostic as a fully resolved query; unknown runtime SELECT/object/filter values must still remain REVIEW. The caller of the SELECT-fragment method and actual wrapper type are needed to investigate the lost variant and date serialization precisely. Batch 3 broader language coverage and Stage 4 remain deferred.
+
+
+## Caller-source follow-up and remaining private helper budget
+
+Live baseline after source-backed refinements: 60.074 s total, 20.884 s repository scan, 595 analyzed queries, 51 unresolved sites, one remaining execution-budget failure. Eight SOAP Field Set reads succeeded, no Tooling fallback or queryAll failures, 291 queryAll invocations. Permission finding inventory was unchanged.
+
+Review of the additional caller source revealed two distinct issues: the alternative `Schema.SObjectType.<Object>.fieldSets.getMap().get(...).getFields()` expression was not recognized by the shared evaluator, and the SELECT accumulator is a mutable static String appended to within a separate Field Set iterator helper. The older declaration-only snapshot is not proof of its complete value. The alternative Field Set syntax is now supported through the same existing authoritative metadata resolver. No special-case business class, field set, or object name was introduced.
+
+The remaining private helper budget failure occurs after the target Database invocation. Invocation analysis now uses the actual non-loop target's lexical prefix when entering its owning method through a private caller fallback, rather than charging its post-target return computation to the invocation budget. Target-bearing local helpers bypass the ordinary return-summary cache. Ordinary full helper-return summaries and loop-carried targets retain their existing execution requirements.
+
+Cross-method transfer of mutable static scalar state and proof of a fresh transaction entry remain open. Do not restore declaration-only snapshots to claim a complete query or treat Field Set retrieval alone as complete caller resolution. Regression fixtures exercise both fixes without committing supplied business classes. Final CI and live comparison are required before claiming the last budget issue or lost variant resolved.
