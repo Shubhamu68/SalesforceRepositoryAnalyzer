@@ -4,6 +4,7 @@ import {
   stat,
 } from "node:fs/promises";
 import path from "node:path";
+import { isExcludedRepositoryDirectory } from "./repositoryDiscoveryPolicy.js";
 import {setImmediate as yieldToEventLoop} from "node:timers/promises";
 import { classifySoqlMode } from "../analyzer/soqlExecutionMode.js";
 import { parseNestedSoql, maskSoql } from "../analyzer/nestedSoqlScopes.js";
@@ -19,8 +20,8 @@ import { recordSoqlCount, timeSoqlPhase, timeSoqlSync } from "../services/SoqlPe
 
  
 /**
- * Preserve the original repository-wide semantics (including class exclusion
- * and source ordering) while avoiding repeated Apex parsing across personas.
+ * Preserve repository-wide application-source discovery, test exclusion
+ * and source ordering while avoiding repeated Apex parsing across personas.
  * Every call stats every discovered class, so changed, deleted and newly added
  * files invalidate the cached per-file parse without a stale global TTL.
  */
@@ -227,9 +228,10 @@ async function findApexClasses(repositoryPath: string): Promise<string[]> {
     }));
     for (const { directoryPath, entries } of listed) {
       for (const entry of entries) {
+        if (entry.isSymbolicLink()) continue;
         const fullPath = path.join(directoryPath, entry.name);
         if (entry.isDirectory()) {
-          directories.push(fullPath);
+          if (!isExcludedRepositoryDirectory(entry.name)) directories.push(fullPath);
         } else if (entry.isFile() && entry.name.toLowerCase().endsWith(".cls") &&
                    !entry.name.toLowerCase().includes("test")) {
           results.push(fullPath);

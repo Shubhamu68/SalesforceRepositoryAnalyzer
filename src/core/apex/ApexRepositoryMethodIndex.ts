@@ -749,9 +749,11 @@ export class ApexRepositoryMethodIndex {
       reject(reason);
       return {...empty,diagnostics:[...diagnostics]};
     };
-    if(cls.parent||cls.name.toLowerCase()!==owner.className.toLowerCase()||this.classes.has("database"))return rejected("rejected_class");
+    if(cls.parent)return rejected("rejected_class_inheritance");
+    if(cls.name.toLowerCase()!==owner.className.toLowerCase())return rejected("rejected_class_identity");
+    if(this.classes.has("database"))return rejected("rejected_platform_class_shadow");
     const symbols=apexSymbols(owner.source,owner.methods);
-    if(symbols.ownerAt(target.start)?.toLowerCase()!==owner.className.toLowerCase())return rejected("rejected_class");
+    if(symbols.ownerAt(target.start)?.toLowerCase()!==owner.className.toLowerCase())return rejected("rejected_class_lexical_owner");
     const frameworkEntry=(m:IndexedApexMethod,name:string,arity:number)=>!m.isStatic&&
       (m.visibility==="public"||m.visibility==="global")&&m.name.toLowerCase()===name&&m.parameters.length===arity&&
       canonicalApexType(m.parameterTypes?.[0])==="database.batchablecontext"&&symbols.sameOwner(target,m);

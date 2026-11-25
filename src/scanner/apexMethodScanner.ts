@@ -1,5 +1,6 @@
 import path from "node:path";
 import { readdir, readFile } from "node:fs/promises";
+import { isExcludedRepositoryDirectory } from "./repositoryDiscoveryPolicy.js";
 import { extractSoqlQueries } from "./apexSoqlScanner.js";
 import type { SoqlQuery } from "../models/SoqlQuery.js";
 import type { ApexStackFrame, ReachableMethod } from "../models/StackTraceImpact.js";
@@ -19,10 +20,6 @@ export interface ApexMethodIndex {
   classes: Map<string, ApexMethod[]>;
   files: string[];
 }
-
-const IGNORED_DIRECTORIES = new Set([
-  ".git", ".sfdx", ".sf", "node_modules", "dist", "build", ".next", "coverage",
-]);
 
 const RESERVED = new Set([
   "if", "else", "for", "while", "do", "switch", "catch", "try", "return",
@@ -178,7 +175,7 @@ export async function createApexMethodIndex(repositoryPath: string): Promise<Ape
     for (const entry of entries) {
       if (entry.isSymbolicLink()) continue;
       const full = path.join(dir, entry.name);
-      if (entry.isDirectory() && !IGNORED_DIRECTORIES.has(entry.name.toLowerCase())) await walk(full);
+      if (entry.isDirectory() && !isExcludedRepositoryDirectory(entry.name)) await walk(full);
       else if (entry.isFile() && entry.name.toLowerCase().endsWith(".cls")) files.push(full);
     }
   }
