@@ -97,9 +97,13 @@ export function resolveCustomMetadataRows(request:CustomMetadataRequest,found:Cu
     if(!included)continue;
     const values:Array<[string,ApexValue]>=[];
     for(const field of request.query.fields){
-      const item=scalar(read(field));
+      // A singleton configuration row may contain optional null fields or
+      // text templates, not only field-path identifiers. Consumers must
+      // prove their use before treating those values as query structure.
+      const actual=read(field);
+      const item:ApexValue=request.query.singletonLimit&&actual===null?{kind:"null"}:scalar(actual);
       if(item.kind==="unknown")return unknown("Custom Metadata "+request.type+" selected field "+field+" is null or unsupported.");
-      if(/(?:^|_)Field__c$/i.test(field)){
+      if(!request.query.singletonLimit&&/(?:^|_)Field__c$/i.test(field)){
         const value=single(item);
         if(!value||!/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/.test(value))
           return unknown("Custom Metadata "+request.type+" field path "+field+" is invalid.");
@@ -107,6 +111,8 @@ export function resolveCustomMetadataRows(request:CustomMetadataRequest,found:Cu
       values.push([field,item]);
     }
     matching.push(values);
+    if(request.query.singletonLimit&&matching.length>1)
+      return unknown("Custom Metadata LIMIT 1 has multiple matching rows without proven ordering.");
     if(matching.length>MAX_ROWS)return unknown("Custom Metadata "+request.type+" exceeds the bounded matching row limit.");
   }
   // No ORDER BY is accepted; deterministic order for field inventory.
