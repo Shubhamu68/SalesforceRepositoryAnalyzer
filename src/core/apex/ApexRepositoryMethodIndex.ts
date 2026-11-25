@@ -213,7 +213,7 @@ export class ApexRepositoryMethodIndex {
     return owner?.source===source?owner.methods:undefined;
   }
 
-  constructInstance(filePath:string,name:string,args:ApexValue[],resolveExternal?: ApexCallResolver,types?:ApexArgumentTypes):ApexValue|undefined{
+  constructInstance(filePath:string,name:string,args:ApexValue[],resolveExternal?: ApexCallResolver,types?:ApexArgumentTypes,normalScenario=false):ApexValue|undefined{
     const resolver:ApexCallResolver=(method,inputs,hints)=>{
       if(method==="Apex.constructorFactory"&&inputs[0]?.kind==="text"&&inputs[0].values.length===1){
         const qualified=inputs[0].values[0];
@@ -226,7 +226,7 @@ export class ApexRepositoryMethodIndex {
       }
       return resolveExternal?.(method,inputs,hints);
     };
-    return this.instances.construct(name,args,filePath,resolver,types);
+    return this.instances.construct(name,args,filePath,resolver,types,normalScenario);
   }
 
   /** Source-backed scalar initializers; unresolved/mutable values fail closed. */
@@ -577,7 +577,7 @@ export class ApexRepositoryMethodIndex {
       // submission. Public mutable fields may differ at runtime.
       for(const signature of this.instances.constructorSignatures(owner.className)){
         const args=signature.parameters.map((name,i)=>runtimeParameter(name,signature.parameterTypes[i],"Conditional constructor input: "+name));
-        const value=this.constructInstance(owner.filePath,owner.className,args,resolveExternal,signature.parameterTypes);
+        const value=this.constructInstance(owner.filePath,owner.className,args,resolveExternal,signature.parameterTypes,true);
         if(value?.kind==="instance")candidates.push({value,hypothetical:true});
       }
     }
@@ -601,7 +601,10 @@ export class ApexRepositoryMethodIndex {
         }});
       for(const args of engine.evaluateArgumentsAt(method,offset,expressions)){
         if(args.some(v=>v.kind==="unknown")){
-          if(!conditional&&partialArguments.size<32&&args.some(v=>v.kind==="unknown"&&!!v.fragments))partialArguments.set(argumentIdentity(args),args);
+          if(args.some(v=>v.kind==="unknown"&&!!v.fragments)){
+            const destination=conditional?conditionalArguments:partialArguments;
+            if(destination.size<32)destination.set(argumentIdentity(args),args);
+          }
           continue;
         }
         (conditional?conditionalArguments:argumentsByValue).set(argumentIdentity(args),args);
