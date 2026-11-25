@@ -112,3 +112,33 @@ test("selected invocation frontier does not include post-target branches",()=>{
   assert.equal(result.exceeded,false);
   assert.deepEqual(result.captures.get(result.sites[0].offset)?.map(v=>v.arguments).sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b))),[[textValue("Id")],[textValue("Name")]]);
 });
+
+
+test("Schema.SObjectType Field Set chains resolve ordered live metadata through generic selectors",async()=>{
+  const source="public class Builder { public static void run(){List<Schema.FieldSetMember> members=Schema.SObjectType.Account.fieldSets.getMap().get('Export_Fields').getFields(); List<String> fields=new List<String>(); for(Schema.FieldSetMember member:members){fields.add(member.getFieldPath());} Inspector.inspect(String.join(fields,','));} }";
+  const index=new ApexRepositoryMethodIndex([{filePath:"Builder.cls",source}]);
+  const reads:string[]=[];
+  const engine=new ApexAnalysisEngine(index,{
+    scopeKey:"fixture-fieldset",getObjectFieldNames:async()=>({complete:false,source:"LIVE_ORG"}),
+    getCustomMetadataRecords:async()=>({complete:false,source:"LIVE_ORG"}),
+    getFieldSetFields:async(object,name)=>{reads.push(object+"."+name);return {complete:true,source:"LIVE_ORG",value:["Name","Owner.Name"]};}
+  });
+  const result=await engine.analyzeInvocations(source,"Builder.cls",name=>name==="Inspector.inspect"?{method:name,argumentIndices:[0]}:undefined);
+  assert.deepEqual(reads,["Account.Export_Fields"]);
+  assert.deepEqual(result.captures.get(result.sites[0].offset)?.map(v=>v.arguments),[[textValue("Name,Owner.Name")]]);
+  const value=evaluateApexExpression("Schema.SObjectType.Account.fieldSets.getMap().get('Export_Fields')",{values:new Map()});
+  assert.deepEqual(value,{kind:"fieldSet",objectApiName:"Account",developerName:"Export_Fields"});
+  assert.equal(evaluateApexExpression("Schema.SObjectType.Account.fieldSets.getMap().get(runtimeName).getFields()",{values:new Map()}).kind,"unknown");
+});
+
+test("private helper probe does not exhaust the budget on work following the selected invocation",()=>{
+  const source="public class Builder { public static void entry(Boolean a,Boolean b,Boolean c){run('SELECT Id FROM Account',a,b,c);} private static String run(String query,Boolean a,Boolean b,Boolean c){Database.query(query);String x='';String y='';String z='';if(a){x='Name';}if(b){y='Email';}if(c){z='Phone';} External.inspect(x,y,z);return x+y+z;} }";
+  const engine=new ApexDataFlowEngine(source,{maxPaths:2});
+  const result=engine.analyze();
+  assert.equal(result.exceeded,false,JSON.stringify([...result.failures]));
+  assert.deepEqual(result.captures.get(engine.sites[0].offset)?.map(v=>v.query),[textValue("SELECT Id FROM Account")]);
+  // A separate return-summary analysis must still execute the continuation.
+  const method=indexApexMethods(source).find(m=>m.name==="run")!;
+  const summary=new ApexDataFlowEngine(source).summarizeMethodReturn(method,[textValue("SELECT Id FROM Account"),{kind:"text",values:["true"],scalarType:"boolean"},{kind:"text",values:["false"],scalarType:"boolean"},{kind:"text",values:["true"],scalarType:"boolean"}]);
+  assert.deepEqual(summary,textValue("NamePhone"));
+});
