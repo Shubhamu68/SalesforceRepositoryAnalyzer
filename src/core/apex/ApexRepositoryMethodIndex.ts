@@ -78,10 +78,7 @@ export function selectApexCallerSeeds(seeds:readonly ApexValue[][],parameters:re
     // Unknown provenance text is not a useful diversity signal. This only
     // groups candidates for selection; original values remain untouched.
     const group=argumentIdentity(projection.map(value=>value.kind==="unknown"
-      ?value.fragments?.some(f=>f.kind==="literal"&&f.text.length>0)
-        ?{...value,reason:"Partially proven projected argument."}
-        :unknown("Unproven projected argument.")
-      :value));
+      ?unknown("Unproven projected argument."):value));
     return {seed,order,group,known:projection.filter(v=>v.kind!=="unknown").length};
   }).sort((a,b)=>b.known-a.known||a.order-b.order);
   const groups=new Map<string,typeof ranked>();
@@ -100,6 +97,17 @@ export function selectApexCallerSeeds(seeds:readonly ApexValue[][],parameters:re
     }
     if(!added)break;
   }
+  return selected;
+}
+/** Preserve the established ranking and use only spare invocation seed slots
+ * for fragment-only evidence. Never normalize away the actual argument values
+ * or widen the caller budget to accommodate the supplementary category. */
+export function selectApexInvocationSeeds(seeds:readonly ApexValue[][],parameters:readonly string[],
+  relevant:ReadonlySet<string>,limit:number):ApexValue[][]{
+  const established=seeds.filter(seed=>seed.some(v=>v.kind!=="unknown"));
+  const fragmentOnly=seeds.filter(seed=>seed.every(v=>v.kind==="unknown"));
+  const selected=selectApexCallerSeeds(established,parameters,relevant,limit);
+  selected.push(...selectApexCallerSeeds(fragmentOnly,parameters,relevant,limit-selected.length));
   return selected;
 }
 const MAX_METHOD_DEPTH = 6;
@@ -889,12 +897,7 @@ export class ApexRepositoryMethodIndex {
     const maxSeeds=8;
     const seeds=[...new Map([...contexts.known,...contexts.partial].map(seed=>[argumentIdentity(seed),seed])).values()];
     const relevant=invocationRelevantIdentifiers(method.body,offset,expressions.join(" "));
-    // Preserve the previous sampling priority: fragment-only vectors use
-    // remaining capacity, never displace already-supported caller seeds.
-    const established=seeds.filter(seed=>seed.some(v=>v.kind!=="unknown"));
-    const fragmentOnly=seeds.filter(seed=>seed.every(v=>v.kind==="unknown"));
-    const selected=selectApexCallerSeeds(established,method.parameters,relevant,maxSeeds);
-    selected.push(...selectApexCallerSeeds(fragmentOnly,method.parameters,relevant,maxSeeds-selected.length));
+    const selected=selectApexInvocationSeeds(seeds,method.parameters,relevant,maxSeeds);
     countApex("caller.candidate_seeds",seeds.length);
     countApex("caller.selected_seeds",selected.length);
     let bounded=contexts.bounded||seeds.length>selected.length;

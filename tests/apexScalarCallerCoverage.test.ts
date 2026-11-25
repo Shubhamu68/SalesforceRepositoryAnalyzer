@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import {test} from "node:test";
 import {evaluateApexExpression,textValue,booleanValue,unknown,runtimeParameter,describePartialApexText} from "../src/core/apex/ApexValueEvaluator.js";
-import {ApexRepositoryMethodIndex} from "../src/core/apex/ApexRepositoryMethodIndex.js";
+import {ApexRepositoryMethodIndex,selectApexCallerSeeds,selectApexInvocationSeeds} from "../src/core/apex/ApexRepositoryMethodIndex.js";
 import {extractDynamicSoqlQueries} from "../src/scanner/dynamicSoqlScanner.js";
 
 test("typed null differs from string null, empty string and runtime unknown",()=>{
@@ -142,4 +142,37 @@ test("mixed-case private callers cannot silently disappear from exhaustive closu
   assert.equal(result.unresolved.length,1,JSON.stringify(result));
   assert.ok(!result.queries.some(q=>q.coverage===undefined),JSON.stringify(result));
   assert.ok(result.queries.some(q=>q.query==="SELECT Name FROM Account"&&q.coverage==="KNOWN_CALLER_CONTEXT"),JSON.stringify(result));
+});
+
+test("bounded caller ranking preserves legacy projected groups despite distinct unknown fragments",()=>{
+  const fragment=(i:number)=>evaluateApexExpression("'Filter "+i+" '+runtime",{
+    values:new Map([["runtime",runtimeParameter("runtime","String","external filter")]])
+  });
+  const established=[
+    ...Array.from({length:8},(_,i)=>[textValue("Account"),fragment(i)]),
+    [textValue("Contact"),fragment(8)],
+    [textValue("Lead"),fragment(9)]
+  ];
+  const parameters=["objectName","filter"],relevant=new Set(["objectname","filter"]);
+  // All Account filters remain unknown for ranking; distinct fragments must
+  // not create eight competing groups ahead of Contact and Lead.
+  const expected=[0,8,9,1,2,3,4,5].map(i=>established[i]);
+  assert.deepEqual(selectApexCallerSeeds(established,parameters,relevant,8),expected);
+  const supplemental=Array.from({length:4},(_,i)=>[fragment(i+10),unknown("external object")]);
+  assert.deepEqual(selectApexInvocationSeeds([...supplemental,...established],parameters,relevant,8),expected);
+  // Original vectors are retained, not replaced by ranking abstractions.
+  assert.equal(selectApexInvocationSeeds(established,parameters,relevant,8)[0],established[0]);
+});
+
+test("fragment-only evidence fills spare seed slots without changing established order or budget",()=>{
+  const first=[textValue("Account")],second=[textValue("Contact")];
+  const fragment=(n:number)=>[evaluateApexExpression("'SELECT Name FROM Account LIMIT '+size",{
+    values:new Map([["size",runtimeParameter("size","Integer","pagination "+n)]])
+  })];
+  const fragments=Array.from({length:9},(_,i)=>fragment(i));
+  const mixed=[fragments[0],first,...fragments.slice(1),second];
+  const selected=selectApexInvocationSeeds(mixed,["query"],new Set(["query"]),8);
+  assert.deepEqual(selected,[first,second,...fragments.slice(0,6)]);
+  assert.equal(selected.length,8);
+  assert.deepEqual(selectApexInvocationSeeds(mixed,["query"],new Set(["query"]),0),[]);
 });
