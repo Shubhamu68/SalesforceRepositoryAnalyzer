@@ -78,13 +78,21 @@ export class ApexSymbolTable{
     if(/^[-+]?\d+\.\d+$/.test(expr))return "decimal";
     if(/^[A-Za-z_]\w*$/.test(expr)||/^this\.[A-Za-z_]\w*$/i.test(expr))return this.lookup(method,expr,offset);
     const allocation=/^new\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*(?:\s*<[\w\s,.<>\[\]]+>)?(?:\s*\[\s*\])*)\s*[(\{]/i.exec(expr);
-    if(allocation)return canonicalApexType(allocation[1]);
+    if(allocation){
+      const open=allocation[0].length-1;
+      const delimiter=expr[open];
+      const close=matchingPair(maskApexSource(expr),open,delimiter,delimiter==="(" ? ")" : "}");
+      if(close===expr.length-1)return canonicalApexType(allocation[1]);
+    }
     if(expr.startsWith("(")){
       const close=matchingPair(maskApexSource(expr),0);
       if(close===expr.length-1)return this.expressionType(method,expr.slice(1,-1),offset,depth+1);
       if(close>0&&close<expr.length-1){
         const cast=canonicalApexType(expr.slice(1,close));
-        if(cast&&/^\s*(?:[A-Za-z_'(]|[-+]?\d)/.test(expr.slice(close+1)))return cast;
+        // A parenthesized variable followed by an arithmetic operator is
+        // not a cast. Require a recognized type or a type token not bound
+        // as a variable at this source offset.
+        if(cast&&!this.lookup(method,expr.slice(1,close).trim(),offset)&&/^\s*(?:[A-Za-z_'(]|\d)/.test(expr.slice(close+1)))return cast;
       }
     }
     const call=/^([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(([\s\S]*)\)$/.exec(expr);
