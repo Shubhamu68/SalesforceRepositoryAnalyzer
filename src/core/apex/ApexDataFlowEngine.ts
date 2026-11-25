@@ -1,4 +1,5 @@
 import {apexMapKey} from "./ApexValueEvaluator.js";
+import {applyApexStringCollectionMutation,apexIterationValues} from "./ApexCollectionOperations.js";
 import {collectApexReferences,isApexReference,referenceMember,replaceApexReferences} from "./ApexReferenceState.js";
 import {proveInstanceArgumentEffects} from "./ApexInstanceEffects.js";
 import {apexSymbols,type ApexSymbolTable} from "./ApexSymbolTable.js";
@@ -393,20 +394,7 @@ export class ApexDataFlowEngine {
       const args=expr.trim()?splitApexTopLevel(expr,",").map(item=>this.evaluate(item,state,depth)):[];
       const arg=args[0];
       if(existing.kind==="collection"){
-        const item=arg?asText(arg):undefined;
-        if(action==="clear"&&args.length===0)next=listValue([],existing.unique);
-        else if(action==="add"&&args.length===1&&item!==undefined)
-          next=listValue([...existing.items,item],existing.unique);
-        else if(action==="addall"&&args.length===1&&arg?.kind==="collection")
-          next=listValue([...existing.items,...arg.items],existing.unique);
-        else if(action==="remove"&&args.length===1&&existing.unique&&item!==undefined)
-          next=listValue(existing.items.filter(v=>v!==item),true);
-        else if(action==="remove"&&args.length===1&&!existing.unique&&arg?.kind==="number"&&
-          Number.isInteger(arg.value)&&arg.value>=0&&arg.value<existing.items.length)
-          next=listValue(existing.items.filter((_,i)=>i!==arg.value),false);
-        else if(action==="add"||action==="addall")
-          next=unknown("Collection "+operation+" argument "+expr+" is unknown: "+(arg?cause(arg):"missing argument"));
-        else next=unknown("Unsupported mutation "+operation+" may change the complete query field inventory.");
+        next=applyApexStringCollectionMutation(existing,operation,args,expr);
       }else if(existing.kind==="instanceList"){
         const matches=(v:ApexValue)=>v.kind==="instance"&&(v.className.toLowerCase()===existing.elementType.toLowerCase()||v.className.toLowerCase().endsWith("."+existing.elementType.toLowerCase()));
         if(action==="clear"&&args.length===0)next={...existing,items:[]};
@@ -730,20 +718,18 @@ export class ApexDataFlowEngine {
         }
         return {states,returns};
       }
-      if((iterable.kind==="collection"||iterable.kind==="records")&&
-         node.loopVariable&&iterable.items.length<=MAX_LOOP_ITEMS){
+      const iterationValues=apexIterationValues(iterable,MAX_LOOP_ITEMS);
+      if(iterationValues&&node.loopVariable){
         let states=[clone(state)], returns:ApexValue[]=[];
         let exits:State[]=[];
         const outerKeys=new Set(state.values.keys());
         const locals=declaredLoopLocals(node.body??[]);
-        for(const item of iterable.items){
+        for(const item of iterationValues){
           if(this.exceeded)break;
           states=states.map(s=>{
             if(s.stopped)return s;
             const child=clone(s);
-            child.values.set(node.loopVariable!,iterable.kind==="records"
-              ?{kind:"record",entries:item as Array<[string,ApexValue]>}
-              :textValue(item as string));
+            child.values.set(node.loopVariable!,item);
             return child;
           });
           const result=this.execute(node.body??[],states,depth);

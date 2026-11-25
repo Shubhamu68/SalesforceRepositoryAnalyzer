@@ -5,6 +5,7 @@ import {compareScalars,integerArithmetic,knownBoolean,splitScalarOperator} from 
 import {findApexTernary} from "./ApexConditionalInvocation.js";
 import { parseCustomMetadataQuery } from "./ApexCustomMetadataQueryModel.js";
 import {evaluateBoundedStringOperation,isBoundedStringOperation} from "./ApexBoundedStringOperations.js";
+import {readApexReadOperation} from "./ApexReadOperations.js";
 
 /** Portable abstract Apex values: no Salesforce API calls and no eval(). */
 export type ApexValue =
@@ -388,17 +389,17 @@ export function evaluateApexExpression(
     }
     return unknown("Indexed Apex value or row ordering is not proven.");
   }
-  // Evaluate the trailing operation of a chain using the existing expression
-  // evaluator for its receiver; only a fixed allowlist of exact operations.
-  const visible=maskApexSource(expr);
-  for(const match of visible.matchAll(/\.\s*([A-Za-z_]\w*)\s*\(/g)){
-    if(!isBoundedStringOperation(match[1]))continue;
-    const open=match.index!+match[0].length-1;
-    if(matchingPair(visible,open)!==visible.length-1)continue;
-    const receiver=evaluateApexExpression(expr.slice(0,match.index),context,depth+1);
-    const input=expr.slice(open+1,-1).trim();
-    const args=input?splitApexTopLevel(input,",").map(x=>evaluateApexExpression(x,context,depth+1)):[];
-    return evaluateBoundedStringOperation(receiver,match[1],args);
+  // Shared read-operation syntax; preserve simple helper dispatch.
+  const operation=readApexReadOperation(expr);
+  if(operation){
+    if(isBoundedStringOperation(operation.name)){
+      return evaluateBoundedStringOperation(evaluateApexExpression(operation.receiver,context,depth+1),operation.name,
+        operation.args.map(x=>evaluateApexExpression(x,context,depth+1)));
+    }
+    if(/\)$/.test(operation.receiver)){
+      return evaluateApexReadOperation(evaluateApexExpression(operation.receiver,context,depth+1),operation.name,
+        operation.args.map(x=>evaluateApexExpression(x,context,depth+1)));
+    }
   }
   const call=/^([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(([\s\S]*)\)$/s.exec(expr);
   if(call){
@@ -565,4 +566,14 @@ export function evaluateApexExpression(
     return context.resolveCall?.(name,args,context.argumentTypes?.(pieces))??unknown("Unsupported or external Apex method: "+name);
   }
   return unknown("Unsupported Apex expression: "+expr.slice(0,100));
+}
+
+
+/** Apply an existing built-in to already resolved values without inserting
+ * synthetic bindings in an execution frame or consulting external helpers. */
+export function evaluateApexReadOperation(receiver:ApexValue,name:string,args:readonly ApexValue[]):ApexValue{
+  if(isBoundedStringOperation(name))return evaluateBoundedStringOperation(receiver,name,args);
+  const values=new Map<string,ApexValue>([["receiver",receiver]]);
+  const names=args.map((value,i)=>{const key="arg"+i;values.set(key,value);return key;});
+  return evaluateApexExpression("receiver."+name+"("+names.join(",")+")",{values});
 }

@@ -46,9 +46,7 @@ export class ApexSymbolTable{
           if(decl)result.push({name:decl.name.toLowerCase(),type:decl.type,start:node.end,end,depth});
         }
         if(node.kind==="for"&&node.loopVariable){
-          const decl=parseApexDeclaration(maskApexSource(node.text??""));
-          // SourceNode.text retains the loop header on supported enhanced for.
-          if(decl&&decl.name.toLowerCase()===node.loopVariable.toLowerCase())result.push({name:decl.name.toLowerCase(),type:decl.type,start:node.body?.[0]?.start??node.start,end:node.end,depth:depth+1});
+          result.push({name:node.loopVariable.toLowerCase(),type:canonicalApexType(node.loopVariableType),start:node.body?.[0]?.start??node.start,end:node.end,depth:depth+1});
         }
         for(const children of [node.body,node.otherwise]){
           if(children?.length)visit(children,children.at(-1)!.end,depth+1);

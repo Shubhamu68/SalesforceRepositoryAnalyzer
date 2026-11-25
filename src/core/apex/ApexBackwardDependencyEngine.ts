@@ -4,6 +4,10 @@ import {parseApexDeclaration,type ApexCallResolver} from "./ApexTypeSystem.js";
 import {addApexValues,evaluateApexExpression,listValue,runtimeParameter,textValue,unknown,type ApexValue} from "./ApexValueEvaluator.js";
 import type {ApexRepositoryMethodIndex,ApexCallerSource} from "./ApexRepositoryMethodIndex.js";
 import {countApex} from "./ApexPerformance.js";
+import {readApexReadOperation} from "./ApexReadOperations.js";
+import {evaluateApexReadOperation} from "./ApexValueEvaluator.js";
+import {applyApexStringCollectionMutation,apexIterationValues} from "./ApexCollectionOperations.js";
+import {knownBoolean} from "./ApexScalarOperators.js";
 import {reportApexDependency,type ApexDependencyObserver} from "./ApexDependencyDiagnostics.js";
 
 const clean=(s:string)=>stripApexComments(s).trim();
@@ -59,16 +63,17 @@ class Bounded extends Error{}
 function frameIdentity(frame:Frame){return frame.filePath+"@"+frame.method.start;}
 /** Prefix of the selected lexical path only. No sibling branch statements
  * become unconditional definitions. Loops containing the use are deferred. */
-function prefixAt(nodes:readonly SourceNode[],offset:number):SourceNode[]|undefined{
+function prefixAt(nodes:readonly SourceNode[],offset:number,allowLoop?:(node:SourceNode)=>boolean):SourceNode[]|undefined{
   const prefix:SourceNode[]=[];
   for(const node of nodes){
     if(node.end<=offset){prefix.push(node);continue;}
-    if(node.start>offset)return prefix;
+    // At the exact entry of a node, its effects have not occurred.
+    if(node.start>=offset)return prefix;
     if(node.kind==="statement")return prefix;
-    if(node.kind==="if"||node.kind==="block"){
+    if(node.kind==="if"||node.kind==="block"||(node.kind==="for"&&allowLoop?.(node))){
       for(const child of [node.body??[],node.otherwise??[]]){
         if(child.some(n=>n.start<=offset&&offset<n.end)){
-          const prior=prefixAt(child,offset);return prior?[...prefix,...prior]:undefined;
+          const prior=prefixAt(child,offset,allowLoop);return prior?[...prefix,...prior]:undefined;
         }
       }
     }
@@ -100,6 +105,7 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
   const tick=()=>{if(++work>MAX_WORK)throw new Bounded("Backward dependency work limit");};
   const run=(choices:ReadonlyMap<string,Choice>)=>{
     const active=new Set<string>();
+    const iterating=new Set<SourceNode>();
     const resolve=(frame:Frame,expression:string,offset:number,locals:Locals=new Map(),members:readonly string[]=[]):Evidence=>{
       tick();
       const expr=clean(expression);
@@ -129,7 +135,7 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
         const list=resolve(frame,args[0],offset,locals),separator=one(resolve(frame,args[1],offset,locals).value);
         if(list.value.kind!=="collection"||separator===undefined||list.value.items.length>MAX_COLLECTION_ITEMS)return ev(reject("unproven joined collection","JOIN_INPUT_UNPROVEN"));
         if(policy.join)return policy.join(list,separator)??ev(reject("consumer cannot interpret joined collection","JOIN_CONSUMER_REJECTED"));
-        return ev(textValue(list.value.items.join(separator)),list.annotations);
+        return ev(evaluateApexExpression("String.join(items,separator)",{values:new Map<string,ApexValue>([["items",list.value],["separator",textValue(separator)]])}),list.annotations);
       }
       const create=/^new\s+(List|Set)\s*<\s*String\s*>\s*(?:\{([\s\S]*)\}|\(([\s\S]*)\))$/i.exec(expr);
       if(create){
@@ -147,13 +153,27 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
       if(abstraction!==undefined){note(frame,offset,"CONSUMER_ABSTRACTION");return ev(abstraction);}
       // Read-only scalar/string operations and metadata calls reuse the
       // existing evaluator; inputs must be exact, never a synthesized query.
-      const operation=/^((?:(?:System\.)?Label\.)?[A-Za-z_]\w*)\s*\.\s*(split|trim|replace|toLowerCase|toUpperCase)\s*\(([\s\S]*)\)$/i.exec(expr);
-      if(operation){
-        const value=resolve(frame,operation[1],offset,locals);
-        if(one(value.value)===undefined||value.annotations.length)return ev(reject("non-exact String receiver","STRING_RECEIVER_UNKNOWN"));
-        const args=operation[3].trim()?splitApexTopLevel(operation[3],","):[];
-        if(args.some(s=>!/^'(?:\\.|[^'\\])*'$/s.test(clean(s))))return ev(reject("runtime String operation argument","STRING_ARGUMENT_UNKNOWN"));
-        return ev(evaluateApexExpression("receiver."+operation[2]+"("+operation[3]+")",{values:new Map([["receiver",value.value]])}));
+      // Reuse the forward evaluator for known literal maps and Describe snapshots.
+      if(/^new\s+Map\s*<\s*(?:String|Integer)\s*,[\w\s,.<>]+\s*>\s*(?:\{[\s\S]*\}|\(\s*\))$/i.test(expr))
+        return ev(evaluateApexExpression(expr,{values:new Map()}));
+      if(/^[A-Za-z_]\w*\.SObjectType\.getDescribe\(\)\.fields\.getMap\(\)$/i.test(expr)){
+        const value=evaluateApexExpression(expr,{values:new Map(),resolveCall:resolveExternal});
+        note(frame,offset,value.kind==="collection"?"DESCRIBE_RESOLVED":"DESCRIBE_UNAVAILABLE");
+        return ev(value);
+      }
+      const operation=readApexReadOperation(expr);
+      if(operation&&!/^(?:String|Integer|Long|Decimal|Math|System|Schema)$/i.test(operation.receiver)){
+        const value=resolve(frame,operation.receiver,offset,locals);
+        const args=operation.args.map(arg=>resolve(frame,arg,offset,locals));
+        if(value.value.kind==="unknown"||value.annotations.length||args.some(a=>a.value.kind==="unknown"||a.annotations.length))
+          return ev(reject("non-exact operation receiver or argument","READ_OPERATION_UNPROVEN"));
+        // A union of candidate collection members is not an exact collection.
+        // Do not infer membership, position or cardinality from it.
+        if(value.value.kind==="collection")
+          return ev(reject("collection observation not proven","READ_COLLECTION_UNPROVEN"));
+        const result=evaluateApexReadOperation(value.value,operation.name,args.map(a=>a.value));
+        note(frame,offset,result.kind==="unknown"?"READ_OPERATION_UNPROVEN":"READ_OPERATION_RESOLVED",operation.name);
+        return ev(result);
       }
       if(/^(?:System\.)?Label\.[A-Za-z_]\w*$/i.test(expr)){
         const value=evaluateApexExpression(expr,{values:new Map(),resolveCall:resolveExternal});
@@ -162,6 +182,9 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
       }
       const member=/^([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/.exec(expr);
       if(member){
+        const bound=locals.get(member[1].toLowerCase());
+        if(bound&&(bound.value.kind==="record"||bound.value.kind==="instance")&&!bound.annotations.length)
+          return ev(evaluateApexExpression("item."+member[2],{values:new Map([["item",bound.value]])}));
         const type=apexSymbols(frame.source,frame.methods).lookup(frame.method,member[1],offset);
         if(type?.endsWith("__mdt")){
           const names=[...maskApexSource(frame.source.slice(frame.method.start,frame.method.end)).matchAll(new RegExp("\\b"+member[1]+"\\s*\\.\\s*([A-Za-z_]\\w*)","gi"))].map(m=>m[1]);
@@ -244,7 +267,18 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
       if(active.has(id))return ev(reject("cyclic variable dependency","VARIABLE_CYCLE"));
       active.add(id);
       try{
-        const prefix=prefixAt(frame.method.body,offset);
+        // Only enter loops currently being enumerated. A local declared
+        // within this iteration can be read. An outer symbol must be read
+        // only throughout the loop, including subsequent iterations.
+        const readOnlyMapUse=(node:SourceNode)=>{
+          const body=maskApexSource(frame.source.slice(node.start,node.end));
+          return !rx(name).test(body.replace(new RegExp("\\b"+name+"\\s*\\.\\s*(?:containsKey|isEmpty|size)\\s*\\(","gi"),"("));
+        };
+        const prefix=prefixAt(frame.method.body,offset,node=>{
+          if(!iterating.has(node))return false;
+          const local=node.body?.some(n=>n.kind==="statement"&&parseApexDeclaration(clean(n.text??""))?.name.toLowerCase()===name.toLowerCase()&&n.end<=offset);
+          return !!local||readOnlyMapUse(node);
+        });
         if(!prefix)return ev(reject("unsupported lexical path","LEXICAL_PATH_UNSUPPORTED"));
         const type=apexSymbols(frame.source,frame.methods).lookup(frame.method,name,offset);
         const key=name.toLowerCase(),param=frame.method.parameters.findIndex(p=>p.toLowerCase()===key);
@@ -258,6 +292,7 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
         if(defs.length>1)return ev(reject("ambiguous local declaration","DECLARATION_AMBIGUOUS"));
         let base:Evidence,after:SourceNode[];
         const collection=/^(?:list|set)<string>$/i.test(type??"");
+        const map=/^map</i.test(type??"");
         if(defs.length){
           let def=defs[0];
           // Latest unconditional scalar assignment is the reaching
@@ -272,7 +307,7 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
           if(!def.expression)return ev(reject("no initializer","NO_INITIALIZER"));
           // A direct collection alias may be mutated via another name. Only
           // a fresh collection or a proven read-only getter is supported.
-          if(collection&&identifier.test(clean(def.expression)))return ev(reject("mutable collection alias","COLLECTION_ALIAS"));
+          if((collection||map)&&identifier.test(clean(def.expression)))return ev(reject("mutable collection alias","COLLECTION_ALIAS"));
           note(frame,def.node.start,"REACHING_DEFINITION",name);
           base=resolve(frame,def.expression,def.node.start,locals,members);
           after=prefix.slice(def.index+1);
@@ -309,6 +344,11 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
             const visible=maskApexSource(frame.source.slice(n.start,n.end));
             if(!rx(name).test(visible))continue;
             const blocked=(code:string):false=>{note(frame,n.start,code,name);return false;};
+            if(map){
+              // Map snapshots must stay immutable; no aliases or writes.
+              if(!rx(name).test(visible.replace(new RegExp("\\b"+name+"\\s*\\.\\s*(?:containsKey|isEmpty|size)\\s*\\(","gi"),"(")))continue;
+              return blocked("MAP_ALIAS_OR_WRITE");
+            }
             if(n.kind==="if"){
               if(rx(name).test(maskApexSource(n.condition??""))&&
                 !new RegExp("^\\s*!?\\s*"+name+"\\s*\\.\\s*isEmpty\\s*\\(\\s*\\)\\s*$","i").test(clean(n.condition??"")))return blocked("GUARD_DEPENDS_ON_TARGET");
@@ -317,20 +357,44 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
               // merely a runtime data flag. It can establish a field's
               // very existence; leave those to authoritative engine proof.
               const calls=[...maskApexSource(condition).matchAll(/\b[A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)*\s*\(/g)].map(m=>m[0].replace(/\s|\(/g,""));
-              if(calls.some(c=>!(/^(?:String\.(?:isBlank|isNotBlank)|[A-Za-z_]\w*\.isEmpty)$/i.test(c))))return blocked("GUARD_CALL_UNSUPPORTED");
-              if(!/^false$/i.test(condition)&&!visit(n.body??[],conditional||!/^true$/i.test(condition),bindings))return false;
-              if(!/^true$/i.test(condition)&&!visit(n.otherwise??[],conditional||!/^false$/i.test(condition),bindings))return false;
+              const membership=/^(!\s*)?([A-Za-z_]\w*)\s*\.\s*containsKey\s*\(([\s\S]*)\)$/i.exec(condition);
+              let truth:boolean|undefined;
+              if(membership&&/^map</i.test(apexSymbols(frame.source,frame.methods).lookup(frame.method,membership[2],n.start)??"")){
+                const receiver=resolve(frame,membership[2],n.start,bindings);
+                const key=resolve(frame,membership[3],n.start,bindings);
+                if(receiver.value.kind==="map"&&!receiver.annotations.length&&!key.annotations.length)
+                  truth=knownBoolean(evaluateApexReadOperation(receiver.value,"containsKey",[key.value]));
+                else if(receiver.value.kind==="collection"&&!receiver.annotations.length&&!key.annotations.length&&
+                    /^map<string,schema\.sobjectfield>$/i.test(apexSymbols(frame.source,frame.methods).lookup(frame.method,membership[2],n.start)??""))
+                  truth=knownBoolean(evaluateApexReadOperation(receiver.value,"containsKey",[key.value]));
+                if(truth===undefined)return blocked("GUARD_MAP_UNPROVEN");
+                if(membership[1])truth=!truth;
+                note(frame,n.start,"GUARD_MAP_RESOLVED",membership[2]);
+              }else{
+                if(calls.some(c=>!(/^(?:String\.(?:isBlank|isNotBlank)|[A-Za-z_]\w*\.isEmpty)$/i.test(c))))return blocked("GUARD_CALL_UNSUPPORTED");
+                truth=/^true$/i.test(condition)?true:/^false$/i.test(condition)?false:undefined;
+              }
+              if(truth!==false&&!visit(n.body??[],conditional||truth!==true,bindings))return false;
+              if(truth!==true&&!visit(n.otherwise??[],conditional||truth!==false,bindings))return false;
             }else if(n.kind==="block"){
               if(!visit(n.body??[],conditional,bindings))return false;
             }else if(n.kind==="for"){
               if(!collection||!n.loopVariable||!n.iterable||rx(name).test(maskApexSource(n.iterable)))return blocked("LOOP_SHAPE_UNSUPPORTED");
               const iterable=resolve(frame,n.iterable,n.start,bindings);
-              if(iterable.value.kind!=="collection"||iterable.value.items.length>MAX_COLLECTION_ITEMS)return blocked("LOOP_ITERABLE_UNPROVEN");
-              note(frame,n.start,"LOOP_ITERABLE_RESOLVED",name,iterable.value.items.length);
-              for(const item of iterable.value.items){
-                const nested=new Map(bindings);nested.set(n.loopVariable.toLowerCase(),ev(textValue(item)));
-                if(!visit(n.body??[],conditional,nested))return false;
-              }
+              const items=apexIterationValues(iterable.value,MAX_COLLECTION_ITEMS);
+              if(!items||iterable.annotations.length)return blocked("LOOP_ITERABLE_UNPROVEN");
+              const body=maskApexSource(frame.source.slice(n.body?.[0]?.start??n.end,n.end));
+              if(/\b(?:break|continue|return|throw)\b/i.test(body)||
+                new RegExp("\\b"+n.loopVariable+"\\s*(?:=(?!=|>)|[+\\-*/%&|^]=|\\+\\+|--)","i").test(body)||
+                (identifier.test(clean(n.iterable))&&rx(clean(n.iterable)).test(body)))return blocked("LOOP_EFFECT_UNSUPPORTED");
+              note(frame,n.start,"LOOP_ITERABLE_RESOLVED",name,items.length);
+              iterating.add(n);
+              try{
+                for(const item of items){
+                  const nested=new Map(bindings);nested.set(n.loopVariable.toLowerCase(),ev(item));
+                  if(!visit(n.body??[],conditional,nested))return false;
+                }
+              }finally{iterating.delete(n);}
             }else if(n.kind==="statement"){
               const statement=clean(n.text??"");
               const add=new RegExp("^"+name+"\\s*\\.\\s*(add|addAll)\\s*\\(([\\s\\S]*)\\)\\s*;$","i").exec(statement);
@@ -338,10 +402,13 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
                 const value=resolve(frame,add[2],n.start,bindings);
                 const items=add[1].toLowerCase()==="addall"?(value.value.kind==="collection"?value.value.items:undefined):[one(value.value)];
                 if(!items||items.some(x=>x===undefined)||current.value.kind!=="collection")return blocked("COLLECTION_ADDITION_UNPROVEN");
-                const merged=[...new Set([...current.value.items,...items as string[]])];
+                const updated=applyApexStringCollectionMutation(current.value,add[1],[value.value],add[2]);
+                if(updated.kind!=="collection")return blocked("COLLECTION_ADDITION_UNPROVEN");
+                const merged=[...new Set(updated.items)];
                 if(merged.length>MAX_COLLECTION_ITEMS)return blocked("COLLECTION_SIZE_LIMIT");
                 note(frame,n.start,"COLLECTION_ADDITION",name,items.length);
-                current=ev(listValue(merged,current.value.unique),current.annotations);
+                // Candidate union, not exact execution ordering/cardinality.
+                current=ev(listValue(merged,updated.unique),current.annotations);
                 continue;
               }
               const append=new RegExp("^"+name+"\\s*\\+=\\s*([\\s\\S]+);$","i").exec(statement);

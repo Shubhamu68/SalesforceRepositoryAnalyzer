@@ -6,7 +6,7 @@ import {traceApexDependencies} from "../src/core/apex/ApexBackwardDependencyEngi
 import {ApexRepositoryMethodIndex} from "../src/core/apex/ApexRepositoryMethodIndex.js";
 import {collectApexLiteralStringReturns} from "../src/core/apex/ApexLiteralReturnEvidence.js";
 import {indexApexMethods} from "../src/core/apex/ApexSourceModel.js";
-import {textValue,type ApexValue} from "../src/core/apex/ApexValueEvaluator.js";
+import {evaluateApexExpression,textValue,type ApexValue} from "../src/core/apex/ApexValueEvaluator.js";
 import {parseApexAccessLevel,defaultApexDatabaseAccessMode} from "../src/core/apex/ApexDatabaseAccessMode.js";
 import {readApexOperandBoundary} from "../src/core/apex/ApexOperandBoundary.js";
 import {maskApexSource} from "../src/core/apex/ApexSourceModel.js";
@@ -66,4 +66,29 @@ test("shared access mode and operand parsing do not depend on query grammar",()=
   assert.equal(readApexOperandBoundary(maskApexSource(input),0)?.end,input.indexOf(", rest"));
   assert.equal(readApexOperandBoundary("service.call(",0)?.malformed,true);
   assert.equal(OBJECT_PERMISSION_KEYS,MATRIX_PERMISSION_KEYS);
+});
+
+
+test("loop-header lookup and chained built-ins reuse evaluator in backward evidence",()=>{
+  const source="public class Worker {public static void run(){List<String> requested=new List<String>{' Name ',' Industry ',' Unknown '};Map<String,String> allowed=new Map<String,String>{'name'=>'Name','industry'=>'Industry'};Set<String> fields=new Set<String>();for(String item:requested){String normalized=item.trim().toLowerCase();if(allowed.containsKey(normalized)){fields.add(normalized);}}Sink.consume(fields);}}";
+  const trace=traceApexDependencies(source,"Worker.cls",{expression:"fields",offset:source.indexOf("Sink.consume")});
+  assert.deepEqual(trace.candidates.map(e=>e.value.kind==="collection"?e.value.items:e.value),[["name","industry"]],JSON.stringify(trace));
+});
+test("unknown maps and input collections and loop mutation remain unresolved",()=>{
+  const sources=[
+    "public class Worker {public static void run(List<String> requested){Set<String> fields=new Set<String>();for(String item:requested){fields.add(item);}Sink.consume(fields);}}",
+    "public class Worker {public static void run(Map<String,String> allowed){List<String> requested=new List<String>{'Name'};Set<String> fields=new Set<String>();for(String item:requested){if(allowed.containsKey(item)){fields.add(item);}}Sink.consume(fields);}}",
+    "public class Worker {public static void run(){List<String> requested=new List<String>{'Name'};Set<String> fields=new Set<String>();for(String item:requested){requested.clear();fields.add(item);}Sink.consume(fields);}}",
+    "public class Worker {public static void run(){List<String> requested=new List<String>{'Name'};Map<String,String> allowed=new Map<String,String>{'Name'=>'Name'};Set<String> fields=new Set<String>();for(String item:requested){if(allowed.containsKey(item)){fields.add(item);}allowed.clear();}Sink.consume(fields);}}"
+  ];
+  for(const source of sources){
+    const trace=traceApexDependencies(source,"Worker.cls",{expression:"fields",offset:source.indexOf("Sink.consume")});
+    assert.ok(trace.candidates.every(e=>e.value.kind==="unknown"),JSON.stringify(trace));
+  }
+});
+test("shared parser retains enhanced-for element types and evaluator handles chains",()=>{
+  const source="public class Worker {public static void run(List<OrderSummary> orders){for(OrderSummary os:orders){Sink.consume(os);}}}";
+  const loop=indexApexMethods(source).find(m=>m.name==="run")!.body[0];
+  assert.equal(loop.kind,"for");assert.equal(loop.loopVariableType,"OrderSummary");assert.equal(loop.loopVariable,"os");assert.equal(loop.iterable,"orders");
+  assert.deepEqual(evaluateApexExpression("item.trim().toLowerCase()",{values:new Map([["item",textValue(" Name ")]])}),textValue("name"));
 });

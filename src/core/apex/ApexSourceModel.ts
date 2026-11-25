@@ -14,6 +14,7 @@ export interface SourceNode {
   body?: SourceNode[];
   otherwise?: SourceNode[];
   loopVariable?: string;
+  loopVariableType?: string;
   iterable?: string;
 }
 export interface IndexedApexMethod {
@@ -206,9 +207,9 @@ export function parseApexStatements(
       const close = masked[open] === "(" ? matchingPair(masked,open) : -1;
       if (close < 0) { nodes.push({kind:"opaque",start:at,end,text:"Invalid for"}); break; }
       const header = source.slice(open+1,close);
-      const match = /^(?:final\s+)?[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*(?:\s*<[\w\s,.<>?]+>)?(?:\[\])?\s+([A-Za-z_]\w*)\s*:\s*([\s\S]+)$/i.exec(header.trim());
+      const match = /^(?:final\s+)?([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*(?:\s*<[\w\s,.<>?]+>)?(?:\[\])?)\s+([A-Za-z_]\w*)\s*:\s*([\s\S]+)$/i.exec(header.trim());
       const body = parseBody(source,masked,close+1,end);
-      nodes.push({kind:"for",start:at,end:body.next,loopVariable:match?.[1],iterable:match?.[2],
+      nodes.push({kind:"for",start:at,end:body.next,loopVariable:match?.[2],loopVariableType:match?.[1],iterable:match?.[3],
         body:body.nodes, text:header});
       cursor=body.next;
     } else if (masked[at] === "{") {
