@@ -92,12 +92,9 @@ export class ApexMemberEffectModel{
     if(!/@AuraEnabled(?:\s*\([^)]*\))?\s+(?:public\s+static|static\s+public)\s+[\w.<>,\s[\]]+\s*\([^{};]*\)\s*\{\s*$/i.test(head))return undefined;
     return new Map([...this.fields.values()].map(field=>[field.key,field.initial]));
   }
-  /** Strict replay subset: only local scalars/collections, direct member
-   * writes and proven built-ins. Unsupported dispatch/callbacks fail closed. */
-  replaySafe(method:IndexedApexMethod):boolean{
-    const old=this.safe.get(method);if(old!==undefined)return old;
-    this.safe.set(method,false);
-    if(!method.isStatic||method.visibility!=="private")return false;
+  private readonly receiverTypes=new Map<IndexedApexMethod,Map<string,string>>();
+  private types(method:IndexedApexMethod):Map<string,string>{
+    const cached=this.receiverTypes.get(method);if(cached)return cached;
     const types=new Map<string,string>();
     method.parameters.forEach((name,i)=>types.set(name.toLowerCase(),method.parameterTypes?.[i]??""));
     const collect=(nodes:readonly SourceNode[])=>{for(const node of nodes){
@@ -109,9 +106,33 @@ export class ApexMemberEffectModel{
       }
       collect(node.body??[]);collect(node.otherwise??[]);
     }};collect(method.body);
+    this.receiverTypes.set(method,types);return types;
+  }
+  /** No generic method-name purity assumption for application receivers. */
+  readOnlyCall(method:IndexedApexMethod|undefined,name:string):boolean{
+    if(safeCall.test(name)||/^(?:String\.isEmpty|JSON\.deserializeUntyped|Database\.(?:query|queryWithBinds|countQuery|countQueryWithBinds|getQueryLocator|getQueryLocatorWithBinds))$/i.test(name))return true;
+    if(/^Schema\.SObjectType\.[A-Za-z_]\w*\.fieldSets\.getMap$/i.test(name))return true;
+    if(!method)return false;
+    const dot=name.lastIndexOf(".");
+    if(dot<0)return false;
+    const receiver=name.slice(0,dot).toLowerCase(),operation=name.slice(dot+1);
+    const type=this.types(method).get(receiver)??"";
+    if(/^(?:List|Set)\s*<\s*String\s*>$|^Map\s*<\s*String\s*,\s*String\s*>$/i.test(type))
+      return /^(?:get|contains|containsKey|isEmpty|size|keySet)$/i.test(operation);
+    if(/^String$/i.test(type))return /^(?:trim|length|substring|endsWith|startsWith|contains|split|isEmpty|toLowerCase|toUpperCase)$/i.test(operation);
+    return /^Schema\.FieldSetMember$/i.test(type)&&/^getFieldPath$/i.test(operation);
+  }
+  /** Strict replay subset: only local scalars/collections, direct member
+   * writes and proven built-ins. Unsupported dispatch/callbacks fail closed. */
+  replaySafe(method:IndexedApexMethod):boolean{
+    const old=this.safe.get(method);if(old!==undefined)return old;
+    this.safe.set(method,false);
+    if(!method.isStatic||method.visibility!=="private")return false;
+    const types=this.types(method);
     const check=(source:string):boolean=>{
       const visible=maskApexSource(source);
       if(/\b(?:insert|update|upsert|delete|undelete|merge|throw|switch|try|while|do|new)\b/i.test(visible))return false;
+      if(/\+\+|--|\[[^\]]*\]\s*(?:=|\+=)|(?:[-*/%&|^]=)/.test(visible))return false;
       const write=/^\s*(?:[\w.]+(?:\s*<[\w\s,.<>]+>)?\s+)?((?:[A-Za-z_]\w*\s*\.\s*)?[A-Za-z_]\w*)\s*(?:=(?!=|>)|\+=|[-*/%&|^]=|\+\+|--)/i.exec(visible);
       if(write&&!this.key(method,write[1].replace(/\s/g,""))&&!types.has(write[1].toLowerCase()))return false;
       for(const hit of visible.matchAll(/\b([A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)*)\s*\(/g)){
