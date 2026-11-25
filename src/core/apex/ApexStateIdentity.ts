@@ -15,7 +15,7 @@ export function apexStateIdentity(values:ApexEnvironment,stopped:boolean,abstrac
     if(value.kind==="instanceList")return ["instanceList",id,value.elementType,value.items.map(encode)];
     return value.kind==="collection"
       ?["collection",id,value.unique,value.items]
-      :[value.kind,id,value.kind==="instance"?value.className:null,value.entries.map(([key,item])=>[key,encode(item)])];
+      :[value.kind,id,value.kind==="instance"?value.className:value.keyType??null,value.entries.map(([key,item])=>[key,encode(item)])];
   };
   return JSON.stringify([stopped,[...values.entries()]
     .sort(([a],[b])=>a.localeCompare(b)).map(([key,value])=>[key,encode(value)])]);
