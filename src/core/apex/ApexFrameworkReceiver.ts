@@ -6,7 +6,7 @@ type Instance=Extract<ApexValue,{kind:"instance"}>;
 /** Initial start() receiver is a submission snapshot, not a static singleton.
  * This proof covers local assignments, conditional exits and reads of modeled
  * fields/maps. No member writes, opaque control flow or arbitrary callbacks. */
-export function supportsReceiverPrefix(method:IndexedApexMethod,offset:number,receiver:Instance,selectedPrivateCall=false):boolean{
+export function supportsReceiverPrefix(method:IndexedApexMethod,offset:number,receiver:Instance,selectedPrivateCall=false,allowStringJoin=false):boolean{
   const fields=new Map(receiver.entries.map(([k,v])=>[k.toLowerCase(),v]));
   const locals=new Set(method.parameters.map(p=>p.toLowerCase()));
   let selected=false;
@@ -19,6 +19,7 @@ export function supportsReceiverPrefix(method:IndexedApexMethod,offset:number,re
     for(const hit of masked.matchAll(/\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(/g)){
       const path=hit[1].toLowerCase().replace(/^this\./,"");
       if(/^database\.(?:query|getquerylocator|countquery)$/i.test(path))continue;
+      if(allowStringJoin&&path==="string.join"&&!scope.has("string")&&!fields.has("string"))continue;
       const [field,op,...rest]=path.split(".");
       if(rest.length||scope.has(field)||fields.get(field)?.kind!=="map"||!["get","containskey"].includes(op))return false;
     }

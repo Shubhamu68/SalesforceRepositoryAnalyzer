@@ -208,3 +208,46 @@ test("private lifecycle dispatch caches syntax only across metadata resolver ide
   assert.ok((counts.get("caller.lifecycle.discovery_cache_hits")??0)>=1);
   assert.equal(counts.get("caller.batch_receiver_inventory_evaluations"),2);
 });
+
+test("source-proven metadata collection utility initializes a private batch receiver without hardcoded helper names",async()=>{
+  const helper="public class FieldCatalog {public static List<String> fields(String objectName,String fieldSetName){Schema.SObjectType obj=Schema.getGlobalDescribe().get(objectName);Schema.DescribeSObjectResult desc=obj.getDescribe();Schema.FieldSet fs=desc.fieldSets.getMap().get(fieldSetName);List<String> result=new List<String>();for(Schema.FieldSetMember member:fs.getFields()){result.add(member.getFieldPath());}return result;}}";
+  const batch="public class Work implements Database.Batchable<SObject>,Database.Stateful{private List<String> fields;private String unrelated;public Work(String input){unrelated=input;initialize();}private void initialize(){fields=FieldCatalog.fields('Account','ForWork');}public Database.QueryLocator start(Database.BatchableContext bc){return Database.getQueryLocator('SELECT Id FROM Account');}public void execute(Database.BatchableContext bc,List<SObject> rows){this.fetch();}private void fetch(){String query='SELECT '+String.join(fields,',')+' FROM Account';Database.query(query);}public void finish(Database.BatchableContext bc){}}";
+  let requests=0;
+  const run=async(source:string,complete:boolean)=>{
+    const index=new ApexRepositoryMethodIndex([{filePath:"Work.cls",source:batch},{filePath:"FieldCatalog.cls",source}]);
+    const engine=new ApexAnalysisEngine(index,{
+      scopeKey:"metadata-fixture",
+      getObjectFieldNames:async()=>({complete:false,source:"REPOSITORY"}),
+      getCustomMetadataRecords:async()=>({complete:false,source:"REPOSITORY"}),
+      getFieldSetFields:async(object,name)=>{
+        requests++;
+        assert.equal(object,"Account");assert.equal(name,"ForWork");
+        return {complete,value:["Name","Industry"],source:"LIVE_ORG"};
+      }
+    });
+    return engine.analyze("Work.cls",ctx=>extractDynamicSoqlQueries(batch,"Work.cls",ctx.resolveExternal,ctx.repositoryIndex));
+  };
+  const good=await run(helper,true);
+  assert.ok(good.queries.some(q=>q.query==="SELECT Name,Industry FROM Account"&&q.coverage==="CONDITIONAL_FRAMEWORK_CONTEXT"),JSON.stringify(good));
+  assert.equal(good.unresolved.length,1);
+  assert.ok(requests>0);
+  const incomplete=await run(helper,false);
+  assert.ok(!incomplete.queries.some(q=>q.query==="SELECT Name,Industry FROM Account"),JSON.stringify(incomplete));
+  const previousRequests=requests;
+  const unsafe=await run(helper.replace("return result;","Other.mutate(result);return result;"),true);
+  assert.ok(!unsafe.queries.some(q=>q.query==="SELECT Name,Industry FROM Account"),JSON.stringify(unsafe));
+  assert.ok(unsafe.unresolved.some(u=>u.reason.includes("constructor_unsupported_expression_call")),JSON.stringify(unsafe));
+  assert.equal(requests,previousRequests);
+});
+
+test("constructor rejection diagnostics distinguish an unknown condition from an unsupported callback",async()=>{
+  const base="public class Work implements Database.Batchable<SObject>,Database.Stateful{private String fields;public Work(Boolean flag){INIT}public Database.QueryLocator start(Database.BatchableContext bc){return Database.getQueryLocator('SELECT Id FROM Account');}public void execute(Database.BatchableContext bc,List<SObject> rows){this.fetch();}private void fetch(){Database.query('SELECT '+fields+' FROM Account');}public void finish(Database.BatchableContext bc){}}";
+  for(const [init,reason] of [
+    ["if(flag){fields='Name';}else{fields='Id';}","constructor_unknown_condition"],
+    ["fields=Other.load();","constructor_unsupported_expression_call"]
+  ]){
+    const result=await scan([{filePath:"Work.cls",source:base.replace("INIT",init)}],"Work.cls");
+    assert.ok(result.unresolved.some(u=>u.reason.includes(reason)),JSON.stringify(result));
+    assert.ok(!result.queries.some(q=>q.coverage==="CONDITIONAL_FRAMEWORK_CONTEXT"),JSON.stringify(result));
+  }
+});

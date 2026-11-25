@@ -3,6 +3,7 @@ import {maskApexSource,matchingPair,splitApexTopLevel,parseApexStatements,stripA
 import {evaluateApexExpression,addApexValues,unknown,runtimeParameter,type ApexValue} from "./ApexValueEvaluator.js";
 import {parseApexDeclaration,selectApexOverload,type ApexArgumentTypes,type ApexCallResolver} from "./ApexTypeSystem.js";
 import {knownBoolean} from "./ApexScalarOperators.js";
+import {countApex} from "./ApexPerformance.js";
 
 type Instance=Extract<ApexValue,{kind:"instance"}>;
 type Resolver=ApexCallResolver;
@@ -124,6 +125,13 @@ export class ApexInstanceIndex {
     const fields=new Map<string,ApexValue>();
     const fieldNames=new Map(shape.fields.map(f=>[f.name.toLowerCase(),f.name]));
     let unsupportedEffect=false;
+    let failureCode:string|undefined;
+    const reject=(code:string):false=>{
+      if(!failureCode)failureCode=code;
+      countApex("constructor."+code);
+      return false;
+    };
+    const failed=(message:string):ApexValue=>unknown(message+" ["+(failureCode??"constructor_unproven_initialization")+"]");
     const evaluate=(expr:string,parameters:Map<string,ApexValue>):ApexValue=>{
       // No arbitrary helper calls from constructors: effects and heap transfer
       // are not modeled here. Pure scalar expressions and metadata constants
@@ -133,16 +141,34 @@ export class ApexInstanceIndex {
         const result=resolve?.("Apex.constructorFactory",[{kind:"text",values:[factory[1]]}]);
         if(result?.kind==="map")return result;
       }
+      // An entire class-qualified call with simple, non-escaping arguments
+      // may be a source-proven metadata collection utility. The repository
+      // must prove its body, not merely resolve its name or return value.
+      const utility=/^\s*([A-Za-z_]\w*)\.([A-Za-z_]\w*)\s*\(([\s\S]*)\)\s*$/.exec(expr);
+      if(utility&&![...fields.keys(),...parameters.keys()].some(key=>key.toLowerCase()===utility[1].toLowerCase())&&
+        matchingPair(maskApexSource(expr),expr.indexOf("("))===expr.trimEnd().length-1){
+        const pieces=utility[3].trim()?splitApexTopLevel(utility[3],","):[];
+        if(pieces.every(piece=>/^(?:'(?:\\.|[^'\\])*'|(?:this\.)?[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?)$/i.test(piece.trim())&&!/^this$/i.test(piece.trim()))){
+          const values=pieces.map(piece=>evaluate(piece,parameters));
+          const hints=pieces.map(piece=>/^'/.test(piece.trim())?"string":undefined);
+          const result=resolve?.("Apex.constructorUtility",[{kind:"text",values:[utility[1]+"."+utility[2]]},...values],[undefined,...hints]);
+          if(result!==undefined){
+            countApex("constructor.utility_proven");
+            if(result.kind==="unknown")countApex("constructor.utility_unresolved_value");
+            return result;
+          }
+        }
+      }
       const calls=[...maskApexSource(expr).matchAll(/\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(/g)];
       const allocation=/^new\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(/i.exec(expr.trim());
-      if(calls.some(call=>!/^String\.(?:isBlank|isNotBlank|valueOf|escapeSingleQuotes)$/i.test(call[1])&&!/^[A-Za-z_]\w*__mdt\.getInstance$/i.test(call[1])&&!(allocation&&call===calls[0]&&call[1].toLowerCase()===allocation[1].toLowerCase()))){unsupportedEffect=true;return unknown("Constructor expression has unproven effects.");}
+      if(calls.some(call=>!/^String\.(?:isBlank|isNotBlank|valueOf|escapeSingleQuotes)$/i.test(call[1])&&!/^[A-Za-z_]\w*__mdt\.getInstance$/i.test(call[1])&&!(allocation&&call===calls[0]&&call[1].toLowerCase()===allocation[1].toLowerCase()))){unsupportedEffect=true;reject("constructor_unsupported_expression_call");return unknown("Constructor expression has unproven effects.");}
       const env=new Map<string,ApexValue>();
       for(const [key,value] of fields){env.set(key,value);env.set("this."+key,value);}
       for(const [key,value] of parameters)env.set(key,value);
       return evaluateApexExpression(expr,{values:env,resolveCall:(method,inputs,hints)=>{
         if(method==="Apex.construct"&&inputs[0]?.kind==="text"&&inputs[0].values.length===1){
           const child=this.construct(inputs[0].values[0],inputs.slice(1),shape.filePath,resolve,hints?.slice(1));
-          if(child?.kind!=="instance"){unsupportedEffect=true;return unknown("Nested instance initialization is not proven.");}
+          if(child?.kind!=="instance"){unsupportedEffect=true;reject("constructor_nested_allocation");return unknown("Nested instance initialization is not proven.");}
           return child;
         }
         return resolve?.(method,inputs,hints);
@@ -152,7 +178,7 @@ export class ApexInstanceIndex {
     let operations=0;
     const activeHelpers=new Set<IndexedApexMethod>();
     const execute=(nodes:SourceNode[],parameters:Map<string,ApexValue>,depth=0):boolean=>{
-      if(depth>12)return false;
+      if(depth>12)return reject("constructor_depth_limit");
       const scoped=(body:SourceNode[]):boolean=>{
         const local=new Map(parameters);
         if(!execute(body,local,depth+1))return false;
@@ -160,7 +186,7 @@ export class ApexInstanceIndex {
         return true;
       };
       for(const node of nodes){
-        if(++operations>500)return false;
+        if(++operations>500)return reject("constructor_operation_limit");
         if(node.kind==="block"){if(!scoped(node.body??[]))return false;continue;}
         if(node.kind==="if"){
           if(node.condition==="__apex_exception_path_unknown__"&&normalScenario&&node.otherwise?.length){
@@ -170,11 +196,11 @@ export class ApexInstanceIndex {
             continue;
           }
           const condition=knownBoolean(evaluate(node.condition??"",parameters));
-          if(condition===undefined)return false;
+          if(condition===undefined)return reject("constructor_unknown_condition");
           if(!scoped(condition?node.body??[]:node.otherwise??[]))return false;
           continue;
         }
-        if(node.kind!=="statement")return false;
+        if(node.kind!=="statement")return reject("constructor_unsupported_control_flow");
         const statement=stripApexComments(node.text??"").trim().replace(/;\s*$/,"");
         const local=/^(?:final\s+)?(?:[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*(?:\s*<[\w\s,.<>]+>)?)\s+([A-Za-z_]\w*)\s*(?:=\s*([\s\S]+))?$/i.exec(statement);
         const helper=/^(?:this\.)?([A-Za-z_]\w*)\s*\(([\s\S]*)\)$/i.exec(statement);
@@ -182,7 +208,7 @@ export class ApexInstanceIndex {
           const expressions=helper[2].trim()?splitApexTopLevel(helper[2],","):[];
           const candidates=shape.helpers.filter(m=>m.name.toLowerCase()===helper[1].toLowerCase());
           const selected=selectApexOverload(candidates,expressions.length);
-          if(!selected||activeHelpers.has(selected)||activeHelpers.size>=8)return false;
+          if(!selected||activeHelpers.has(selected)||activeHelpers.size>=8)return reject("constructor_unproven_private_helper");
           const args=expressions.map(expr=>evaluate(expr,parameters));
           activeHelpers.add(selected);
           try{if(!execute(selected.body,new Map(selected.parameters.map((p,i)=>[p,args[i]])),depth+1))return false;}
@@ -190,15 +216,15 @@ export class ApexInstanceIndex {
           continue;
         }
         if(local){
-          if(!parseApexDeclaration(maskApexSource(statement)))return false;
+          if(!parseApexDeclaration(maskApexSource(statement)))return reject("constructor_unsupported_local");
           // Shadowing an existing parameter/local requires a separate lexical
           // binding model. Reject rather than silently changing the outer slot.
-          if([...parameters.keys()].some(k=>k.toLowerCase()===local[1].toLowerCase()))return false;
+          if([...parameters.keys()].some(k=>k.toLowerCase()===local[1].toLowerCase()))return reject("constructor_local_shadow");
           parameters.set(local[1],local[2]?evaluate(local[2],parameters):unknown("Constructor local is not assigned."));
           continue;
         }
         const assignment=/^(?:(this)\s*\.\s*)?([A-Za-z_]\w*)\s*(\+?=)(?!=|>)\s*([\s\S]+)$/i.exec(statement);
-        if(!assignment)return false;
+        if(!assignment)return reject("constructor_unsupported_statement");
         const [,explicit,key,operator,rhs]=assignment;
         const localKey=!explicit?[...parameters.keys()].find(k=>k.toLowerCase()===key.toLowerCase()):undefined;
         const field=fieldNames.get(key.toLowerCase());
@@ -206,20 +232,20 @@ export class ApexInstanceIndex {
         let next=evaluate(rhs,parameters);
         if(operator==="+=")next=previous?addApexValues(previous,next):unknown("Constructor assignment has no proven previous value.");
         if(localKey){parameters.set(localKey,next);continue;}
-        if(!field)return false;
+        if(!field)return reject("constructor_unproven_assignment_target");
         const type=shape.fields.find(f=>f.name===field)?.type;
         fields.set(field,next.kind==="unknown"&&!next.fragments?runtimeParameter(shape.name+"."+field,type,next.reason):next);
       }
       return true;
     };
     for(const step of shape.initializationOrder){
-      if("block" in step){if(!execute(step.block,new Map()))return unknown("Instance initializer has unsupported effects for "+name+".");}
+      if("block" in step){if(!execute(step.block,new Map()))return failed("Instance initializer has unsupported effects for "+name+".");}
       else if(step.initializer)fields.set(step.field,evaluate(step.initializer,new Map()));
     }
     if(constructor){
       const active=new Set<typeof constructor>();
       const invoke=(ctor:typeof constructor,inputs:readonly ApexValue[]):boolean=>{
-        if(active.has(ctor)||active.size>=8)return false;
+        if(active.has(ctor)||active.size>=8)return reject("constructor_delegation_depth");
         active.add(ctor);
         try{
           const parameters=new Map(ctor.parameters.map((p,i)=>[p,inputs[i]]));
@@ -240,15 +266,16 @@ export class ApexInstanceIndex {
               return undefined;
             });
             const selected=selectApexOverload(shape.constructors,delegated.length,delegatedTypes);
-            if(!selected||delegated.some(value=>value.kind==="unknown")||!invoke(selected,delegated))return false;
+            if(!selected||delegated.some(value=>value.kind==="unknown"))return reject("constructor_unproven_delegation");
+            if(!invoke(selected,delegated))return false;
             return execute(ctor.body.slice(1),parameters);
           }
           return execute(ctor.body,parameters);
         }finally{active.delete(ctor);}
       };
-      if(!invoke(constructor,args))return unknown("Constructor has unsupported effects or delegation for "+name+".");
+      if(!invoke(constructor,args))return failed("Constructor has unsupported effects or delegation for "+name+".");
     }
-    if(unsupportedEffect)return unknown("Constructor or initializer contains unproven effects for "+name+".");
+    if(unsupportedEffect)return failed("Constructor or initializer contains unproven effects for "+name+".");
     return {kind:"instance",className:shape.name,entries:[...fields]} satisfies Instance;
   }
 }

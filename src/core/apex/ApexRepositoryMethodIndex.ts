@@ -1,4 +1,5 @@
 import {isLiteralMapFactory} from "./ApexPureFactory.js";
+import {evaluateConstructorFieldList} from "./ApexConstructorUtility.js";
 import {supportsReceiverPrefix,receiverMapSamples,supportsInitialBatchExecute} from "./ApexFrameworkReceiver.js";
 import {outerApexClass} from "./ApexClassModel.js";
 import path from "node:path";
@@ -115,6 +116,7 @@ interface BatchReceiverInventory {
   count:number;
   bounded:boolean;
   candidates:Array<{value:BatchReceiver;hypothetical:boolean}>;
+  constructorFailures:string[];
 }
 
 /**
@@ -236,6 +238,20 @@ export class ApexRepositoryMethodIndex {
 
   constructInstance(filePath:string,name:string,args:ApexValue[],resolveExternal?: ApexCallResolver,types?:ApexArgumentTypes,normalScenario=false):ApexValue|undefined{
     const resolver:ApexCallResolver=(method,inputs,hints)=>{
+      if(method==="Apex.constructorUtility"&&inputs[0]?.kind==="text"&&inputs[0].values.length===1){
+        const qualified=inputs[0].values[0],match=/^([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/.exec(qualified);
+        if(!match||["schema","list","string"].some(platform=>this.classes.has(platform)))return undefined;
+        const owners=this.classes.get(match[1].toLowerCase());
+        if(owners?.length!==1||outerApexClass(owners[0].source)?.parent)return undefined;
+        const methods=this.findMethods(match[1],match[2],inputs.length-1);
+        const chosen=selectApexOverload(methods.map(m=>m.method),inputs.length-1,hints?.slice(1));
+        if(!chosen)return undefined;
+        const symbols=apexSymbols(owners[0].source,owners[0].methods);
+        if(["Schema","List","String"].some(platform=>symbols.lookup(chosen,platform,chosen.start)!==undefined))return undefined;
+        const result=evaluateConstructorFieldList(chosen,inputs.slice(1),resolveExternal);
+        if(result===undefined)countApex("constructor.utility_rejected_source");
+        return result;
+      }
       if(method==="Apex.constructorFactory"&&inputs[0]?.kind==="text"&&inputs[0].values.length===1){
         const qualified=inputs[0].values[0];
         const match=/^([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/.exec(qualified);
@@ -592,17 +608,21 @@ export class ApexRepositoryMethodIndex {
         if(receivers.size>=8)break;
       }
       const candidates=[...receivers.values()].map(value=>({value,hypothetical:false}));
+      const constructorFailures=new Set<string>();
       if(!candidates.length){
         // Explicitly separate a source-initialized scenario from an observed
         // submission. Public mutable fields may differ at runtime.
-        for(const signature of this.instances.constructorSignatures(owner.className)){
+        const signatures=this.instances.constructorSignatures(owner.className);
+        if(!signatures.length)constructorFailures.add("constructor_no_supported_signature");
+        for(const signature of signatures){
           const args=signature.parameters.map((name,i)=>runtimeParameter(name,signature.parameterTypes[i],"Conditional constructor input: "+name));
           countApex("caller.batch_constructor_probes");
           const value=this.constructInstance(owner.filePath,owner.className,args,resolveExternal,signature.parameterTypes,true);
           if(value?.kind==="instance")candidates.push({value,hypothetical:true});
+          else constructorFailures.add(value?.kind==="unknown"?(/\[(constructor_[a-z_]+)\]$/.exec(value.reason)?.[1]??"constructor_unproven_initialization"):"constructor_no_receiver");
         }
       }
-      return {count:receivers.size,bounded,candidates};
+      return {count:receivers.size,bounded,candidates,constructorFailures:[...constructorFailures]};
     });
     if(eligible){
       if(this.batchReceiverInventories.size>=MAX_RECEIVER_SNAPSHOTS)this.batchReceiverInventories.clear();
@@ -778,6 +798,7 @@ export class ApexRepositoryMethodIndex {
     const inventory=this.batchReceiverInventory(owner,start,resolveExternal);
     if(!inventory.candidates.length){
       reject("rejected_constructor");
+      for(const failure of inventory.constructorFailures)diagnostics.add(failure);
       return {...empty,bounded:inventory.bounded,diagnostics:[...diagnostics]};
     }
     let scenarios=0,bounded=inventory.bounded;
@@ -787,7 +808,8 @@ export class ApexRepositoryMethodIndex {
       for(const {entry,edges} of paths){
         const executeEntry=entry!==start;
         if(executeEntry&&!supportsInitialBatchExecute(start,receiver)){reject("rejected_start_effects");continue;}
-        if(!supportsReceiverPrefix(target,offset,receiver)){reject("rejected_target_prefix");continue;}
+        const allowStringJoin=!this.classes.has("string")&&symbols.lookup(target,"String",target.start)===undefined;
+        if(!supportsReceiverPrefix(target,offset,receiver,false,allowStringJoin)){reject("rejected_target_prefix");continue;}
         if(edges.some(edge=>!supportsReceiverPrefix(edge.caller,edge.offset,receiver,true))){reject("rejected_caller_prefix");continue;}
         const resolver:ApexCallResolver=(name,args,types)=>{
           if(name==="Apex.scopeField"&&args[0]?.kind==="text"&&args[0].values[0]?.toLowerCase()===owner.className.toLowerCase()&&
