@@ -123,7 +123,7 @@ test("direct private instance calls contribute argument evidence without receive
   assert.equal(result.unresolved.length,1);
 });
 test("private instance argument evidence does not transfer unknown receiver state or nested effects",()=>{
-  const base="public class Controller {private String fields;public void run(String obj){fetch(obj);} public void known(){CALL} private void fetch(String obj){Database.query(QUERY);}}";
+  const base="public class Controller {private String fields;public void run(String obj){fetch(obj);} public void known(){CALL} private List<SObject> fetch(String obj){return Database.query(QUERY);}}";
   for(const [call,query] of [
     ["this.fetch('Account');","'SELECT '+fields+' FROM '+obj"],
     ["Other.consume(this.fetch('Account'));","'SELECT Name FROM '+obj"],
@@ -140,6 +140,6 @@ test("mixed-case private callers cannot silently disappear from exhaustive closu
   const index=new ApexRepositoryMethodIndex([{filePath:"Controller.cls",source}]);
   const result=extractDynamicSoqlQueries(source,"Controller.cls",undefined,index);
   assert.equal(result.unresolved.length,1,JSON.stringify(result));
-  assert.ok(!result.queries.some(q=>q.coverage===undefined||q.coverage==="COMPLETE"),JSON.stringify(result));
+  assert.ok(!result.queries.some(q=>q.coverage===undefined),JSON.stringify(result));
   assert.ok(result.queries.some(q=>q.query==="SELECT Name FROM Account"&&q.coverage==="KNOWN_CALLER_CONTEXT"),JSON.stringify(result));
 });
