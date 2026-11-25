@@ -54,7 +54,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
       const variants=new Set<string>();
       const owner=repositoryIndex?.methodAt(filePath,site.offset);
       const mode=explicitMode(site);
-      if(owner?.arity && (/dependency|runtime|symbol|join|parameter|helper|unsupported/i.test(reason)||
+      if(owner && (owner.arity>0||(owner.visibility==="private"&&!owner.isStatic)) && (/dependency|runtime|symbol|join|parameter|helper|unsupported/i.test(reason)||
         (owner.visibility==="private"&&/budget/i.test(reason)))){
         const evidence=repositoryIndex!.inspectCallers(owner.className,owner.methodName,owner.arity);
         if(evidence.candidateCalls)explanation +=
@@ -64,6 +64,8 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
             ?" Method is externally callable; complete caller coverage cannot be established from repository metadata."
             :"");
         const scoped=inspectApexInvocationContexts(filePath,site.offset,[site.argument],resolveExternal,repositoryIndex);
+        if(scoped?.lifecycleDiagnostics?.length)
+          explanation+=" Framework lifecycle diagnostics: "+scoped.lifecycleDiagnostics.join(", ")+".";
         if(scoped&&(scoped.contexts.known.length||scoped.contexts.partial.length||scoped.receiverContexts||scoped.receiverScenarios)){
           partialEvidence.push(...scoped.partialArguments.map(args=>args[0]).filter((v):v is ApexValue=>v!==undefined));
           // Do not publish a guessed security mode, even if SELECT is valid.

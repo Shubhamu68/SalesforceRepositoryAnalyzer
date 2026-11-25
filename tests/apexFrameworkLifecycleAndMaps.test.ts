@@ -177,3 +177,34 @@ test("private zero-argument dispatch from start is conditional, and unreachable 
   const rejected=await scan([{filePath:"Work.cls",source:unreachable}],"Work.cls");
   assert.ok(!rejected.queries.some(q=>q.query==="SELECT Name FROM Account"),JSON.stringify(rejected));
 });
+
+test("lifecycle diagnostics distinguish constructor, start and caller prefix rejection",async()=>{
+  const batch="public class Work implements Database.Batchable<SObject>,Database.Stateful{private String query;public Work(){query='SELECT Name FROM Account';}public Database.QueryLocator start(Database.BatchableContext bc){return Database.getQueryLocator('SELECT Id FROM Account');}public void execute(Database.BatchableContext bc,List<SObject> rows){this.fetch();}private void fetch(){Database.query(query);}public void finish(Database.BatchableContext bc){}}";
+  const variants:Array<[string,string]>=[
+    [batch.replace("query='SELECT Name FROM Account';","query=Other.load();"),"rejected_constructor"],
+    [batch.replace("return Database.getQueryLocator","query='SELECT Id FROM Account';return Database.getQueryLocator"),"rejected_start_effects"],
+    [batch.replace("this.fetch();","Other.mutate(this);this.fetch();"),"rejected_caller_prefix"]
+  ];
+  for(const [source,reason] of variants){
+    const counts=new Map<string,number>();
+    const result=await withApexPerformance({count:(name,n)=>counts.set(name,(counts.get(name)??0)+n),duration:()=>{}},
+      ()=>scan([{filePath:"Work.cls",source}],"Work.cls"));
+    assert.ok(!result.queries.some(q=>q.query==="SELECT Name FROM Account"&&q.coverage==="CONDITIONAL_FRAMEWORK_CONTEXT"),JSON.stringify(result));
+    assert.ok(result.unresolved.some(u=>u.reason.includes(reason)),JSON.stringify(result));
+    assert.ok((counts.get("caller.lifecycle."+reason)??0)>0);
+  }
+});
+test("private lifecycle dispatch caches syntax only across metadata resolver identities",async()=>{
+  const source="public class Work implements Database.Batchable<SObject>,Database.Stateful{private String query;public Work(){query='SELECT Name FROM Account';}public Database.QueryLocator start(Database.BatchableContext bc){return Database.getQueryLocator('SELECT Id FROM Account');}public void execute(Database.BatchableContext bc,List<SObject> rows){this.fetch();}private void fetch(){Database.query(query);}public void finish(Database.BatchableContext bc){}}";
+  const index=new ApexRepositoryMethodIndex([{filePath:"Work.cls",source}]);
+  const engine=new ApexAnalysisEngine(index);
+  const run=()=>engine.analyze("Work.cls",ctx=>extractDynamicSoqlQueries(source,"Work.cls",ctx.resolveExternal,ctx.repositoryIndex));
+  const counts=new Map<string,number>();
+  const [first,second]=await withApexPerformance({count:(name,n)=>counts.set(name,(counts.get(name)??0)+n),duration:()=>{}},
+    async()=>{const first=await run();return [first,await run()];});
+  assert.ok(first.queries.some(q=>q.query==="SELECT Name FROM Account"&&q.coverage==="CONDITIONAL_FRAMEWORK_CONTEXT"),JSON.stringify(first));
+  assert.deepEqual(first,second);
+  assert.equal(counts.get("caller.lifecycle.discovery_evaluations"),1);
+  assert.ok((counts.get("caller.lifecycle.discovery_cache_hits")??0)>=1);
+  assert.equal(counts.get("caller.batch_receiver_inventory_evaluations"),2);
+});
