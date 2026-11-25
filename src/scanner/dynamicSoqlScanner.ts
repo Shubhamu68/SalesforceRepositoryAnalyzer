@@ -6,6 +6,7 @@ import {provePartialSoql} from "../analyzer/soqlPartialStructure.js";
 import {proveLocalSoqlPermissionShape} from "../analyzer/soqlSourceStructuralEvidence.js";
 import {proveCallerPermissionShapes,proveLiteralHelperPermissionShapes} from "../analyzer/soqlCallerStructuralEvidence.js";
 import {proveLabelBackedPermissionShapes} from "../analyzer/soqlLabelStructuralEvidence.js";
+import {backtrackSoqlPermissionShapes} from "../analyzer/soqlBackwardEvidence.js";
 import {aggregatePermissionShapes,simplePermissionShape,type SoqlPermissionShape} from "../analyzer/soqlPermissionAggregation.js";
 import {describePartialApexText,type ApexValue} from "../core/apex/ApexValueEvaluator.js";
 import {describeMalformedSoql} from "../analyzer/soqlReconstructionDiagnostics.js";
@@ -157,7 +158,11 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
           ...proveLabelBackedPermissionShapes(source,site,resolveExternal,methods)
         ]:[];
         const callers=callerSeeds.length?proveCallerPermissionShapes(source,site,callerSeeds,methods):[];
-        const shapes=[...local,...callers].flatMap(text=>{
+        const traced=variants.size===0&&!local.length&&!callers.length
+          ?backtrackSoqlPermissionShapes(source,filePath,site,repositoryIndex,resolveExternal):undefined;
+        if(traced?.queries.length)explanation+=" Backward structural dependency evidence from "+traced.callerEdges+" explicit caller edge(s) and "+traced.metadataRows+" metadata row candidate(s); intended predicate literals are parser-only, not an injection-safety proof.";
+        if(traced?.bounded)explanation+=" Backward dependency trace reached its work bound.";
+        const shapes=[...local,...callers,...(traced?.queries??[])].flatMap(text=>{
           const shape=simplePermissionShape(text,site.line);
           return shape&&(!mode||shape.mode==="UNSPECIFIED"||shape.mode===mode)?[shape]:[];
         });

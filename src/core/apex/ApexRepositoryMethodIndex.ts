@@ -40,6 +40,15 @@ interface Caller {
   /** Proven argument-only same-receiver edge, never a receiver snapshot. */
   privateInstanceEdge?:boolean;
 }
+/** Immutable source edge for consumers doing dependency analysis rather than execution. */
+export interface ApexCallerSource {
+  filePath:string;
+  source:string;
+  methods:readonly IndexedApexMethod[];
+  method:IndexedApexMethod;
+  offset:number;
+  expressions:readonly string[];
+}
 export interface ApexCallerContexts {
   readonly known:ApexValue[][];
   /** Explicit caller contexts with at least one known and one unknown input. */
@@ -246,6 +255,20 @@ export class ApexRepositoryMethodIndex {
       }
     }
     syntax.clear();
+  }
+
+  /** Reuse the existing overload/receiver proof. This API exposes syntax,
+   * not evaluated arguments, and does not change engine selection or budgets. */
+  sourceCallers(filePath:string,target:IndexedApexMethod):readonly ApexCallerSource[]{
+    const owner=this.paths.get(path.resolve(filePath));
+    if(!owner||!owner.methods.includes(target))return [];
+    const candidates=this.callers.get(this.methodKey(owner.className,target.name,target.parameters.length))??[];
+    if(candidates.length>MAX_CALL_CONTEXTS)return [];
+    return candidates.filter(call=>call.targetStart===target.start&&
+      (target.isStatic||call.privateInstanceEdge)&&
+      (call.caller===owner||target.visibility==="public"||target.visibility==="global"))
+      .map(call=>({filePath:call.caller.filePath,source:call.caller.source,methods:call.caller.methods,
+        method:call.method,offset:call.offset,expressions:[...call.expressions]}));
   }
 
   indexedMethods(filePath:string,source:string):IndexedApexMethod[]|undefined{
