@@ -4,16 +4,20 @@ import {
   stat,
 } from "node:fs/promises";
 import path from "node:path";
+import {setImmediate as yieldToEventLoop} from "node:timers/promises";
 import { classifySoqlMode } from "../analyzer/soqlExecutionMode.js";
 import { parseNestedSoql, maskSoql } from "../analyzer/nestedSoqlScopes.js";
+import { extractDynamicSoqlQueries, type UnresolvedDynamicSoql } from "./dynamicSoqlScanner.js";
+import type {ApexValue} from "../core/apex/ApexValueEvaluator.js";
+import {ApexAnalysisEngine} from "../core/apex/ApexAnalysisEngine.js";
+import { ApexRepositoryMethodIndex } from "../core/apex/ApexRepositoryMethodIndex.js";
+import { maskApexSource } from "../core/apex/ApexSourceModel.js";
+import type { ApexMetadataProvider } from "../core/metadata/ApexMetadataProvider.js";
 
 import type { SoqlQuery } from "../models/SoqlQuery.js";
-import { recordSoqlCount, timeSoqlPhase } from "../services/SoqlPerformanceMetrics.js";
+import { recordSoqlCount, timeSoqlPhase, timeSoqlSync } from "../services/SoqlPerformanceMetrics.js";
 
-// Bound filesystem concurrency: improve cold scans without opening hundreds of
-// Apex files simultaneously or changing deterministic query ordering.
-const READ_BATCH_SIZE = 12;
-
+ 
 /**
  * Preserve the original repository-wide semantics (including class exclusion
  * and source ordering) while avoiding repeated Apex parsing across personas.
@@ -26,9 +30,22 @@ const MAX_REPOSITORIES = 2;
 // ctime within the filesystem's timestamp-resolution window. Treat very
 // recently modified files as unstable and parse them again until aged out.
 const FILE_TIMESTAMP_SAFETY_NS = 2_000_000_000n;
-type CachedApexFile = { fingerprint: string; queries: SoqlQuery[] };
+export interface SoqlScanInventory {
+  queries: SoqlQuery[];
+  unresolvedDynamic: UnresolvedDynamicSoql[];
+}
+type CachedApexFile = {
+  fingerprint: string;
+  source: string;
+  queries: SoqlQuery[];
+  unresolvedDynamic: UnresolvedDynamicSoql[];
+};
+type CachedRepositoryGraph = { signature: string; index: ApexRepositoryMethodIndex };
+const repositoryGraphs = new Map<string,CachedRepositoryGraph>();
 const indexedRepositories = new Map<string, Map<string, CachedApexFile>>();
-const inFlightScans = new Map<string, Promise<SoqlQuery[]>>();
+type ScanProgress=(completed:number,total:number)=>void;
+type PendingScan={work:Promise<SoqlScanInventory>;listeners:Set<ScanProgress>;completed:number;total:number};
+const inFlightScans = new Map<string, PendingScan>();
 
 async function parallelMap<T, R>(
   input: readonly T[], task: (value: T) => Promise<R>,
@@ -45,64 +62,152 @@ async function parallelMap<T, R>(
 }
 
 export async function scanApexSoql(repositoryPath: string): Promise<SoqlQuery[]> {
-  const root = path.resolve(repositoryPath);
-  const pending = inFlightScans.get(root);
-  if (pending) {
-    recordSoqlCount("scanner.inflight_reuse");
-    return pending;
-  }
-  const work = scanRepositoryApex(root);
-  inFlightScans.set(root, work);
-  try {
-    return await work;
-  } finally {
-    if (inFlightScans.get(root) === work) inFlightScans.delete(root);
-  }
+  return (await scanApexSoqlWithUnresolved(repositoryPath)).queries;
 }
 
-async function scanRepositoryApex(repositoryPath: string): Promise<SoqlQuery[]> {
+/** One shared repository scan supplies normal queries plus review-only dynamic sites. */
+export async function scanApexSoqlWithUnresolved(
+  repositoryPath: string, metadata?: ApexMetadataProvider, onProgress?:ScanProgress,
+): Promise<SoqlScanInventory> {
+  const root = path.resolve(repositoryPath);
+  const cacheKey = root + "|" + (metadata?.scopeKey ?? "REPOSITORY_ONLY");
+  const pending = inFlightScans.get(cacheKey);
+  if (pending) {
+    recordSoqlCount("scanner.inflight_reuse");
+    if(onProgress){pending.listeners.add(onProgress);onProgress(pending.completed,pending.total);}
+    try{return await pending.work;}finally{if(onProgress)pending.listeners.delete(onProgress);}
+  }
+  const listeners=new Set<ScanProgress>();
+  if(onProgress)listeners.add(onProgress);
+  const job:PendingScan={work:Promise.resolve({queries:[],unresolvedDynamic:[]}),listeners,completed:0,total:0};
+  job.work=scanRepositoryApex(root,cacheKey,metadata,(completed,total)=>{
+    job.completed=completed;job.total=total;
+    for(const listener of job.listeners)listener(completed,total);
+  });
+  inFlightScans.set(cacheKey,job);
+  try{return await job.work;}
+  finally{if(inFlightScans.get(cacheKey)===job)inFlightScans.delete(cacheKey);}
+}
+
+/**
+ * Restore the original dependency explanation when richer repository helper
+ * evaluation cannot traverse a query site's control flow. This is diagnostic
+ * only: never import any query, variant or resolved status from the fallback.
+ */
+function preserveDynamicFailureDiagnostics(
+  source:string,filePath:string,
+  analysis:ReturnType<typeof extractDynamicSoqlQueries>,
+  standaloneResolver?: (name:string,args:ApexValue[])=>ApexValue|undefined,
+):ReturnType<typeof extractDynamicSoqlQueries> {
+  if(!analysis.unresolved.some(finding=>
+    /Invocation is outside a supported method or execution path/i.test(finding.reason)))
+    return analysis;
+  const local=extractDynamicSoqlQueries(source,filePath,standaloneResolver);
+  const localReasons=new Map(local.unresolved.map(finding=>[finding.siteId,finding.reason]));
+  return {...analysis,unresolved:analysis.unresolved.map(finding=>{
+    if(!/Invocation is outside a supported method or execution path/i.test(finding.reason))
+      return finding;
+    const original=localReasons.get(finding.siteId);
+    if(!original || /Invocation is outside a supported method or execution path/i.test(original))
+      return finding;
+    return {...finding,reason:"Repository caller execution path not established; "+
+      "source-local dependency: "+original};
+  })};
+}
+
+/** Resolve only org-proven label/Describe and repository-literal constants. */
+
+
+
+async function scanRepositoryApex(
+  repositoryPath: string, cacheKey: string, metadata?: ApexMetadataProvider, onProgress?:ScanProgress,
+): Promise<SoqlScanInventory> {
   const apexFiles = await timeSoqlPhase("scanner.discovery", () => findApexClasses(repositoryPath));
   apexFiles.sort((a, b) => a.localeCompare(b));
   recordSoqlCount("scanner.apex_files", apexFiles.length);
 
-  const previous = indexedRepositories.get(repositoryPath);
-  let reused = 0;
-  const currentEntries = await timeSoqlPhase("scanner.stat_and_parse", () =>
-    parallelMap(apexFiles, async (filePath): Promise<[string, CachedApexFile]> => {
-      // Nanosecond mtime+ctime and size detect ordinary source edits even when
-      // content length is unchanged; directory traversal detects additions/deletions.
-      // Cold scans need both source bytes and metadata anyway. Fetch them
-      // concurrently rather than serializing thousands of stat+read pairs.
-      // Warm scans stat first, avoiding file reads when reuse is safe.
-      const cold = previous ? undefined : await Promise.all([
-        stat(filePath, { bigint: true }), readFile(filePath, "utf8"),
-      ]);
-      const info = cold ? cold[0] : await stat(filePath, { bigint: true });
-      const fingerprint = `${info.size}:${info.mtimeNs}:${info.ctimeNs}`;
-      const cached = previous?.get(filePath);
-      const nowNs = BigInt(Date.now()) * 1_000_000n;
-      const lastChanged = info.ctimeNs > info.mtimeNs ? info.ctimeNs : info.mtimeNs;
-      const timestampStable = nowNs - lastChanged >= FILE_TIMESTAMP_SAFETY_NS;
-      if (cached?.fingerprint === fingerprint && timestampStable) {
-        reused++;
-        return [filePath, cached];
-      }
-      const source = cold ? cold[1] : await readFile(filePath, "utf8");
-      return [filePath, { fingerprint, queries: extractSoqlQueries(source, filePath) }];
+  const previous=indexedRepositories.get(cacheKey);
+  // Preserve source bytes in the repository-scoped cache so cross-class caller
+  // indexes can be refreshed without rereading unchanged files on warm scans.
+  const sources=await timeSoqlPhase("scanner.source_index",()=>parallelMap(apexFiles,
+    async filePath=>{
+      const info=await stat(filePath,{bigint:true});
+      const fingerprint=`${info.size}:${info.mtimeNs}:${info.ctimeNs}`;
+      const lastChanged=info.ctimeNs>info.mtimeNs?info.ctimeNs:info.mtimeNs;
+      const stable=BigInt(Date.now())*1_000_000n-lastChanged>=FILE_TIMESTAMP_SAFETY_NS;
+      const cached=previous?.get(filePath);
+      const reused=stable && cached?.fingerprint===fingerprint;
+      return {filePath,fingerprint,reused,
+        source:reused?cached!.source:await readFile(filePath,"utf8")};
     }));
-  recordSoqlCount("scanner.reused_files", reused);
-  recordSoqlCount("scanner.parsed_files", apexFiles.length - reused);
-  const nextIndex = new Map(currentEntries);
-  // Only publish a complete successful snapshot. Failed reads do not poison
-  // the previous cache, and deleted files are removed from the new index.
-  if (indexedRepositories.size >= MAX_REPOSITORIES && !indexedRepositories.has(repositoryPath)) {
-    indexedRepositories.delete(indexedRepositories.keys().next().value!);
+  const signature=sources.map(item=>item.filePath+"@"+item.fingerprint).join("|");
+  const previousGraph=repositoryGraphs.get(cacheKey);
+  const graphUnchanged=previousGraph?.signature===signature;
+  const repositoryIndex=graphUnchanged?previousGraph!.index:
+    timeSoqlSync("scanner.repository_graph",()=>new ApexRepositoryMethodIndex(sources.map(({filePath,source})=>({filePath,source}))));
+
+  // A changed caller invalidates a callee's dynamic query analysis even if
+  // the callee source is unchanged. Never retain a stale cross-class result.
+  const engine=new ApexAnalysisEngine(repositoryIndex,metadata);
+  let completed=0;
+  onProgress?.(0,sources.length);
+  const finishFile=async()=>{
+    onProgress?.(++completed,sources.length);
+    // Give the HTTP progress poll and pending metadata I/O a chance to run.
+    // This is cooperative yielding, not parallel CPU execution.
+    if(completed%8===0)await yieldToEventLoop();
+  };
+  const currentEntries=await timeSoqlPhase("scanner.stat_and_parse",()=>parallelMap(sources,
+    async (entry:typeof sources[number]):Promise<[string,CachedApexFile]>=>{
+      const existing=previous?.get(entry.filePath);
+      // A metadata value may flow from a different class into this method.
+      // With a connected org, re-evaluate ALL dynamic execution classes on
+      // each new user-initiated scan, while reusing unchanged static-only
+      // classes. No stale cross-class label/fieldset/CMDT result may survive.
+      const hasDynamicCall=/\bDatabase\s*\.\s*(?:query|countQuery|getQueryLocator)(?:WithBinds)?\s*\(/i
+        .test(maskApexSource(entry.source));
+      if(entry.reused && graphUnchanged && existing &&
+         !(metadata && hasDynamicCall)){
+        await finishFile();return [entry.filePath,existing];
+      }
+      const staticQueries=entry.reused && existing
+        ?existing.queries.filter(query=>!query.dynamicOrigin)
+        :extractSoqlQueries(entry.source,entry.filePath);
+      const dynamic=hasDynamicCall?await engine.analyze(entry.filePath,context=>
+        preserveDynamicFailureDiagnostics(entry.source,entry.filePath,
+          extractDynamicSoqlQueries(entry.source,entry.filePath,context.resolveExternal,context.repositoryIndex),
+          context.resolveLocal)):{queries:[],unresolved:[]};
+      if(!hasDynamicCall)recordSoqlCount("scanner.static_only_files");
+      await finishFile();
+      return [entry.filePath,{
+        fingerprint:entry.fingerprint,source:entry.source,
+        queries:[...staticQueries,...dynamic.queries],
+        unresolvedDynamic:dynamic.unresolved,
+      }];
+    }));
+  recordSoqlCount("scanner.reused_files",graphUnchanged?sources.filter(s=>s.reused).length:0);
+  recordSoqlCount("scanner.parsed_files",
+    graphUnchanged?sources.filter(s=>!s.reused).length:sources.length);
+  const nextIndex=new Map(currentEntries);
+  // Publish both caches together only after every scan succeeds.
+  if(indexedRepositories.size>=MAX_REPOSITORIES&&!indexedRepositories.has(cacheKey)) {
+    const oldest=indexedRepositories.keys().next().value!;
+    indexedRepositories.delete(oldest);
+    repositoryGraphs.delete(oldest);
   }
-  indexedRepositories.set(repositoryPath, nextIndex);
-  const queries: SoqlQuery[] = [];
-  for (const [, entry] of currentEntries) queries.push(...entry.queries);
-  return queries.sort((a, b) =>
-    a.filePath.localeCompare(b.filePath) || a.lineNumber - b.lineNumber);
+  indexedRepositories.set(cacheKey,nextIndex);
+  repositoryGraphs.set(cacheKey,{signature,index:repositoryIndex});
+  const queries:SoqlQuery[]=[];
+  const unresolvedDynamic:UnresolvedDynamicSoql[]=[];
+  for(const [,entry] of currentEntries) {
+    queries.push(...entry.queries);
+    unresolvedDynamic.push(...entry.unresolvedDynamic);
+  }
+  return {
+    queries:queries.sort((a,b)=>a.filePath.localeCompare(b.filePath)||a.lineNumber-b.lineNumber),
+    unresolvedDynamic:unresolvedDynamic.sort((a,b)=>
+      a.filePath.localeCompare(b.filePath)||a.lineNumber-b.lineNumber),
+  };
 }
 
 /**

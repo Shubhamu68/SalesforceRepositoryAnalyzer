@@ -58,3 +58,7 @@ Optional Salesforce verification is authenticated through **Salesforce CLI-manag
 - Access decisions use a centralized evaluator to reduce inconsistent rules across features.
 - A verified org permission does not replace object-level authorization checks; `Review` means incomplete evidence, not a denied grant.
 - Unsupported Apex patterns, dynamic SOQL, and complex call flows can limit certainty. Regression tests help prevent known false positives; they do not guarantee complete Apex language coverage.
+
+## Dynamic SOQL v0.1.1 (feature branch)
+
+The [dynamic SOQL architecture](features/dynamic-soql-resolution-v011.md) isolates Apex source parsing, bounded field-list/value tracing and read-only metadata adapters from the persona permission engine. Only fully reconstructed query variants enter the existing OLS/FLS evaluator; incomplete values remain a single Unable to verify finding per execution site. This feature remains under review.

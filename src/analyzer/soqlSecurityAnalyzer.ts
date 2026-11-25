@@ -12,7 +12,7 @@ import type { SalesforceRelationshipMetadataService } from "../salesforce/Salesf
 import type { SalesforceFieldMetadataService } from "../salesforce/SalesforceFieldMetadataService.js";
 import type { SoqlFieldInventory, SoqlFieldReference } from "../models/SoqlFieldInventory.js";
 import { ApexExecutionSecurityModeResolver } from "../services/ApexExecutionSecurityModeResolver.js";
-import { runtimeImpactForFinding, type SoqlExecutionMode } from "./soqlExecutionMode.js";
+import { resolveSoqlExecutionMode, runtimeImpactForFinding, type SoqlExecutionMode } from "./soqlExecutionMode.js";
 import { recordSoqlCount, timeSoqlPhase, timeSoqlSync } from "../services/SoqlPerformanceMetrics.js";
 
 /** Prevent hundreds of simultaneous Salesforce requests on large repositories. */
@@ -121,7 +121,10 @@ export class SoqlSecurityAnalyzer {
     // Version lookup is cached per class, so hundreds of queries do not trigger
     // hundreds of metadata reads. The same resolver serves Stack Trace analysis.
     const modeResults = await timeSoqlPhase("execution.modes", () => Promise.all(queries.map((query) =>
-      this.executionModeResolver.resolve(query.query, query.filePath)
+      this.executionModeResolver.resolve(query.query, query.filePath).then(mode =>
+        query.dynamicAccessLevel && mode.declaredMode === "UNSPECIFIED"
+          ? resolveSoqlExecutionMode(query.dynamicAccessLevel, mode.apiVersion)
+          : mode)
     )));
     return { queries, inventory, unresolvedFields, parserLimitations, modeResults };
   }
@@ -135,12 +138,12 @@ export class SoqlSecurityAnalyzer {
     const resolved = await timeSoqlPhase("permissions.resolve", () => this.personaPermissionResolver.resolve(persona));
     const evaluator = createPersonaAccessEvaluator(resolved);
     const queryByLocation = new Map<string, { query: SoqlQuery; execution: SoqlExecutionMode }>(queries.map((query, index) => [
-      `${query.filePath}|${query.lineNumber}`, { query, execution: modeResults[index] },
+      query.queryVariantId ?? `${query.filePath}|${query.lineNumber}`, { query, execution: modeResults[index] },
     ]));
     const findings: SoqlSecurityFinding[] = [];
 
-    function queryInfo(filePath: string, lineNumber: number) {
-      const data = queryByLocation.get(`${filePath}|${lineNumber}`);
+    function queryInfo(filePath: string, lineNumber: number, variantId?: string) {
+      const data = queryByLocation.get(variantId ?? `${filePath}|${lineNumber}`);
       return {
         query: data?.query.query ?? "",
         withUserMode: data?.query.withUserMode ?? false,
@@ -167,8 +170,8 @@ export class SoqlSecurityAnalyzer {
           : `${subject}: Read permission wasn't established in repository metadata, and Salesforce couldn't verify access.`;
       return refs.map((ref) => {
         const parentLine = ref.queryLineNumber ?? ref.lineNumber;
-        const queryDetails = queryInfo(ref.filePath, parentLine);
-        const execution = queryByLocation.get(`${ref.filePath}|${parentLine}`)?.execution;
+        const queryDetails = queryInfo(ref.filePath, parentLine, ref.queryVariantId);
+        const execution = queryByLocation.get(ref.queryVariantId ?? `${ref.filePath}|${parentLine}`)?.execution;
         // WITH SECURITY_ENFORCED checks SELECT fields, not automatically
         // every filtering/grouping/sorting expression. Never fabricate a
         // High-severity enforced failure for a non-SELECT-only field use.
@@ -185,6 +188,7 @@ export class SoqlSecurityAnalyzer {
         return {
           ...outcome, findingType: type, filePath: ref.filePath, lineNumber: ref.lineNumber,
           object, field, ...queryDetails,
+          ...(ref.queryVariantId ? { queryVariantId: ref.queryVariantId } : {}),
           ...(ref.relationshipPath ? { relationshipPath: ref.relationshipPath, queryLevel: ref.relationshipPath.split(" -> ").length } : {}),
           runtimeImpact: scopedExecution
             ? runtimeImpactForFinding(scopedExecution, decision.source === "ORG_VERIFIED" ? "VERIFIED" :
@@ -223,7 +227,7 @@ export class SoqlSecurityAnalyzer {
         const references = inventory.objectReferences.get(object) ?? [];
         const distinct = new Map<string, SoqlFieldReference>();
         for (const ref of references) {
-          distinct.set(`${ref.filePath}|${ref.queryLineNumber ?? ref.lineNumber}`, ref);
+          distinct.set(ref.queryVariantId ?? `${ref.filePath}|${ref.queryLineNumber ?? ref.lineNumber}`, ref);
         }
         objectFindings.push(...findingFor([...distinct.values()], object, OBJECT_READ_FIELD,
           "OBJECT_READ", objectDecision));
@@ -279,7 +283,7 @@ export class SoqlSecurityAnalyzer {
           // field references can differ in clause/enforcement at one line.
           const id = deniedParentKeys.has(finding.field.toLowerCase())
             ? [finding.object, finding.field, finding.filePath,
-                finding.lineNumber, finding.relationshipPath ?? ""].join("|").toLowerCase()
+                finding.lineNumber, finding.queryVariantId ?? "", finding.relationshipPath ?? ""].join("|").toLowerCase()
             : `direct|${key}|${index}`;
           if (!groupedFieldFindings.has(id)) groupedFieldFindings.set(id, finding);
         }
@@ -298,7 +302,7 @@ export class SoqlSecurityAnalyzer {
     // Relationship resolution gaps are also inconclusive, not access denials.
     const reported = new Set<string>();
     for (const unresolved of unresolvedFields) {
-      const id = `${unresolved.query.filePath}:${unresolved.lineNumber ?? unresolved.query.lineNumber}:${unresolved.baseObject}:${unresolved.fieldPath}`.toLowerCase();
+      const id = `${unresolved.query.queryVariantId ?? unresolved.query.filePath}:${unresolved.lineNumber ?? unresolved.query.lineNumber}:${unresolved.baseObject}:${unresolved.fieldPath}`.toLowerCase();
       if (reported.has(id)) continue;
       reported.add(id);
       findings.push({
@@ -306,7 +310,7 @@ export class SoqlSecurityAnalyzer {
         findingType: "RELATIONSHIP", filePath: unresolved.query.filePath,
         lineNumber: unresolved.lineNumber ?? unresolved.query.lineNumber, object: unresolved.baseObject,
         field: unresolved.kind === "RELATIONSHIP" ? `Child relationship: ${unresolved.fieldPath}` : unresolved.fieldPath,
-        ...queryInfo(unresolved.query.filePath, unresolved.query.lineNumber),
+        ...queryInfo(unresolved.query.filePath, unresolved.query.lineNumber, unresolved.query.queryVariantId),
         ...(unresolved.relationshipPath ? {
           relationshipPath: unresolved.relationshipPath,
           queryLevel: unresolved.relationshipPath.split(" -> ").length
@@ -321,7 +325,7 @@ export class SoqlSecurityAnalyzer {
     // permission. Never allow unsupported SOQL expressions to look clean.
     const parseSeen = new Set<string>();
     for (const { query, message } of parserLimitations) {
-      const key = `${query.filePath}|${query.lineNumber}|${message}`;
+      const key = `${query.queryVariantId ?? (query.filePath+"|"+query.lineNumber)}|${message}`;
       if (parseSeen.has(key)) continue;
       parseSeen.add(key);
       findings.push({
@@ -329,7 +333,7 @@ export class SoqlSecurityAnalyzer {
         verificationSource: "UNVERIFIED", findingType: "PARSER",
         filePath: query.filePath, lineNumber: query.lineNumber,
         object: query.object, field: "(SOQL syntax review)",
-        ...queryInfo(query.filePath, query.lineNumber),
+        ...queryInfo(query.filePath, query.lineNumber, query.queryVariantId),
         runtimeImpact: "Not assessed",
         reason: `SOQL field extraction was incomplete: ${message} No access decision was inferred from this expression.`,
       });
@@ -343,11 +347,22 @@ export class SoqlSecurityAnalyzer {
         severity: "REVIEW", criticality: "Unable to verify", verificationSource: "UNVERIFIED",
         findingType: "QUERY_MODE", filePath: query.filePath, lineNumber: query.lineNumber,
         object: query.object, field: "(Unsupported Query Clause)", query: query.query,
+        ...(query.queryVariantId ? { queryVariantId: query.queryVariantId } : {}),
         withUserMode: query.withUserMode, apiVersion: mode.apiVersion,
         declaredMode: mode.declaredMode, effectiveMode: mode.effectiveMode, runtimeImpact: "Unsupported query clause",
         reason: mode.description,
       });
     });
+    // Tag every finding from a partial caller variant (including relationship
+    // and parser diagnostics). The distinct site-level REVIEW remains.
+    for(const finding of findings){
+      const variant=finding.queryVariantId;
+      const coverage=variant?queryByLocation.get(variant)?.query.coverage:undefined;
+      if(coverage==="KNOWN_CALLER_CONTEXT")
+        finding.reason += " Coverage: known repository caller variant only; other execution contexts remain unverified.";
+      if(coverage==="PROVEN_PARTIAL_STRUCTURE")
+        finding.reason += " Coverage: proven partial SOQL structure only; numeric placeholders are synthetic, not runtime values. Other execution contexts remain unverified.";
+    }
     return findings;
   }
 }

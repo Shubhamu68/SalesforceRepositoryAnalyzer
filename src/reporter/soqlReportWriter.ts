@@ -121,8 +121,10 @@ export async function writeAllPersonasHighPriorityReport(
   sheet.getCell("E3").value = totalHighPriorityOccurrences;
   sheet.mergeCells("A4:H4");
   sheet.getCell("A4").value =
-    "Only confirmed High-criticality references are included. Low and Unable to verify are excluded; duplicate findings across personas are retained.";
+    "Only confirmed High-criticality references are included. Low and Unable to verify are excluded; duplicate findings across personas are retained. Dynamic SOQL uses repository initializer snapshots; detected static writes and direct collection aliases invalidate those snapshots. Indirect effects may remain unresolved.";
   sheet.getCell("A4").font = { italic: true, size: 10, color: { argb: "FF60748D" } };
+  sheet.getCell("A4").alignment = { wrapText: true, vertical: "middle" };
+  sheet.getRow(4).height = 32;
   sheet.mergeCells("A5:H5");
   sheet.getCell("A5").value = verificationMode === "REPOSITORY_ONLY"
     ? "REPOSITORY-ONLY: Salesforce Read access could not be verified. No confirmed High findings does NOT mean permissions are safe."
@@ -176,6 +178,7 @@ interface ConciseFinding {
   references: Array<{
     filePath: string;
     lineNumber: number;
+    queryVariantId?: string;
     securityMode: string;
     effectiveMode: string;
     runtimeImpact: string;
@@ -238,6 +241,7 @@ function buildConciseFindings(
             finding.filePath &&
           reference.lineNumber ===
             finding.lineNumber &&
+          (reference.queryVariantId ?? "") === (finding.queryVariantId ?? "") &&
           (reference.relationshipPath ?? "") === (finding.relationshipPath ?? "")
       );
 
@@ -247,6 +251,7 @@ function buildConciseFindings(
           finding.filePath,
         lineNumber:
           finding.lineNumber,
+        ...(finding.queryVariantId ? { queryVariantId: finding.queryVariantId } : {}),
         securityMode,
         effectiveMode: finding.effectiveMode ?? "UNKNOWN",
         runtimeImpact: finding.runtimeImpact ?? "Undetermined",
@@ -361,8 +366,10 @@ async function writeSummaryWorkbook(
 
   summarySheet.addRow([]);
   summarySheet.mergeCells("A5:H5");
-  summarySheet.getCell("A5").value = "High = confirmed missing Read with enforced SOQL access; Low = advisory or org-verified Read. Mixed findings show the highest severity.";
+  summarySheet.getCell("A5").value = "High = confirmed missing Read with enforced SOQL access; Low = advisory or org-verified Read. Mixed findings show the highest severity. Dynamic SOQL uses repository initializer snapshots; detected static writes and direct collection aliases invalidate those snapshots. Indirect effects may remain unresolved; reconstructed queries are repository-based, not runtime traces.";
   summarySheet.getCell("A5").font = { italic: true, color: { argb: "FF60748D" }, size: 10 };
+  summarySheet.getCell("A5").alignment = { wrapText: true, vertical: "middle" };
+  summarySheet.getRow(5).height = 32;
 
   addSummaryFindingHeader(summarySheet);
   appendSummaryFindingRows(summarySheet, findings);

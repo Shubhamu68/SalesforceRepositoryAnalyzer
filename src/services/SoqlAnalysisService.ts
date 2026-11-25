@@ -1,3 +1,4 @@
+import path from "node:path";
 import { isDataAccessAnalysisObject } from "../config/fieldSecurityPolicy.js";
 import { countDeclaredSoqlModes, type DeclaredSoqlModeCounts } from "../analyzer/soqlDeclaredModeSummary.js";
 
@@ -5,7 +6,9 @@ import { Persona } from "../models/Persona.js";
 import { SoqlQuery } from "../models/SoqlQuery.js";
 import { SoqlSecurityFinding } from "../models/SoqlSecurityFinding.js";
 import { SoqlSecurityAnalyzer } from "../analyzer/soqlSecurityAnalyzer.js";
-import { scanApexSoql } from "../scanner/apexSoqlScanner.js";
+import { scanApexSoqlWithUnresolved } from "../scanner/apexSoqlScanner.js";
+import type { UnresolvedDynamicSoql } from "../scanner/dynamicSoqlScanner.js";
+import type { ApexMetadataProvider } from "../core/metadata/ApexMetadataProvider.js";
 import { writeSoqlReport, writeAllPersonasHighPriorityReport, type PersonaHighPriorityReportSection } from "../reporter/soqlReportWriter.js";
 import { recordSoqlCount, timeSoqlPhase, withSoqlPerformance } from "./SoqlPerformanceMetrics.js";
 import type { SoqlAnalysisProgress } from "./SoqlAnalysisProgress.js";
@@ -43,11 +46,33 @@ export interface AllPersonasHighPriorityResult {
   }>;
 }
 
+/** Use existing Excel findings schema: unresolved dynamic SOQL is a parser REVIEW. */
+function unresolvedDynamicFindings(sites: readonly UnresolvedDynamicSoql[]): SoqlSecurityFinding[] {
+  return sites.map(site => ({
+    severity: "REVIEW",
+    criticality: "Unable to verify",
+    verificationSource: "UNVERIFIED",
+    findingType: "PARSER",
+    filePath: site.filePath,
+    lineNumber: site.lineNumber,
+    ...(site.siteId ? { queryVariantId: site.siteId } : {}),
+    object: "Dynamic SOQL",
+    field: `(Unresolved query: ${path.basename(site.filePath)}:${site.lineNumber}${site.siteId ? "@" + site.siteId.split("@").at(-1) : ""})`,
+    query: "(dynamic SOQL could not be reconstructed)",
+    withUserMode: false,
+    declaredMode: "UNSPECIFIED",
+    effectiveMode: "UNKNOWN",
+    runtimeImpact: "Not assessed",
+    reason: site.knownVariants || site.partialStructureVariants ? `Dynamic SOQL execution coverage is incomplete: ${site.reason} OLS/FLS findings apply only to the proven caller variants or typed numeric-slot structures; unproven paths were not assessed.` : `Dynamic SOQL could not be parsed and verified because ${site.reason} OLS/FLS analysis was not performed for this query.`,
+  }));
+}
+
 export class SoqlAnalysisService {
   constructor(
   private readonly repositoryPath: string,
   private readonly soqlSecurityAnalyzer: SoqlSecurityAnalyzer,
-  private readonly outputDirectory: string | (() => string)
+  private readonly outputDirectory: string | (() => string),
+  private readonly metadata?: ApexMetadataProvider,
 ) {}
 
   async analyze(
@@ -56,11 +81,15 @@ export class SoqlAnalysisService {
   ): Promise<SoqlAnalysisResult> {
     return withSoqlPerformance(async () => {
     progress?.moveTo("scanning");
-    const queries: SoqlQuery[] =
-      (await timeSoqlPhase("repository.scan", () => scanApexSoql(
-        this.repositoryPath
-      ))).filter((query) => isDataAccessAnalysisObject(query.object));
+    const scanned = await timeSoqlPhase("repository.scan", () => scanApexSoqlWithUnresolved(
+      this.repositoryPath, this.metadata, progress?(completed,total)=>progress.reportClasses(completed,total):undefined
+    ));
+    const queries: SoqlQuery[] = scanned.queries
+      .filter((query) => isDataAccessAnalysisObject(query.object));
     recordSoqlCount("queries.analyzed", queries.length);
+    recordSoqlCount("queries.partial_structure", queries.filter(q=>q.coverage==="PROVEN_PARTIAL_STRUCTURE").length);
+    recordSoqlCount("queries.known_caller", queries.filter(q=>q.coverage==="KNOWN_CALLER_CONTEXT").length);
+    recordSoqlCount("queries.complete", queries.filter(q=>!q.coverage).length);
 
     // Keep the pre-existing analyzer path for callers without progress
     // (including CLI/tests). With progress, the SAME preparation/evaluation
@@ -73,6 +102,7 @@ export class SoqlAnalysisService {
       return this.soqlSecurityAnalyzer.analyzePrepared(persona, prepared,
         (completed, total) => progress.reportObjects(completed, total));
     });
+    findings.push(...unresolvedDynamicFindings(scanned.unresolvedDynamic));
     recordSoqlCount("findings", findings.length);
 
     const outputDirectory = typeof this.outputDirectory === "function"
@@ -149,10 +179,14 @@ export class SoqlAnalysisService {
     return withSoqlPerformance(async () => {
       progress?.setTotalPersonas(personas.length);
       progress?.moveTo("scanning");
-      const queries = (await timeSoqlPhase("repository.scan",
-        () => scanApexSoql(this.repositoryPath)))
+      const scanned = await timeSoqlPhase("repository.scan",
+        () => scanApexSoqlWithUnresolved(this.repositoryPath, this.metadata,progress?(completed,total)=>progress.reportClasses(completed,total):undefined));
+      const queries = scanned.queries
         .filter((query) => isDataAccessAnalysisObject(query.object));
       recordSoqlCount("queries.analyzed", queries.length);
+    recordSoqlCount("queries.partial_structure", queries.filter(q=>q.coverage==="PROVEN_PARTIAL_STRUCTURE").length);
+    recordSoqlCount("queries.known_caller", queries.filter(q=>q.coverage==="KNOWN_CALLER_CONTEXT").length);
+    recordSoqlCount("queries.complete", queries.filter(q=>!q.coverage).length);
       recordSoqlCount("personas.analyzed", personas.length);
 
       progress?.moveTo("preparing");

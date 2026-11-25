@@ -14,6 +14,7 @@ Start with the **Electron desktop setup** if you received the initial v0.1.0 fol
 | [Security](security.md) | Public source precautions, credentials, read-only scope, unsigned executable |
 | [Builds and releases](releases.md) | Difference between emailed ZIP, CI artifact and official tagged browser-portable Release |
 | [Repository settings](repository-settings.md) | Maintainer-only GitHub About and branch governance checklist |
+| [Dynamic SOQL v0.1.1 design and test coverage](features/dynamic-soql-resolution-v011.md) | Reusable Apex data-flow engine, resolution contracts and limitations |
 | [SOQL aggregate analysis](features/soql-aggregates.md) | Parser, field extraction, limitations and UAT |
 | [Org permission fallback](features/org-access-fallback.md) | Repository-first effective permission verification |
 

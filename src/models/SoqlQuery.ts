@@ -63,4 +63,12 @@ export interface SoqlQuery {
   withUserMode: boolean;
 
   securityMode: SoqlSecurityMode;
+  /** Explicit AccessLevel on a dynamic Database method; overrides API default. */
+  dynamicAccessLevel?: "USER_MODE" | "SYSTEM_MODE";
+  /** Stable execution-site and variant IDs; not exposed as new Excel columns. */
+  dynamicOrigin?: boolean;
+  /** Incomplete coverage: explicit caller sample or a typed numeric-slot structure. */
+  coverage?: "KNOWN_CALLER_CONTEXT" | "PROVEN_PARTIAL_STRUCTURE";
+  querySiteId?: string;
+  queryVariantId?: string;
 }

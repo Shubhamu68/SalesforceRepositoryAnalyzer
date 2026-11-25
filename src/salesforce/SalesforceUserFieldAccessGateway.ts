@@ -1,5 +1,6 @@
 import type { SalesforceOrgConnection, SalesforceSObjectDescribe } from "./SalesforceOrgConnection.js";
 import type { SalesforceFieldMetadataService } from "./SalesforceFieldMetadataService.js";
+import {setImmediate as nextTurn} from "node:timers/promises";
 import { recordSoqlCount } from "../services/SoqlPerformanceMetrics.js";
 
 /**
@@ -58,6 +59,9 @@ export function uniformlyDeniedCompoundParent(
 }
 
 const CACHE_MS = 60_000;
+const EXACT_BATCH_SIZE=20;
+type ExactRequest={field:string;resolve:(value:DirectAccess)=>void;reject:(error:unknown)=>void};
+type ExactGroup={scope:string;userId:string;object:string;requests:ExactRequest[]};
 const MAX_CACHE_ENTRIES = 2000;
 const FIELD_NAME = /^[A-Za-z][A-Za-z0-9_]*$/;
 const USER_ID = /^005[A-Za-z0-9]{12}(?:[A-Za-z0-9]{3})?$/;
@@ -135,11 +139,15 @@ function toAccess(rows: UserAccessRow[], userId: string, field: string): DirectA
 export class SalesforceUserFieldAccessGateway {
   private readonly fullCache = new Map<string, CacheEntry<Map<string, DirectAccess>>>();
   private readonly exactCache = new Map<string, CacheEntry<DirectAccess>>();
+  private readonly pendingExact=new Map<string,ExactGroup>();
+  private readonly unsupportedBatchUntil=new Map<string,number>();
+  private readonly unproductiveBatchUntil=new Map<string,number>();
   private readonly parentCache = new Map<string, CacheEntry<Map<string, string>>>();
 
   constructor(
     private readonly connection: Connection,
     private readonly metadata?: SalesforceFieldMetadataService,
+    private readonly options: {targetedBatching?:boolean} = {},
   ) {}
 
   private scope(): string {
@@ -183,11 +191,91 @@ export class SalesforceUserFieldAccessGateway {
   private async exact(userId: string, object: string, field: string): Promise<DirectAccess> {
     const key = this.scope() + "|" + userKey(userId) + "|" + norm(object) + "|" + norm(field);
     return this.cached(this.exactCache, key, async () => {
-      const soql =
-        `SELECT UserId, IsAccessible, IsUpdatable, FieldDefinition.QualifiedApiName FROM UserFieldAccess WHERE User.Id = '${userId}' AND FieldDefinition.EntityDefinition.QualifiedApiName = '${object}' AND FieldDefinition.QualifiedApiName = '${field}'`;
-      recordSoqlCount("org.user_field_gateway.exact_queries");
-      return toAccess(await this.connection.queryAll<UserAccessRow>(soql, "tooling", 5), userId, field);
+      // Live profiling: all four speculative IN batches were unproductive.
+      // Keep equality as the default across every shared gateway consumer.
+      return this.options.targetedBatching===true
+        ?this.enqueueExact(userId,object,field):this.singleExact(this.scope(),userId,object,field);
     });
+  }
+
+  private async singleExact(scope:string,userId:string,object:string,field:string):Promise<DirectAccess>{
+    if(this.scope()!==scope)throw new Error("Salesforce scope changed before field verification.");
+    const soql=`SELECT UserId, IsAccessible, IsUpdatable, FieldDefinition.QualifiedApiName FROM UserFieldAccess WHERE User.Id = '${userId}' AND FieldDefinition.EntityDefinition.QualifiedApiName = '${object}' AND FieldDefinition.QualifiedApiName = '${field}'`;
+    recordSoqlCount("org.user_field_gateway.exact_queries");
+    const rows=await this.connection.queryAll<UserAccessRow>(soql,"tooling",5);
+    if(this.scope()!==scope)throw new Error("Salesforce scope changed during field verification.");
+    return toAccess(rows,userId,field);
+  }
+
+  private enqueueExact(userId:string,object:string,field:string):Promise<DirectAccess>{
+    const scope=this.scope(),key=scope+"|"+userKey(userId)+"|"+norm(object);
+    if((this.unsupportedBatchUntil.get(scope)??0)>Date.now()||(this.unproductiveBatchUntil.get(key)??0)>Date.now())
+      return this.singleExact(scope,userId,object,field);
+    return new Promise((resolve,reject)=>{
+      let group=this.pendingExact.get(key);
+      if(!group){
+        group={scope,userId,object,requests:[]};this.pendingExact.set(key,group);
+        const current=group;
+        void nextTurn().then(()=>{
+          if(this.pendingExact.get(key)===current)this.pendingExact.delete(key);
+          return this.flushExact(current);
+        }).catch(error=>{for(const item of current.requests)item.reject(error);});
+      }
+      group.requests.push({field,resolve,reject});
+    });
+  }
+
+  /** Try bounded same-user/object targeted IN requests. A missing/conflicting
+   * row, unsupported filter or failed batch never replaces exact evidence.
+   * Retain the original equality fallback, including compound parent rules. */
+  private async flushExact(group:ExactGroup):Promise<void>{
+    const {scope,userId,object,requests}=group;
+    const key=scope+"|"+userKey(userId)+"|"+norm(object);
+    for(let i=0;i<requests.length;i+=EXACT_BATCH_SIZE){
+      const chunk=requests.slice(i,i+EXACT_BATCH_SIZE);
+      const unresolved=new Set(chunk);
+      if(chunk.length>1&&(this.unsupportedBatchUntil.get(scope)??0)<=Date.now()&&(this.unproductiveBatchUntil.get(key)??0)<=Date.now()){
+        try{
+          if(this.scope()!==scope)throw new Error("Salesforce scope changed before field verification.");
+          const names=chunk.map(item=>"'"+item.field+"'").join(",");
+          const soql=`SELECT UserId, IsAccessible, IsUpdatable, FieldDefinition.QualifiedApiName FROM UserFieldAccess WHERE User.Id = '${userId}' AND FieldDefinition.EntityDefinition.QualifiedApiName = '${object}' AND FieldDefinition.QualifiedApiName IN (${names})`;
+          recordSoqlCount("org.user_field_gateway.targeted_batch_queries");
+          recordSoqlCount("org.user_field_gateway.targeted_batch_fields",chunk.length);
+          const rows=await this.connection.queryAll<UserAccessRow>(soql,"tooling",chunk.length*5);
+          if(this.scope()!==scope)throw new Error("Salesforce scope changed during field verification.");
+          const requested=new Set(chunk.map(item=>norm(item.field)));
+          // Any out-of-scope row means the batch response is unreliable.
+          if(rows.every(row=>userKey(row.UserId??"")===userKey(userId)&&requested.has(norm(row.FieldDefinition?.QualifiedApiName??"")))){
+            for(const item of chunk){
+              const direct=toAccess(rows.filter(row=>norm(row.FieldDefinition?.QualifiedApiName??"")===norm(item.field)),userId,item.field);
+              if(direct.state==="PRESENT"&&direct.read!==null&&direct.edit!==null){
+                unresolved.delete(item);item.resolve(direct);
+                recordSoqlCount("org.user_field_gateway.targeted_batch_resolved");
+              }
+            }
+          }
+          if(unresolved.size===chunk.length){
+            // No saved equality lookups: avoid repeating a speculative batch
+            // for this object/user during the existing freshness window.
+            if(this.unproductiveBatchUntil.size>=MAX_CACHE_ENTRIES)this.unproductiveBatchUntil.clear();
+            this.unproductiveBatchUntil.set(key,Date.now()+CACHE_MS);
+            recordSoqlCount("org.user_field_gateway.targeted_batch_unproductive");
+          }
+        }catch(error){
+          recordSoqlCount("org.user_field_gateway.targeted_batch_failures");
+          const status=(error as {statusCode?:number}|null)?.statusCode;
+          if(status===400){
+            // Some org/API versions reject IN for this virtual object.
+            if(this.unsupportedBatchUntil.size>=32)this.unsupportedBatchUntil.clear();
+            this.unsupportedBatchUntil.set(scope,Date.now()+CACHE_MS);
+          }
+        }
+      }
+      await Promise.all([...unresolved].map(async item=>{
+        try{item.resolve(await this.singleExact(scope,userId,object,item.field));}
+        catch(error){item.reject(error);}
+      }));
+    }
   }
 
   private async direct(userId: string, object: string, field: string): Promise<DirectAccess> {

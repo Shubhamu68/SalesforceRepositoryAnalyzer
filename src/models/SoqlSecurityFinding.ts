@@ -15,6 +15,8 @@ export interface SoqlSecurityFinding {
   findingType?: SoqlFindingType;
   filePath: string;
   lineNumber: number;
+  /** Internal query identity; Excel layout remains unchanged. */
+  queryVariantId?: string;
   object: string;
   field: string;
   query: string;

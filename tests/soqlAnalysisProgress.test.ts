@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import type { Persona } from "../src/models/Persona.js";
 import type { SoqlSecurityAnalyzer } from "../src/analyzer/soqlSecurityAnalyzer.js";
+import { scanApexSoqlWithUnresolved } from "../src/scanner/apexSoqlScanner.js";
 import { SoqlAnalysisService } from "../src/services/SoqlAnalysisService.js";
 import {
   SoqlAnalysisProgress, SoqlProgressRegistry, noteSoqlUserMatching, withSoqlProgress,
@@ -216,4 +217,37 @@ test("web and API: one polling hook, optional UUID, no extra Salesforce calls fo
   assert.match(overlay, /Math\.floor\(progress\?\.percent/);
   assert.match(service, /progress\?\.personaCompleted\(\)/);
   assert.match(verifier, /noteSoqlUserMatching\(\)/);
+});
+
+
+test("progress: scanning reflects completed classes and does not advance after scanning",()=>{
+  const progress=new SoqlAnalysisProgress("single");
+  progress.moveTo("scanning");
+  progress.reportClasses(1,4);
+  assert.equal(progress.snapshot().percent,6);
+  progress.reportClasses(0,4);
+  assert.equal(progress.snapshot().percent,6);
+  progress.reportClasses(4,4);
+  assert.equal(progress.snapshot().percent,19);
+  progress.moveTo("preparing");
+  progress.reportClasses(2,4);
+  assert.equal(progress.snapshot().percent,20);
+});
+
+test("scanner reports actual class completion to concurrent subscribers",async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),"sf-class-progress-"));
+  try{
+    await Promise.all(Array.from({length:3},(_,i)=>writeFile(path.join(dir,"Class"+i+".cls"),
+      "public class Class"+i+" { public static void run(){Database.query('SELECT Id FROM Account');} }")));
+    const first:number[][]=[],second:number[][]=[];
+    const [a,b]=await Promise.all([
+      scanApexSoqlWithUnresolved(dir,undefined,(done,total)=>first.push([done,total])),
+      scanApexSoqlWithUnresolved(dir,undefined,(done,total)=>second.push([done,total])),
+    ]);
+    assert.equal(a.queries.length,3);assert.deepEqual(a,b);
+    for(const progress of [first,second]){
+      assert.deepEqual(progress.at(-1),[3,3]);
+      assert.ok(progress.every((p,i)=>i===0||p[0]>=progress[i-1][0]));
+    }
+  }finally{await rm(dir,{recursive:true,force:true});}
 });
