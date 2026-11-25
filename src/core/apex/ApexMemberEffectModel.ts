@@ -1,5 +1,6 @@
 import {maskApexSource,matchingPair,type IndexedApexMethod,type SourceNode} from "./ApexSourceModel.js";
 import {evaluateApexExpression,unknown,type ApexValue} from "./ApexValueEvaluator.js";
+import {canonicalApexType} from "./ApexTypeSystem.js";
 
 interface ScalarMember {name:string;key:string;initial:ApexValue}
 const safeCall=/^(?:String\.(?:join|valueOf|isBlank|isNotBlank|isEmpty|escapeSingleQuotes)|Math\.(?:min|max)|System\.debug)$/i;
@@ -246,6 +247,12 @@ export class ApexMemberEffectModel{
     const result=visit(method.body);
     this.safe.set(method,result);return result;
   }
+  /** An ignored scalar or inert DTO result cannot expose a mutable input
+   * collection through a returned alias. Do not assume arbitrary DTOs are inert. */
+  resultCannotExposeReference(method:IndexedApexMethod):boolean{
+    const type=canonicalApexType(method.returnType);
+    return !!type&&(/^(?:void|string|boolean|integer|long|decimal|double|id|date|datetime)$/.test(type)||this.inertDtos.has(type));
+  }
   unknownMembers(values:Map<string,ApexValue>,reason:string):void{
     for(const {key} of this.fields.values())if(values.has(key))values.set(key,unknown(reason));
   }
@@ -259,13 +266,17 @@ export function memberEffectModel(source:string,methods:readonly IndexedApexMeth
 
 /** A single top-level call whose arguments contain no invocations. Effects
  * cannot be replayed inside an arbitrary expression or speculative branch. */
-export function directEffectCall(source:string):string|undefined{
-  const visible=maskApexSource(source).trim();
+export function directEffectInvocation(source:string):{name:string;argumentText:string}|undefined{
+  const expr=source.trim();
+  const visible=maskApexSource(expr);
   const call=/^([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(/.exec(visible);
   if(!call)return undefined;
   const open=visible.indexOf("(");
   if(matchingPair(visible,open)!==visible.length-1||/[()]/.test(visible.slice(open+1,-1)))return undefined;
-  return call[1].toLowerCase();
+  return {name:call[1].toLowerCase(),argumentText:expr.slice(open+1,-1)};
+}
+export function directEffectCall(source:string):string|undefined{
+  return directEffectInvocation(source)?.name;
 }
 
 /** Exact metadata access, with no embedded executable arguments. */

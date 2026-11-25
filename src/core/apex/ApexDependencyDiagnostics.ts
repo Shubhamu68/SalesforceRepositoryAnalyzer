@@ -42,7 +42,7 @@ const blockerGroups:readonly {codes:readonly string[];label:string;limit?:number
   {codes:["DESCRIBE_UNAVAILABLE","DESCRIBE_OBJECT_UNPROVEN","LABEL_UNAVAILABLE","GUARD_MAP_UNPROVEN","RUNTIME_LOOP_DOMAIN_UNPROVEN"],label:"Could not verify required metadata or schema"},
   {codes:["LOOP_EFFECT_UNSUPPORTED","RUNTIME_LOOP_EFFECT_UNPROVEN","RUNTIME_LOOP_TYPE_UNPROVEN","LOOP_SHAPE_UNSUPPORTED"],label:"Could not determine how the loop changes values"},
   {codes:["MAP_ALIAS_OR_WRITE","METADATA_ALIAS_OR_WRITE","COLLECTION_ALIAS_OR_WRITE","COLLECTION_ALIAS","SCALAR_WRITE_UNSUPPORTED","SELF_REFERENTIAL_APPEND","GUARD_DEPENDS_ON_TARGET","GUARD_CALL_UNSUPPORTED"],label:"Could not verify assignments, shared references or conditions",limit:2},
-  {codes:["SHARED_HELPER_UNPROVEN","HELPER_RETURN_UNPROVEN","HELPER_INPUT_MODIFIED"],label:"Could not verify helper results or changes to inputs"},
+  {codes:["SHARED_HELPER_UNPROVEN","HELPER_RETURN_UNPROVEN","HELPER_INPUT_MODIFIED","SHARED_HELPER_EFFECT_UNPROVEN"],label:"Could not verify helper results or changes to inputs"},
   {codes:["UNSUPPORTED_CALL","UNSUPPORTED_MEMBER","UNSUPPORTED_ALLOCATION","UNSUPPORTED_OTHER","UNSUPPORTED_INLINE_QUERY","READ_OPERATION_UNPROVEN","READ_COLLECTION_UNPROVEN"],label:"The analyzer could not resolve this expression or operation",limit:2},
   {codes:["LEXICAL_PATH_UNSUPPORTED","OPAQUE_CONTROL_FLOW","CONTROL_FLOW_UNSUPPORTED","NO_INDEXED_METHOD"],label:"Could not follow this execution path"},
   {codes:["SHADOWED_PLATFORM_CLASS","SHADOWED_STRING"],label:"Could not confirm which platform class is used"},

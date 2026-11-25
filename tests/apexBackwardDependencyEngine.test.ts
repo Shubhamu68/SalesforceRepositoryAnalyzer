@@ -190,3 +190,33 @@ test("caller-frame helper resolution uses caller source rather than root source"
     (name,args,hints,from)=>index.evaluateReturn(from??root.filePath,name,args,undefined,hints));
   assert.deepEqual(result.candidates.map(e=>e.value),[textValue("Name")],JSON.stringify(result));
 });
+
+
+test("backward tracer uses AUE argument effects for known collection mutations and scalar return assignments",()=>{
+  const source="public class Builder {public static void run(){Set<String> fields=new Set<String>{'Id'};List<String> paths=new List<String>{'Name','Industry'};for(String path:paths){String ignored=addField(fields,path);}replaceField(fields);Sink.consume(fields);}private static String addField(Set<String> cols,String path){cols.add(path);return path;}private static void replaceField(Set<String> cols){cols.remove('Industry');cols.add('Phone');}}";
+  const events:string[]=[];
+  const result=traceApexDependencies(source,"Builder.cls",{expression:"fields",offset:source.indexOf("Sink.consume")},undefined,undefined,{observe:e=>events.push(e.code)});
+  assert.deepEqual(result.candidates.map(e=>e.value),[{kind:"collection",items:["Id","Name","Phone"],unique:true}],JSON.stringify(result));
+  assert.equal(events.filter(e=>e==="SHARED_HELPER_EFFECT_RESOLVED").length,3);
+});
+test("backward helper reassignment does not replace caller collection",()=>{
+  const source="public class Builder {public static void run(){List<String> fields=new List<String>{'Id'};change(fields);Sink.consume(fields);}private static void change(List<String> cols){cols.add('Name');cols=new List<String>();cols.add('Phone');}}";
+  const result=traceApexDependencies(source,"Builder.cls",{expression:"fields",offset:source.indexOf("Sink.consume")});
+  assert.deepEqual(result.candidates.map(e=>e.value),[{kind:"collection",items:["Id","Name"],unique:false}],JSON.stringify(result));
+});
+test("backward effect replay never treats a conditional candidate union, runtime argument, or escaped reference as an exact collection",()=>{
+  const base="public class Builder {public static void run(Boolean flag,String path){Set<String> fields=new Set<String>{'Id'};PREFIX change(fields,ARG);Sink.consume(fields);}private static void change(Set<String> cols,String path){cols.remove('Id');cols.add(path);}}";
+  for(const [prefix,arg] of [["if(flag){fields.add('Name');}","'Phone'"],["","path"],["Other.mutate(fields);","'Phone'"],["Set<String> alias=fields;","'Phone'"]]){
+    const source=base.replace("PREFIX",prefix).replace("ARG",arg);
+    const result=traceApexDependencies(source,"Builder.cls",{expression:"fields",offset:source.indexOf("Sink.consume")});
+    assert.ok(result.candidates.every(e=>e.value.kind==="unknown"),JSON.stringify(result));
+  }
+});
+test("backward effects reject a returned collection alias and unsupported helper body",()=>{
+  for(const body of ["Set<String> alias=change(fields);","change(fields);"]){
+    const helper=body.startsWith("Set")?"private static Set<String> change(Set<String> cols){cols.add('Name');return cols;}":"private static void change(Set<String> cols){Other.mutate(cols);}";
+    const source="public class Builder {public static void run(){Set<String> fields=new Set<String>{'Id'};"+body+"Sink.consume(fields);}"+helper+"}";
+    const result=traceApexDependencies(source,"Builder.cls",{expression:"fields",offset:source.indexOf("Sink.consume")});
+    assert.ok(result.candidates.every(e=>e.value.kind==="unknown"),JSON.stringify(result));
+  }
+});

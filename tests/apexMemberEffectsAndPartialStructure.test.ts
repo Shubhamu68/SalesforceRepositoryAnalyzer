@@ -5,7 +5,7 @@ import {ApexAnalysisEngine} from "../src/core/apex/ApexAnalysisEngine.js";
 import {ApexRepositoryMethodIndex} from "../src/core/apex/ApexRepositoryMethodIndex.js";
 import {indexApexMethods} from "../src/core/apex/ApexSourceModel.js";
 import {memberEffectModel} from "../src/core/apex/ApexMemberEffectModel.js";
-import {textValue,unknown,runtimeParameter,addApexValues} from "../src/core/apex/ApexValueEvaluator.js";
+import {textValue,unknown,runtimeParameter,addApexValues,listValue} from "../src/core/apex/ApexValueEvaluator.js";
 import {extractDynamicSoqlQueries} from "../src/scanner/dynamicSoqlScanner.js";
 import {provePartialSoql} from "../src/analyzer/soqlPartialStructure.js";
 
@@ -117,4 +117,27 @@ test("partial private caller can submit proven numeric-slot inventory without cl
   const report=extractDynamicSoqlQueries(source,"Builder.cls",undefined,index);
   assert.equal(report.unresolved.length,1);
   assert.ok(report.queries.some(q=>q.coverage==="PROVEN_PARTIAL_STRUCTURE"&&q.object==="Account"),JSON.stringify(report));
+});
+
+
+test("shared AUE effect summary keeps original argument identity across reassignment and aliases",()=>{
+  const source="public class Builder {private static void change(List<String> fields,List<String> alias,List<String> spare){fields.add('Name');alias.remove(0);fields=spare;fields.add('Email');}}";
+  const methods=indexApexMethods(source),helper=methods[0];
+  const engine=new ApexDataFlowEngine(source,{sourceMethods:methods});
+  const original=listValue(["Id"]),spare=listValue(["Phone"]);
+  const result=engine.summarizeArgumentEffects(helper,[original,original,spare]);
+  assert.deepEqual(result,[listValue(["Name"]),listValue(["Name"]),listValue(["Phone","Email"])]);
+  assert.equal(result?.[0],result?.[1]);
+  assert.deepEqual(original,listValue(["Id"]));
+  assert.deepEqual(spare,listValue(["Phone"]));
+});
+test("shared AUE effect summary rejects unsupported calls and divergent reference states",()=>{
+  for(const body of ["Other.mutate(fields);","if(flag){fields.add('Name');}else{fields.add('Phone');}"]){
+    const source="public class Builder {private static void change(List<String> fields,Boolean flag){"+body+"}}";
+    const methods=indexApexMethods(source);
+    const engine=new ApexDataFlowEngine(source,{sourceMethods:methods});
+    // A non-singleton boolean value is not one proven invocation vector.
+    assert.equal(engine.summarizeArgumentEffects(methods[0],[listValue(["Id"]),unknown("runtime")]),undefined);
+    if(body.startsWith("Other"))assert.equal(engine.summarizeArgumentEffects(methods[0],[listValue(["Id"]),{kind:"text",values:["true"],scalarType:"boolean"}]),undefined);
+  }
 });

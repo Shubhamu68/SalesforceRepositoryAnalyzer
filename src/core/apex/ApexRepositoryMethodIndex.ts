@@ -295,6 +295,9 @@ export class ApexRepositoryMethodIndex {
     return eligible;
   }
 
+  /** Used by conservative platform-operation proofs. */
+  hasSourceClass(name:string):boolean{return this.classes.has(name.toLowerCase());}
+
   indexedMethods(filePath:string,source:string):IndexedApexMethod[]|undefined{
     const owner=this.paths.get(path.resolve(filePath));
     return owner?.source===source?owner.methods:undefined;

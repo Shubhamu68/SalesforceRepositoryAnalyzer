@@ -47,6 +47,7 @@ export interface ApexFlowOptions {
 }
 interface State { values: ApexEnvironment; stopped?: boolean; loopControl?:"break"|"continue"; effectFrame?:boolean }
 interface FrameResult { states: State[]; returns: ApexValue[] }
+interface ReferenceReplay {refs:ApexValue[];instanceReplay:boolean}
 
 /** Identical symbolic states do not represent additional structural query variants. */
 function mergeEquivalentStates(states:State[]):State[] {
@@ -190,16 +191,10 @@ export class ApexDataFlowEngine {
         // A target-bearing helper is an invocation probe, not a reusable
         // return summary. A cached return would also suppress captures.
         const capturesTarget=this.activeQueryOffset!==undefined&&candidates[0].start<=this.activeQueryOffset&&this.activeQueryOffset<candidates[0].end;
-        const referenceInputsSafe=args.every((v,i)=>{
-          const type=candidates[0].parameterTypes?.[i]??"";
-          if(v.kind==="collection")return /^(?:List|Set)\s*<\s*String\s*>$|^List\s*<\s*Schema\.FieldSetMember\s*>$/i.test(type);
-          if(v.kind==="map")return /^Map\s*<\s*String\s*,\s*String\s*>$/i.test(type)&&v.entries.every(([,item])=>item.kind==="text"||item.kind==="null"||item.kind==="unknown");
-          return v.kind!=="instance"&&v.kind!=="instanceList";
-        });
-        const refs=allowEffects&&!capturesTarget?collectApexReferences(args):undefined;
-        const instanceReplay=!!refs&&proveInstanceArgumentEffects(candidates[0],args);
-        const replay=allowEffects&&!capturesTarget&&!!refs&&((referenceInputsSafe&&this.effects.replaySafe(candidates[0])&&
-          (this.effects.fields.size>0||args.some(v=>v.kind==="collection"||v.kind==="map")))||instanceReplay);
+        const plan=allowEffects&&!capturesTarget?this.referenceReplay(candidates[0],args):undefined;
+        const refs=plan?.refs;
+        const instanceReplay=plan?.instanceReplay??false;
+        const replay=!!plan;
         const cacheable=!replay&&!capturesTarget&&args.every(v=>v.kind==="text"||v.kind==="number"||v.kind==="null"||v.kind==="unknown");
         const cached=cacheable?this.summaries.get(key):undefined;
         if(cached){countApex("helper.local_cache_hit");return cached;}
@@ -230,10 +225,7 @@ export class ApexDataFlowEngine {
             return first&&values.every(v=>JSON.stringify(v)===JSON.stringify(first))?first:unknown("Helper effects differ across feasible paths.");
           };
           for(const {key} of this.effects.fields.values())state.values.set(key,agreed(key));
-          const projected=result.states.map(frame=>new Map(refs!.map((_,i)=>["#effect.ref."+i,frame.values.get("#effect.ref."+i)??unknown("Missing reference effect pin.")])));
-          const first=projected[0];
-          const consistent=!this.exceeded&&!!first&&result.states.every(frame=>!frame.loopControl)&&projected.every(values=>apexStateIdentity(values,false)===apexStateIdentity(first,false));
-          const replacements=new Map<ApexValue,ApexValue>(refs!.map((value,i)=>[value,consistent?first.get("#effect.ref."+i)!:unknown("Reference effects differ across feasible helper paths.")]));
+          const replacements=this.referenceReplacements(refs!,result);
           replaceApexReferences(state.values,replacements);
           this.provenEffectCall=name.toLowerCase();
           countApex("helper.effects.transferred");
@@ -263,6 +255,58 @@ export class ApexDataFlowEngine {
         return value;
       }};
     return evaluateApexExpression(expr,context);
+  }
+  /** Shared admission and original-reference pin projection for forward
+   * execution and consumers requesting a bounded argument-effect summary.
+   * Preserve the existing source proof, alias topology and path agreement.
+   */
+  private referenceReplay(method:IndexedApexMethod,args:readonly ApexValue[]):ReferenceReplay|undefined{
+    const referenceInputsSafe=args.every((v,i)=>{
+      const type=method.parameterTypes?.[i]??"";
+      if(v.kind==="collection")return /^(?:List|Set)\s*<\s*String\s*>$|^List\s*<\s*Schema\.FieldSetMember\s*>$/i.test(type);
+      if(v.kind==="map")return /^Map\s*<\s*String\s*,\s*String\s*>$/i.test(type)&&v.entries.every(([,item])=>item.kind==="text"||item.kind==="null"||item.kind==="unknown");
+      return v.kind!=="instance"&&v.kind!=="instanceList";
+    });
+    const refs=collectApexReferences(args);
+    const instanceReplay=!!refs&&proveInstanceArgumentEffects(method,args);
+    if(!refs||!((referenceInputsSafe&&this.effects.replaySafe(method)&&
+      (this.effects.fields.size>0||args.some(v=>v.kind==="collection"||v.kind==="map")))||instanceReplay))return undefined;
+    return {refs,instanceReplay};
+  }
+  private referenceReplacements(refs:readonly ApexValue[],result:FrameResult):Map<ApexValue,ApexValue>{
+    const projected=result.states.map(frame=>new Map(refs.map((_,i)=>["#effect.ref."+i,frame.values.get("#effect.ref."+i)??unknown("Missing reference effect pin.")])));
+    const first=projected[0];
+    const consistent=!this.exceeded&&!!first&&result.states.every(frame=>!frame.loopControl)&&projected.every(values=>apexStateIdentity(values,false)===apexStateIdentity(first,false));
+    return new Map<ApexValue,ApexValue>(refs.map((value,i)=>[value,consistent?first.get("#effect.ref."+i)!:unknown("Reference effects differ across feasible helper paths.")]));
+  }
+  /**
+   * Reuse the ordinary interpreter and reference-effect proof for a selected
+   * source method. Inputs must represent one known argument vector, with
+   * actual reference identity (not a union of possible collections).
+   * No incoming mutable static state is assumed by this standalone API.
+   * Returns the original arguments after mutation, NOT the final parameter
+   * bindings: reassigning a parameter does not replace the caller's object.
+   */
+  summarizeArgumentEffects(method:IndexedApexMethod,args:readonly ApexValue[]):ApexValue[]|undefined{
+    if(!this.methods.includes(method)||method.parameters.length!==args.length||this.effects.fields.size||
+      args.some(v=>v.kind!=="collection"&&v.kind!=="number"&&v.kind!=="null"&&
+        !(v.kind==="text"&&v.values.length===1)))return undefined;
+    const plan=this.referenceReplay(method,args);
+    if(!plan||!plan.refs.length||!this.effects.replaySafe(method))return undefined;
+    this.budget.reset();this.activeSlice=undefined;this.activeQueryOffset=undefined;
+    this.activeStopOffset=undefined;this.argumentProbe=undefined;
+    this.activeCalls.clear();this.summaries.clear();this.provenEffectCall=undefined;
+    const values=new Map<string,ApexValue>(method.parameters.map((p,i)=>[p,args[i]]));
+    plan.refs.forEach((value,i)=>values.set("#effect.ref."+i,value));
+    const previous=this.currentMethod,previousOffset=this.evaluationOffset;
+    this.currentMethod=method;
+    let result:FrameResult;
+    try{result=this.execute(method.body,[{values,effectFrame:true}],1);}
+    finally{this.currentMethod=previous;this.evaluationOffset=previousOffset;this.provenEffectCall=undefined;}
+    const replacements=this.referenceReplacements(plan.refs,result);
+    if([...replacements.values()].some(v=>v.kind==="unknown"))return undefined;
+    countApex("helper.argument_effect_summaries");
+    return args.map(v=>replacements.get(v)??v);
   }
   /**
    * Apex passes mutable collection references into helpers. If we cannot prove

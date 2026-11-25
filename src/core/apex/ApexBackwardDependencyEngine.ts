@@ -1,6 +1,8 @@
 import {indexApexMethods,maskApexSource,matchingPair,splitApexTopLevel,stripApexComments,type IndexedApexMethod,type SourceNode} from "./ApexSourceModel.js";
 import {apexSymbols} from "./ApexSymbolTable.js";
-import {parseApexDeclaration,selectApexOverload,type ApexCallResolver} from "./ApexTypeSystem.js";
+import {canonicalApexType,parseApexDeclaration,selectApexOverload,type ApexCallResolver} from "./ApexTypeSystem.js";
+import {ApexDataFlowEngine} from "./ApexDataFlowEngine.js";
+import {directEffectInvocation,memberEffectModel} from "./ApexMemberEffectModel.js";
 import {addApexValues,evaluateApexExpression,listValue,runtimeParameter,textValue,unknown,type ApexValue} from "./ApexValueEvaluator.js";
 import type {ApexRepositoryMethodIndex,ApexCallerSource} from "./ApexRepositoryMethodIndex.js";
 import {countApex} from "./ApexPerformance.js";
@@ -16,7 +18,9 @@ const scalar=/^(?:id|integer|long|decimal|double|boolean|date|datetime)$/i;
 const rx=(name:string)=>new RegExp("\\b"+name+"\\b","i");
 const one=(v:ApexValue)=>v.kind==="text"&&v.values.length===1&&!v.scalarType?v.values[0]:undefined;
 const stop=(reason:string)=>unknown("Apex backward dependency: "+reason);
-const MAX_EDGES=64,MAX_DEPTH=6,MAX_WORK=2400,MAX_COLLECTION_ITEMS=2000;
+const MAX_EDGES=64,MAX_DEPTH=6,MAX_WORK=2400,MAX_COLLECTION_ITEMS=2000,MAX_EFFECT_SUMMARIES=32;
+const effectPlatforms=["String","List","Set","Map","Math","System","Schema","JSON","Label","Database"];
+const scalarEffectInput=(v:ApexValue)=>v.kind==="number"||v.kind==="null"||v.kind==="text"&&v.values.length===1;
 /** A source-derived candidate, never a proof of the exact runtime value.
  * Add-only collection unions and consumer-approved conditional merges may
  * contain members from multiple branches. Keep this evidence separate from
@@ -103,7 +107,8 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
     return empty;
   }
   const root:Frame={filePath,source,methods,method,key:"root",depth:0,ancestors:[]};
-  let work=0,edges=0,metadataRows=0,bounded=false;
+  let work=0,edges=0,metadataRows=0,bounded=false,effectSummaries=0;
+  const effectEngines=new Map<string,ApexDataFlowEngine>();
   const found=new Map<string,Evidence>();
   const note=(frame:Frame,offset:number,code:string,symbol?:string,count?:number)=>
     reportApexDependency(policy.observe,code,frame,offset,symbol,count);
@@ -111,6 +116,12 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
   const run=(choices:ReadonlyMap<string,Choice>)=>{
     const active=new Set<string>();
     const iterating=new Set<SourceNode>();
+    // Identity-local provenance: an exact collection is not a candidate
+    // union or an inventory of additional unknown runtime members.
+    const exactCollections=new WeakSet<ApexValue>();
+    const exact=(e:Evidence)=>e.value.kind==="collection"&&exactCollections.has(e.value)&&!e.annotations.length&&!e.runtimeMembers&&!e.describeObject;
+    const exactValue=(e:Evidence)=>!e.annotations.length&&!e.runtimeMembers&&!e.describeObject&&scalarEffectInput(e.value);
+    const mark=(value:ApexValue)=>{if(value.kind==="collection")exactCollections.add(value);return value;};
     const resolve=(frame:Frame,expression:string,offset:number,locals:Locals=new Map(),members:readonly string[]=[]):Evidence=>{
       tick();
       const expr=clean(expression);
@@ -147,13 +158,22 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
       if(create){
         const unique=create[1].toLowerCase()==="set";
         if(create[2]!==undefined){
-          const values=splitApexTopLevel(create[2],",").filter(s=>s.trim()).map(s=>one(resolve(frame,s,offset,locals).value));
+          const expressions=splitApexTopLevel(create[2],",").filter(s=>s.trim());
+          const evidence=expressions.map(s=>resolve(frame,s,offset,locals));
+          const values=evidence.map(e=>one(e.value));
           if(values.some(s=>s===undefined)||values.length>MAX_COLLECTION_ITEMS)return ev(reject("unknown collection member","COLLECTION_MEMBER_UNKNOWN"));
-          return ev(listValue(values as string[],unique));
+          const value=listValue(values as string[],unique);
+          // Literal allocations have no incoming alias. Other candidate
+          // expressions retain their existing inventory-only semantics.
+          if(evidence.every(exactValue)&&expressions.every(s=>/^'(?:\\.|[^'\\])*'$/s.test(clean(s))))mark(value);
+          return ev(value);
         }
-        if(!create[3]?.trim())return ev(listValue([],unique));
+        if(!create[3]?.trim())return ev(mark(listValue([],unique)));
         const input=resolve(frame,create[3],offset,locals);
-        return input.value.kind==="collection"?ev(listValue([...input.value.items],unique),input.annotations,input.runtimeMembers?{runtimeMembers:input.runtimeMembers}:{}):ev(reject("unknown copied collection","COLLECTION_COPY_UNKNOWN"));
+        if(input.value.kind!=="collection")return ev(reject("unknown copied collection","COLLECTION_COPY_UNKNOWN"));
+        const copy=listValue([...input.value.items],unique);
+        if(exact(input))mark(copy);
+        return ev(copy,input.annotations,input.runtimeMembers?{runtimeMembers:input.runtimeMembers}:{});
       }
       const abstraction=policy.abstractExpression?.({source:frame.source,methods:frame.methods,method:frame.method,expression:expr,offset});
       if(abstraction!==undefined){note(frame,offset,"CONSUMER_ABSTRACTION");return ev(abstraction);}
@@ -340,7 +360,7 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
           return [{index:i,node:n,expression:assignment?.[1],type:decl.type}];
         });
         if(defs.length>1)return ev(reject("ambiguous local declaration","DECLARATION_AMBIGUOUS"));
-        let base:Evidence,after:SourceNode[];
+        let base:Evidence,after:SourceNode[],freshCollection=false;
         const collection=/^(?:list|set)<string>$/i.test(type??"");
         const map=/^map</i.test(type??"");
         if(defs.length){
@@ -360,6 +380,7 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
           if((collection||map)&&identifier.test(clean(def.expression)))return ev(reject("mutable collection alias","COLLECTION_ALIAS"));
           note(frame,def.node.start,"REACHING_DEFINITION",name);
           base=resolve(frame,def.expression,def.node.start,locals,members);
+          freshCollection=collection&&/^new\s+(?:List|Set)\s*</i.test(clean(def.expression))&&exact(base);
           after=prefix.slice(def.index+1);
         }else if(param>=0){
           note(frame,offset,"PARAMETER_USE",name,param);
@@ -411,6 +432,7 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
         if(base.value.kind==="unknown"&&!base.value.fragments&&!base.value.symbol&&!base.runtimeMembers){note(frame,offset,"BASE_VALUE_UNKNOWN",name);return base;}
         const additions:ApexDependencyAppend<A>[]=[];
         let current=base;
+        let exactCurrent=freshCollection;
         const visit=(nodes:readonly SourceNode[],conditional:boolean,bindings:Locals):boolean=>{
           for(const n of nodes){
             tick();
@@ -466,6 +488,7 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
                 new RegExp("\\b"+n.loopVariable+"\\s*(?:=(?!=|>)|[+\\-*/%&|^]=|\\+\\+|--)","i").test(body)||
                 (identifier.test(clean(n.iterable))&&rx(clean(n.iterable)).test(body)))return blocked("LOOP_EFFECT_UNSUPPORTED");
               note(frame,n.start,"LOOP_ITERABLE_RESOLVED",name,items.length);
+              if(!exact(iterable))exactCurrent=false;
               iterating.add(n);
               try{
                 for(const item of items){
@@ -506,6 +529,9 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
                 note(frame,n.start,"COLLECTION_ADDITION",name,items.length);
                 // Candidate union, not exact execution ordering/cardinality.
                 const runtimeMembers=mergeApexRuntimeMembers(current.runtimeMembers,value.runtimeMembers);
+                const exactAdd=add[1].toLowerCase()==="addall"?exact(value):
+                  exactValue(value)&&(/^'(?:\\.|[^'\\])*'$/s.test(clean(add[2]))||bindings.has(clean(add[2]).toLowerCase()));
+                exactCurrent=exactCurrent&&!conditional&&!runtimeMembers&&exactAdd&&merged.length===updated.items.length;
                 current=ev(listValue(merged,updated.unique),current.annotations,runtimeMembers?{runtimeMembers}:{});
                 continue;
               }
@@ -527,6 +553,50 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
                 // Inert reads only. Any alias or unknown call invalidates
                 // the whole collection dependency.
                 if(new RegExp("^System\\s*\\.\\s*debug\\s*\\(\\s*"+name+"\\s*\\.\\s*(?:size|isEmpty)\\s*\\(\\s*\\)\\s*\\)\\s*;$","i").test(statement))continue;
+                // Resolve a complete standalone call or declaration RHS;
+                // actual effects are evaluated by AUE, never by this tracer.
+                const expression=statement.replace(/;\s*$/,"");
+                const declaration=parseApexDeclaration(maskApexSource(expression));
+                const eq=declaration?maskApexSource(expression).indexOf("="):-1;
+                const invocation=directEffectInvocation(eq>=0?expression.slice(eq+1):expression);
+                if(invocation&&identifier.test(invocation.name)){
+                  const pieces=invocation.argumentText.trim()?splitApexTopLevel(invocation.argumentText,","):[];
+                  const targetPositions=pieces.flatMap((p,i)=>clean(p).toLowerCase()===key?[i]:[]);
+                  if(targetPositions.length){
+                    const symbols=apexSymbols(frame.source,frame.methods);
+                    const hints=symbols.argumentTypes(frame.method,pieces,n.start);
+                    const helper=selectApexOverload(frame.methods.filter(m=>symbols.sameOwner(frame.method,m)&&m.name.toLowerCase()===invocation.name),pieces.length,hints);
+                    const effects=memberEffectModel(frame.source,frame.methods);
+                    if(!helper||!helper.isStatic||helper.visibility!=="private"||
+                      helper.parameterTypes?.length!==pieces.length||
+                      hints.some((t,i)=>!canonicalApexType(t)||canonicalApexType(t)!==canonicalApexType(helper.parameterTypes?.[i]))||
+                      (declaration&&(eq<0||declaration.name.toLowerCase()===key||declaration.type!==canonicalApexType(helper.returnType)||!effects.resultCannotExposeReference(helper)))||
+                      !exactCurrent||conditional||current.runtimeMembers||current.annotations.length||current.value.kind!=="collection"||
+                      pieces.some((p,i)=>!targetPositions.includes(i)&&rx(name).test(maskApexSource(p)))||
+                      effectPlatforms.some(p=>index?.hasSourceClass(p)||new RegExp("\\bclass\\s+"+p+"\\b","i").test(maskApexSource(frame.source))||
+                        frame.methods.some(m=>effects.locals(m).has(p.toLowerCase()))))
+                      return blocked("SHARED_HELPER_EFFECT_UNPROVEN");
+                    const args=pieces.map((p,i)=>targetPositions.includes(i)?current:resolve(frame,p,n.start,bindings));
+                    if(args.some((v,i)=>!targetPositions.includes(i)&&!exactValue(v)))return blocked("SHARED_HELPER_EFFECT_UNPROVEN");
+                    if(++effectSummaries>MAX_EFFECT_SUMMARIES){note(frame,n.start,"WORK_LIMIT",helper.name);throw new Bounded("Helper effect summary limit");}
+                    let engine=effectEngines.get(frame.filePath);
+                    if(!engine){
+                      // Only source-proven allocations are resolved here.
+                      // Do not let an external return-only resolver bypass
+                      // local effect replay for nested application calls.
+                      engine=new ApexDataFlowEngine(frame.source,{sourceMethods:[...frame.methods],maxOperations:500,
+                        selectInvocation:()=>undefined,
+                        resolveExternal:(call,values,types)=>call==="Apex.construct"&&values[0]?.kind==="text"&&values[0].values.length===1?
+                          index?.constructInstance(frame.filePath,values[0].values[0],values.slice(1),undefined,types?.slice(1)):undefined});
+                      effectEngines.set(frame.filePath,engine);
+                    }
+                    const updated=engine.summarizeArgumentEffects(helper,args.map(v=>v.value))?.[targetPositions[0]];
+                    if(updated?.kind!=="collection"||updated.items.length>MAX_COLLECTION_ITEMS)return blocked("SHARED_HELPER_EFFECT_UNPROVEN");
+                    current=ev(mark(updated));
+                    note(frame,n.start,"SHARED_HELPER_EFFECT_RESOLVED",helper.name);
+                    continue;
+                  }
+                }
                 return blocked("COLLECTION_ALIAS_OR_WRITE");
               }
               // Scalar Strings are passed by value. Do not overlook writes,
@@ -547,6 +617,7 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
           // collection. Retain the runtime provenance for downstream loops.
           if(current.value.kind==="collection"&&!current.value.items.length&&current.runtimeMembers)
             return ev(reject("no known collection members","RUNTIME_COLLECTION_ONLY"),current.annotations,{runtimeMembers:current.runtimeMembers});
+          if(exactCurrent)mark(current.value);else exactCollections.delete(current.value);
           return current;
         }
         if(additions.every(a=>!a.conditional)){
