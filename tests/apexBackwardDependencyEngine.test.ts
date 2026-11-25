@@ -92,3 +92,49 @@ test("shared parser retains enhanced-for element types and evaluator handles cha
   assert.equal(loop.kind,"for");assert.equal(loop.loopVariableType,"OrderSummary");assert.equal(loop.loopVariable,"os");assert.equal(loop.iterable,"orders");
   assert.deepEqual(evaluateApexExpression("item.trim().toLowerCase()",{values:new Map([["item",textValue(" Name ")]])}),textValue("name"));
 });
+
+
+test("backward traversal reuses class-level initializer for copied list and loop",()=>{
+  const source="public class Worker {private static final List<String> BASE_FIELDS=new List<String>{' Id ',' Name '};public static void run(){List<String> requested=new List<String>(BASE_FIELDS);Set<String> safeFields=new Set<String>();for(String item:requested){safeFields.add(item.trim());}Sink.consume(safeFields);}}";
+  const filePath="Worker.cls",index=new ApexRepositoryMethodIndex([{filePath,source}]);
+  const events:string[]=[];
+  const result=traceApexDependencies(source,filePath,{expression:"safeFields",offset:source.indexOf("Sink.consume")},index,undefined,{observe:e=>events.push(e.code)});
+  assert.deepEqual(result.candidates.map(e=>e.value),[{kind:"collection",items:["Id","Name"],unique:true}],JSON.stringify(result));
+  assert.ok(events.includes("CLASS_MEMBER_RESOLVED"));
+});
+test("local and parameter scope take precedence over a class-level member",()=>{
+  for(const [method,expected] of [
+    ["public static void run(){String FIELD='Industry';Sink.consume(FIELD);}",textValue("Industry")],
+    ["public static void run(){String FIELD;Sink.consume(FIELD);}",undefined],
+    ["public static void run(String FIELD){Sink.consume(FIELD);}",undefined],
+    ["public static void run(){String f='Phone';{String FIELD=f;Sink.consume(FIELD);}}",textValue("Phone")],
+  ] as const){
+    const source="public class Worker {private static final String FIELD='Name';"+method+"}";
+    const filePath="Worker.cls",index=new ApexRepositoryMethodIndex([{filePath,source}]);
+    const trace=traceApexDependencies(source,filePath,{expression:"FIELD",offset:source.indexOf("Sink.consume")},index);
+    if(expected)assert.deepEqual(trace.candidates.map(e=>e.value),[expected]);
+    else assert.ok(trace.candidates.length&&trace.candidates.every(e=>e.value.kind==="unknown"),JSON.stringify(trace));
+  }
+});
+test("class-level lookup does not accept mutable, alias-escaped, blank or instance snapshots",()=>{
+  for(const body of [
+    "private static final List<String> BASE_FIELDS=new List<String>{'Id'}; public static void mutate(){BASE_FIELDS.add('Name');}",
+    "private static List<String> BASE_FIELDS=new List<String>{'Id'}; public static void mutate(){List<String> alias=BASE_FIELDS;alias.clear();}",
+    "private static List<String> BASE_FIELDS;",
+    "private List<String> BASE_FIELDS=new List<String>{'Id'};",
+  ]){
+    const source="public class Worker {"+body+"public void run(){Sink.consume(BASE_FIELDS);}}";
+    const filePath="Worker.cls",index=new ApexRepositoryMethodIndex([{filePath,source}]);
+    const trace=traceApexDependencies(source,filePath,{expression:"BASE_FIELDS",offset:source.indexOf("Sink.consume")},index);
+    assert.ok(trace.candidates.length&&trace.candidates.every(e=>e.value.kind==="unknown"),JSON.stringify(trace));
+  }
+});
+test("caller dependencies resolve members in the declaring caller class, not the sink class",()=>{
+  const files=[
+    {filePath:"Worker.cls",source:"public class Worker {private static String FIELD='Wrong';public static void run(String item){Sink.consume(item);}}"},
+    {filePath:"Caller.cls",source:"public class Caller {private static String FIELD='Name';public static void load(){Worker.run(FIELD);}}"}
+  ];
+  const root=files[0];
+  const trace=traceApexDependencies(root.source,root.filePath,{expression:"item",offset:root.source.indexOf("Sink.consume")},new ApexRepositoryMethodIndex(files));
+  assert.deepEqual(trace.candidates.map(e=>e.value),[textValue("Name")],JSON.stringify(trace));
+});

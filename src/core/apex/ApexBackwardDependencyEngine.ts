@@ -334,7 +334,24 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
             return ev(reject("runtime parameter "+name,frame.depth>=MAX_DEPTH?"CALLER_DEPTH_LIMIT":!index?"NO_REPOSITORY_INDEX":"NO_PROVEN_CALLER"));
           }
           after=prefix;
-        }else return ev(reject("unknown local "+name,"NO_LOCAL_OR_PARAMETER_DEFINITION"));
+        }else{
+          // Consult the same repository-scoped initializer snapshot used by
+          // forward evaluation, but only after exhausting lexical bindings.
+          // Unknown locals/parameters must never fall through to a same-name
+          // class member. A bare instance member needs receiver-state proof.
+          const symbols=apexSymbols(frame.source,frame.methods);
+          const owner=symbols.ownerAt(frame.method.start);
+          if(index&&owner&&!symbols.hasLocalBinding(frame.method,name,offset)){
+            const snapshot=resolveExternal?.("Apex.scopeField",[
+              textValue(owner),textValue(name),textValue("unqualified"),textValue("true"),
+            ])??index.evaluateScopeField(owner,name,"unqualified",true,resolveExternal);
+            if(snapshot!==undefined){
+              note(frame,offset,snapshot.kind==="unknown"?"CLASS_MEMBER_UNPROVEN":"CLASS_MEMBER_RESOLVED",name);
+              return ev(snapshot);
+            }
+          }
+          return ev(reject("unknown local or class member "+name,"NO_LOCAL_OR_PARAMETER_DEFINITION"));
+        }
         if(base.value.kind==="unknown"&&!base.value.fragments&&!base.value.symbol){note(frame,offset,"BASE_VALUE_UNKNOWN",name);return base;}
         const additions:ApexDependencyAppend<A>[]=[];
         let current=base;

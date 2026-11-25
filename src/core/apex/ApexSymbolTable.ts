@@ -54,6 +54,12 @@ export class ApexSymbolTable{
       }
     };visit(method.body,method.end,1);this.locals.set(method,result);return result;
   }
+  /** A visible local or parameter shadows a class member even when its
+   * type or reaching value cannot be established. */
+  hasLocalBinding(method:IndexedApexMethod|undefined,name:string,offset:number):boolean{
+    const key=name.toLowerCase();
+    return !!method&&this.bindings(method).some(b=>b.name===key&&b.start<=offset&&offset<b.end);
+  }
   lookup(method:IndexedApexMethod|undefined,name:string,offset:number):string|undefined{
     if(!method)return undefined;
     const key=name.toLowerCase();
