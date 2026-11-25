@@ -134,7 +134,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
           coverage:"PROVEN_PARTIAL_STRUCTURE",...(mode?{dynamicAccessLevel:mode}:{})});
       }
       if(partialStructureVariants)explanation+=" Proven partial structural variants: "+partialStructureVariants+
-        ". Typed numeric slots use synthetic parser placeholders, not actual runtime values; only those proven field and object references are submitted for access analysis. Complete execution coverage remains unverified.";
+        ". Typed numeric or quoted Id slots use synthetic parser placeholders, not actual runtime values; only those proven field and object references are submitted for access analysis. Complete execution coverage remains unverified.";
       unresolved.push({filePath,lineNumber:site.line,siteId,reason:explanation,...(knownVariants?{knownVariants}:{}),
         ...(partialStructureVariants?{partialStructureVariants}:{}),...(conditionalFrameworkVariants?{conditionalFrameworkVariants}:{})});
     };
