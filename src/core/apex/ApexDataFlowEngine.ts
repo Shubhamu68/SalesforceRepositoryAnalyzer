@@ -10,6 +10,7 @@ import {
 import {ApexLocalLiveness,sharedApexLocalLiveness,declaredLoopLocals} from "./ApexLocalLiveness.js";
 import {apexStateIdentity} from "./ApexStateIdentity.js";
 import {compactUnknownStates} from "./ApexUnknownStateCompaction.js";
+import {summarizeUnknownLoopEffects} from "./ApexLoopEffects.js";
 import {ApexExecutionBudget} from "./ApexExecutionBudget.js";
 import {writeInstanceMember} from "./ApexInstanceModel.js";
 import {invocationMayExecute} from "./ApexConditionalInvocation.js";
@@ -660,24 +661,20 @@ export class ApexDataFlowEngine {
       }
       // Unknown loop cardinality or values: keep both zero-iteration and
       // unknown-iteration possibility; taint variables assigned in its body.
-      const mentioned=new Set<string>();
-      const walk=(nodes:SourceNode[])=>{
-        for(const n of nodes){
-          const text=n.text??"";
-          const match=/\b((?:[A-Za-z_]\w*\.)?[A-Za-z_]\w*)\s*(?:\+?=(?![=>])|\.\s*(?:add|addAll|clear|remove|put|putAll|removeAll|retainAll|set|sort|reverse)\s*\()/gi;
-          for(const entry of text.matchAll(match))mentioned.add(entry[1]);
-          if(n.body)walk(n.body);
-          if(n.otherwise)walk(n.otherwise);
-        }
-      };
-      walk(node.body??[]);
+      const effects=summarizeUnknownLoopEffects(node);
       const changed=clone(state);
-      for(const variable of mentioned){
-        const target=variable.includes(".")?variable.toLowerCase():variable;
+      // Calls in an unknown-length loop may mutate an outer collection via
+      // reference parameters even when no direct collection write is visible.
+      for(const source of effects.callSources)this.taintCollectionsPassedToUnknownCalls(source,changed);
+      for(const variable of effects.writes){
+        const receiver=variable.split(".")[0];
+        if(effects.locals.has(receiver.toLowerCase())&&
+          ![...state.values.keys()].some(key=>key.toLowerCase()===receiver.toLowerCase()))continue;
+        const target=variable.includes(".")?variable.toLowerCase():
+          [...changed.values.keys()].find(key=>key.toLowerCase()===variable.toLowerCase())??variable;
         const replacement=unknown("Loop may change "+variable+" using runtime values. Iterable "+
           (node.iterable??"(unsupported header)")+": "+(iterable.kind==="unknown"?iterable.reason:
             "iteration count or value shape exceeds supported bounds."));
-        const receiver=variable.split(".")[0];
         const instance=changed.values.get(receiver);
         if(variable.includes(".")&&instance?.kind==="instance"){
           replaceCollectionAliases(changed,instance,replacement);continue;
@@ -693,7 +690,7 @@ export class ApexDataFlowEngine {
           accessLevel:unknown("Loop execution context unknown."),
           arguments:site.arguments.map(()=>unknown("Loop execution context unknown."))}]);
       }
-      return {states:[state,changed],returns:[]};
+      return {states:[state,changed],returns:effects.possibleReturn?[unknown("Runtime loop may return an unproven value.")]:[]};
     }
     // Opaque unsupported control flow might modify any previously known symbol.
     for(const name of state.values.keys())state.values.set(name,
