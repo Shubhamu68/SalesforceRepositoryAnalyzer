@@ -1,3 +1,4 @@
+import {objectMapReadModel,provePrivateObjectMapAlias,proveDirectObjectMapRead,type ObjectMapReadModel} from "./ApexObjectMapReadProof.js";
 import path from "node:path";
 import {evaluateApexExpression, unknown, type ApexValue} from "./ApexValueEvaluator.js";
 import {maskApexSource, matchingPair, parseApexStatements, stripApexComments, indexApexMethods,type ApexRepositorySyntaxInventory,type IndexedApexMethod} from "./ApexSourceModel.js";
@@ -14,6 +15,7 @@ interface Declaration {
   collection:boolean;
   filePath:string;
   laterWrite?:boolean;
+  objectMapProven?:boolean;
   blockValue?:ApexValue;
 }
 type MetadataResolver=(name:string,args:ApexValue[])=>ApexValue|undefined;
@@ -101,6 +103,13 @@ export class ApexStaticValueIndex {
     if(candidates.length){
       const byKey=new Map(candidates.map(e=>[(e.owner+"."+e.field).toLowerCase(),e]));
       const names=new Set(candidates.map(e=>e.field.toLowerCase()));
+      const sourceByPath=new Map(sources.map(file=>[path.resolve(file.filePath),file.source]));
+      const objectMaps=new Map<Declaration,ObjectMapReadModel>();
+      for(const entry of candidates){
+        if(!/^new\s+Map\s*<\s*Integer\s*,/i.test(entry.initializer))continue;
+        const model=objectMapReadModel(entry.owner,entry.initializer,sourceByPath.get(entry.filePath)??"");
+        if(model){objectMaps.set(entry,model);entry.objectMapProven=true;}
+      }
       const writes=new Map<string,Array<{filePath:string;offset:number}>>();
       for(const file of sources){
         const masked=syntax?.masked(file.source)??maskApexSource(file.source);
@@ -122,7 +131,12 @@ export class ApexStaticValueIndex {
           // A direct reference assignment can create an untracked mutable
           // alias. Treat it as an escape even if later writes are not found.
           const alias=entry.collection&&/^\s*;/.test(after)&&((/=\s*$/.test(prefix)&&!/==\s*$/.test(prefix))||/\breturn\s*$/i.test(prefix));
-          if(!direct&&!alias)continue;
+          const objectMap=objectMaps.get(entry);
+          const referenceStart=qualified?hit.index-(before.length-qualified.index):hit.index;
+          if(objectMap){
+            if(path.resolve(file.filePath)===entry.filePath&&hit.index>=entry.declarationStart&&hit.index<entry.declarationEnd)continue;
+            if(!direct&&((alias&&provePrivateObjectMapAlias(masked,referenceStart,token.lastIndex,methods,objectMap))||(!alias&&proveDirectObjectMapRead(masked,referenceStart,token.lastIndex,methods,objectMap))))continue;
+          }else if(!direct&&!alias)continue;
           const method=methods.filter(m=>m.start<=hit!.index&&hit!.index<m.end)
             .sort((a,b)=>(a.end-a.start)-(b.end-b.start))[0];
           // A declaration of a method-local scalar with a matching name is
@@ -132,7 +146,7 @@ export class ApexStaticValueIndex {
             method.parameters.some(p=>p.toLowerCase()===entry.field.toLowerCase())||
             /(?:^|[;{}])\s*(?:final\s+)?(?:String|Boolean|Integer|Long|Decimal|Double|Id|(?:List|Set|Map)\s*<[\w\s,.<>]+>)\s*$/i.test(before)
           ))continue;
-          if(alias&&method&&readOnlyCollectionAlias(masked,method.start,method.end,
+          if(!objectMap&&alias&&method&&readOnlyCollectionAlias(masked,method.start,method.end,
             qualified?hit.index-(before.length-qualified.index):hit.index))continue;
           const found=writes.get(key)??[];
           found.push({filePath:path.resolve(file.filePath),offset:hit.index});
@@ -266,7 +280,7 @@ export class ApexStaticValueIndex {
       });
       if(/^null$/i.test(entry.initializer.trim()))
         result=unknown("Apex field "+key+" has a null initializer.");
-      if(!completeInitializer(result))
+      if(!completeInitializer(result)||(!entry.objectMapProven&&containsInstance(result)))
         result=unknown("Apex field "+key+" does not have a complete supported scalar or collection initializer.");
     }finally{active.delete(key);}
     cache.set(key,result);
@@ -408,4 +422,9 @@ function completeInitializer(value:ApexValue,depth=0):boolean{
     case "instance": return value.entries.length<=100&&value.entries.every(([,v])=>v.kind==="null"||completeInitializer(v,depth+1));
     default: return false;
   }
+}
+
+function containsInstance(value:ApexValue,depth=0):boolean{
+  if(depth>12)return true;
+  return value.kind==="instance"||value.kind==="instanceList"||(value.kind==="map"&&value.entries.some(([,v])=>containsInstance(v,depth+1)));
 }
