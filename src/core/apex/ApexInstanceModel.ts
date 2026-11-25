@@ -1,5 +1,5 @@
 import {parseApexClassDeclaration,supportsApexAllocation} from "./ApexClassModel.js";
-import {maskApexSource,matchingPair,splitApexTopLevel,parseApexStatements,stripApexComments,type SourceNode,type ApexRepositorySyntaxInventory} from "./ApexSourceModel.js";
+import {maskApexSource,matchingPair,splitApexTopLevel,parseApexStatements,stripApexComments,indexApexMethods,type IndexedApexMethod,type SourceNode,type ApexRepositorySyntaxInventory} from "./ApexSourceModel.js";
 import {evaluateApexExpression,addApexValues,unknown,runtimeParameter,type ApexValue} from "./ApexValueEvaluator.js";
 import {parseApexDeclaration,selectApexOverload,type ApexArgumentTypes,type ApexCallResolver} from "./ApexTypeSystem.js";
 import {knownBoolean} from "./ApexScalarOperators.js";
@@ -11,6 +11,7 @@ interface ClassShape {
   filePath:string;
   fields:Array<{name:string;type:string;initializer?:string}>;
   constructors:Array<{parameters:string[];parameterTypes:string[];body:SourceNode[];externallyCallable:boolean}>;
+  helpers:IndexedApexMethod[];
   initializationOrder:Array<{field:string;initializer?:string}|{block:SourceNode[]}>;
   supported:boolean;
 }
@@ -32,8 +33,9 @@ export class ApexInstanceIndex {
         const parent=classes.filter(c=>c.start<open&&open<c.end).at(-1);
         const name=parent?parent.name+"."+hit[1]:hit[1];
         classes.push({name,start:open,end:close});
-        const shape:ClassShape={name,filePath:file.filePath,fields:[],constructors:[],initializationOrder:[],
+        const shape:ClassShape={name,filePath:file.filePath,fields:[],constructors:[],helpers:[],initializationOrder:[],
           supported:supportsApexAllocation(parseApexClassDeclaration(name,hit[2]))};
+        const methods=syntax?.methods(source)??indexApexMethods(source);
         // Split direct class members at top-level semicolons and blocks.
         let start=open+1;
         while(start<close){
@@ -58,7 +60,7 @@ export class ApexInstanceIndex {
           const visible=masked.slice(start,boundary).trim();
           if(masked[boundary]===";"){
             if(!/\bstatic\b/i.test(visible)){
-              const field=fieldDeclaration.exec(header);
+              const field=fieldDeclaration.exec(header.replace(/^@TestVisible\s+/i,""));
               if(field){shape.fields.push({type:field[1],name:field[2],initializer:field[3]});shape.initializationOrder.push({field:field[2],initializer:field[3]});}
               else shape.supported=false;
             }
@@ -74,6 +76,9 @@ export class ApexInstanceIndex {
             const params=ctor[1].trim()?splitApexTopLevel(ctor[1],",").map(p=>parseApexDeclaration(p)):[];
             if(params.some(p=>!p))shape.supported=false;
             else shape.constructors.push({parameters:params.map(p=>p!.name),parameterTypes:params.map(p=>p!.type),externallyCallable:/^(?:public|global)\s+/i.test(visible),body:parseApexStatements(source,boundary+1,end,masked)});
+          }else if(/^private\s+void\s+[A-Za-z_]\w*\s*\(/i.test(visible)){
+            const helper=methods.find(m=>m.start===boundary+1&&m.visibility==="private"&&!m.isStatic);
+            if(helper)shape.helpers.push(helper);
           }else if(!visible){
             shape.initializationOrder.push({block:parseApexStatements(source,boundary+1,end,masked)});
           }else if(/^static$/i.test(visible)){
@@ -130,7 +135,7 @@ export class ApexInstanceIndex {
       }
       const calls=[...maskApexSource(expr).matchAll(/\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(/g)];
       const allocation=/^new\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(/i.exec(expr.trim());
-      if(calls.some(call=>!/^String\.(?:isBlank|isNotBlank|valueOf|escapeSingleQuotes)$/i.test(call[1])&&!(allocation&&call===calls[0]&&call[1].toLowerCase()===allocation[1].toLowerCase()))){unsupportedEffect=true;return unknown("Constructor expression has unproven effects.");}
+      if(calls.some(call=>!/^String\.(?:isBlank|isNotBlank|valueOf|escapeSingleQuotes)$/i.test(call[1])&&!/^[A-Za-z_]\w*__mdt\.getInstance$/i.test(call[1])&&!(allocation&&call===calls[0]&&call[1].toLowerCase()===allocation[1].toLowerCase()))){unsupportedEffect=true;return unknown("Constructor expression has unproven effects.");}
       const env=new Map<string,ApexValue>();
       for(const [key,value] of fields){env.set(key,value);env.set("this."+key,value);}
       for(const [key,value] of parameters)env.set(key,value);
@@ -145,6 +150,7 @@ export class ApexInstanceIndex {
     };
     for(const field of shape.fields)fields.set(field.name,unknown("Instance field has no proven assignment."));
     let operations=0;
+    const activeHelpers=new Set<IndexedApexMethod>();
     const execute=(nodes:SourceNode[],parameters:Map<string,ApexValue>,depth=0):boolean=>{
       if(depth>12)return false;
       const scoped=(body:SourceNode[]):boolean=>{
@@ -164,7 +170,19 @@ export class ApexInstanceIndex {
         }
         if(node.kind!=="statement")return false;
         const statement=stripApexComments(node.text??"").trim().replace(/;\s*$/,"");
-        const local=/^(?:final\s+)?(?:String|Boolean|Integer|Long|Decimal|Double|Id)\s+([A-Za-z_]\w*)\s*(?:=\s*([\s\S]+))?$/i.exec(statement);
+        const local=/^(?:final\s+)?(?:[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*(?:\s*<[\w\s,.<>]+>)?)\s+([A-Za-z_]\w*)\s*(?:=\s*([\s\S]+))?$/i.exec(statement);
+        const helper=/^(?:this\.)?([A-Za-z_]\w*)\s*\(([\s\S]*)\)$/i.exec(statement);
+        if(helper){
+          const expressions=helper[2].trim()?splitApexTopLevel(helper[2],","):[];
+          const candidates=shape.helpers.filter(m=>m.name.toLowerCase()===helper[1].toLowerCase());
+          const selected=selectApexOverload(candidates,expressions.length);
+          if(!selected||activeHelpers.has(selected)||activeHelpers.size>=8)return false;
+          const args=expressions.map(expr=>evaluate(expr,parameters));
+          activeHelpers.add(selected);
+          try{if(!execute(selected.body,new Map(selected.parameters.map((p,i)=>[p,args[i]])),depth+1))return false;}
+          finally{activeHelpers.delete(selected);}
+          continue;
+        }
         if(local){
           // Shadowing an existing parameter/local requires a separate lexical
           // binding model. Reject rather than silently changing the outer slot.
