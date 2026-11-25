@@ -1,7 +1,7 @@
 import {maskApexSource,matchingPair,stripApexComments,splitApexTopLevel,type IndexedApexMethod,type SourceNode} from "./ApexSourceModel.js";
 import {canonicalApexType,parseApexDeclaration,selectApexOverload,type ApexArgumentTypes} from "./ApexTypeSystem.js";
 
-interface Binding {name:string;type:string;start:number;end:number;depth:number}
+interface Binding {name:string;type:string|undefined;start:number;end:number;depth:number}
 interface ClassScope {name:string;start:number;end:number;fields:Map<string,string|undefined>}
 export class ApexSymbolTable{
   private readonly scopes:ClassScope[]=[];
@@ -34,11 +34,11 @@ export class ApexSymbolTable{
     }
   }
   ownerAt(offset:number):string|undefined{return this.scopes.filter(c=>c.start<offset&&offset<c.end).at(-1)?.name;}
-  sameOwner(a:IndexedApexMethod,b:IndexedApexMethod):boolean{return this.ownerAt(a.start)===this.ownerAt(b.start);}
+  sameOwner(a:IndexedApexMethod,b:IndexedApexMethod):boolean{const owner=this.ownerAt(a.start);return owner!==undefined&&owner===this.ownerAt(b.start);}
   private bindings(method:IndexedApexMethod):Binding[]{
     const old=this.locals.get(method);if(old)return old;
     const result:Binding[]=[];
-    method.parameters.forEach((name,i)=>{const type=canonicalApexType(method.parameterTypes?.[i]);if(type)result.push({name:name.toLowerCase(),type,start:method.start,end:method.end,depth:0});});
+    method.parameters.forEach((name,i)=>{const type=canonicalApexType(method.parameterTypes?.[i]);result.push({name:name.toLowerCase(),type,start:method.start,end:method.end,depth:0});});
     const visit=(nodes:readonly SourceNode[],end:number,depth:number)=>{
       for(const node of nodes){
         if(node.kind==="statement"){
