@@ -96,3 +96,28 @@ test("literal switch helper preserves all object-specific query returns",()=>{
   const unknown=source.replace("return null;","return Other.load();");
   assert.equal(extractDynamicSoqlQueries(unknown,"Cleanup.cls").queries.length,0);
 });
+
+
+const runtimeFieldsFixture="public class UI {private static final List<String> BASE_FIELDS=new List<String>{'Id','Name','NotAField__c'}; @AuraEnabled public static void run(List<Id> recordIds,List<String> additionalFields){if(recordIds==null||recordIds.isEmpty()){return;}Map<String,Schema.SObjectField> fieldMap=Account.SObjectType.getDescribe().fields.getMap();Set<String> requested=new Set<String>(BASE_FIELDS);if(additionalFields!=null){for(String f:additionalFields){if(String.isNotBlank(f)){requested.add(f.trim());}}}List<String> safeFields=new List<String>();for(String f:requested){if(fieldMap.containsKey(f.toLowerCase())){safeFields.add(f);}}String q='SELECT '+String.join(safeFields,', ')+' FROM Account WHERE Id IN :recordIds';Database.query(q);}}";
+const describeAccount=(name:string,args:ApexValue[]):ApexValue|undefined=>name==="Schema.describeFields"&&args[0]?.kind==="text"&&args[0].values[0]==="Account"?{kind:"collection",items:["Id","Name","Industry","Phone"],unique:true}:undefined;
+test("known fields survive additive runtime input and schema filtering, with only known fields assessed",()=>{
+  const files=[{filePath:"UI.cls",source:runtimeFieldsFixture}];
+  const result=evidence(files,describeAccount);
+  assert.deepEqual(fields(result.queries),new Set(["SELECT:Id","SELECT:Name","WHERE:Id"]),JSON.stringify(result));
+  assert.deepEqual(result.runtimeFieldQueries,result.queries);
+  const scan=extractDynamicSoqlQueries(files[0].source,files[0].filePath,describeAccount,new ApexRepositoryMethodIndex(files),true);
+  assert.ok(scan.queries.some(q=>q.runtimeFieldCoverage&&q.coverage==="PROVEN_PARTIAL_STRUCTURE"),JSON.stringify(scan));
+  assert.equal(scan.unresolved.length,1);
+  assert.equal(scan.unresolved[0].runtimeFieldCoverage,true);
+});
+test("runtime additions require an authoritative same-object schema guard and add-only loop",()=>{
+  for(const source of [
+    runtimeFieldsFixture.replace("if(fieldMap.containsKey(f.toLowerCase())){safeFields.add(f);}","safeFields.add(f);"),
+    runtimeFieldsFixture.replace("requested.add(f.trim());","requested.clear();requested.add(f.trim());"),
+    runtimeFieldsFixture.replace("safeFields.add(f);","safeFields.add(f+'x');"),
+    runtimeFieldsFixture.replace(" FROM Account WHERE"," FROM Contact WHERE"),
+    runtimeFieldsFixture.replace("String q='SELECT '+String.join(safeFields,', ')+' FROM Account WHERE Id IN :recordIds'","String q='SELECT Id FROM Account WHERE '+String.join(safeFields,', ')"),
+    runtimeFieldsFixture.replace("requested.add(f.trim());","Other.mutate(requested);requested.add(f.trim());")
+  ])assert.equal(evidence([{filePath:"UI.cls",source}],describeAccount).runtimeFieldQueries,undefined,source);
+  assert.deepEqual(evidence([{filePath:"UI.cls",source:runtimeFieldsFixture}]).queries,[]);
+});

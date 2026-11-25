@@ -12,6 +12,7 @@ const one=(v:ApexValue)=>v.kind==="text"&&v.values.length===1&&!v.scalarType?v.v
 const stop=(reason:string)=>unknown("SOQL backward evidence: "+reason);
 const path=/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/;
 const MAX_FIELDS=2000;
+const runtimeSelectPrefix="schema-filtered-select-additions:";
 type Use=SoqlPermissionShape["fields"][number];
 type Evidence=ApexDependencyEvidence<Use>;
 const ev=(value:ApexValue,annotations:readonly Use[]=[]):Evidence=>({value,annotations});
@@ -130,7 +131,7 @@ function mergeSoqlAppends(base:Evidence,additions:readonly ApexDependencyAppend<
   return ev(stop("conditional fragment is not a proven query, predicate or field list"));
 }
 export function backtrackSoqlPermissionShapes(source:string,filePath:string,site:ApexCallSite,
-  index?:ApexRepositoryMethodIndex,resolveExternal?:ApexCallResolver,observe?:ApexDependencyObserver):{queries:string[];bounded:boolean;callerEdges:number;metadataRows:number}{
+  index?:ApexRepositoryMethodIndex,resolveExternal?:ApexCallResolver,observe?:ApexDependencyObserver):{queries:string[];runtimeFieldQueries?:string[];bounded:boolean;callerEdges:number;metadataRows:number}{
   const note=(code:string,count?:number)=>reportApexDependency(observe,code,{filePath,source,depth:0},site.offset,undefined,count);
   if(/\bclass\s+Database\b/i.test(maskApexSource(source))){note("SHADOWED_DATABASE");return {queries:[],bounded:false,callerEdges:0,metadataRows:0};}
   const trace=traceApexDependencies<Use>(source,filePath,{expression:site.argument,offset:site.offset},index,resolveExternal,{
@@ -138,8 +139,19 @@ export function backtrackSoqlPermissionShapes(source:string,filePath:string,site
     abstractExpression:abstractSoqlExpression,
     allowMetadataCandidateRows:true,
     join:(list,separator)=>{
-      if(list.value.kind!=="collection"||separator!==","||list.value.items.length>MAX_FIELDS||list.value.items.some(s=>!path.test(s.trim())))return undefined;
-      return ev(textValue(list.value.items.join(",")),list.value.items.map(fieldPath=>({fieldPath:fieldPath.trim(),context:"SELECT"})));
+      if(list.value.kind!=="collection"||!/^,\s*$/.test(separator)||list.value.items.length>MAX_FIELDS||list.value.items.some(s=>!path.test(s.trim())))return undefined;
+      const annotations:Use[]=list.value.items.map(fieldPath=>({fieldPath:fieldPath.trim(),context:"SELECT"}));
+      if(list.runtimeMembers){
+        // Do not fill arbitrary runtime identifiers. The core has proven
+        // only optional additions constrained by a specific Describe map.
+        // Preserve the hole until its final SELECT placement is validated.
+        if(!list.runtimeMembers.describeObject||!list.value.items.length)return undefined;
+        return ev({kind:"unknown",reason:"Runtime-dependent additional schema field names",fragments:[
+          {kind:"literal",text:list.value.items.join(",")},
+          {kind:"hole",symbol:{name:"additionalFields",type:runtimeSelectPrefix+list.runtimeMembers.describeObject}}
+        ]},annotations);
+      }
+      return ev(textValue(list.value.items.join(",")),annotations);
     },
     mergeConditionalAppends:(base,additions)=>{
       const result=mergeSoqlAppends(base,additions);
@@ -148,16 +160,36 @@ export function backtrackSoqlPermissionShapes(source:string,filePath:string,site
       return result;
     }
   });
-  const queries=new Set<string>();
+  const queries=new Set<string>(),runtimeQueries=new Set<string>();
+  let allRuntime=trace.candidates.length>0&&!trace.bounded;
   note("BACKWARD_CANDIDATES",trace.candidates.length);
   for(const proof of trace.candidates){
-    const text=parseText(proof.value),shape=text?simplePermissionShape(text,site.line,observe?(code)=>note(code):undefined):undefined;
+    let runtimeObject:string|undefined;
+    let text=parseText(proof.value);
+    // Permit omission of optional schema-constrained members ONLY at the
+    // complete SELECT list boundary of the same root object. All other
+    // fragments must be literal; no unproven predicate or mode is omitted.
+    if(proof.value.kind==="unknown"&&proof.value.fragments?.length===3){
+      const [before,hole,after]=proof.value.fragments;
+      if(before.kind==="literal"&&hole.kind==="hole"&&hole.symbol?.type.startsWith(runtimeSelectPrefix)&&after.kind==="literal"&&
+        /^\s*SELECT\s+[A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*\s*$/i.test(before.text)&&/^\s+FROM\s+[A-Za-z_]\w*\b/i.test(after.text)){
+        runtimeObject=hole.symbol.type.slice(runtimeSelectPrefix.length);
+        text=before.text+after.text;
+      }
+    }
+    const shape=text?simplePermissionShape(text,site.line,observe?(code)=>note(code):undefined):undefined;
+    if(runtimeObject&&(!shape||shape.object.toLowerCase()!==runtimeObject.toLowerCase()||!matches(shape,proof.annotations))){
+      note("RUNTIME_SELECT_DOMAIN_MISMATCH");allRuntime=false;continue;
+    }
+    if(!runtimeObject)allRuntime=false;
     if(!text){
       note(proof.value.kind==="unknown"?(proof.value.fragments?.length?"SOQL_RUNTIME_SLOT_UNPROVEN":"SOQL_VALUE_UNRESOLVED"):"SOQL_NON_TEXT_CANDIDATE");
     }else if(shape&&matches(shape,proof.annotations)){
-      queries.add(text!.trim());note("SOQL_CANDIDATE_VALIDATED",shape.fields.length);
+      queries.add(text!.trim());
+      if(runtimeObject){runtimeQueries.add(text!.trim());note("RUNTIME_SELECT_KNOWN_FIELDS_VALIDATED",shape.fields.length);}
+      note("SOQL_CANDIDATE_VALIDATED",shape.fields.length);
     }else if(shape)note("SOQL_REQUIRED_REFERENCE_MISMATCH");
   }
   note("BACKWARD_VALIDATED_QUERIES",queries.size);
-  return {queries:[...queries],bounded:trace.bounded,callerEdges:trace.callerEdges,metadataRows:trace.metadataRows};
+  return {queries:[...queries],...(allRuntime&&runtimeQueries.size&&runtimeQueries.size===queries.size?{runtimeFieldQueries:[...runtimeQueries]}:{}),bounded:trace.bounded,callerEdges:trace.callerEdges,metadataRows:trace.metadataRows};
 }

@@ -104,7 +104,10 @@ export class SoqlAnalysisService {
       return this.soqlSecurityAnalyzer.analyzePrepared(persona, prepared,
         (completed, total) => progress.reportObjects(completed, total));
     });
-    findings.push(...unresolvedDynamicFindings(scanned.unresolvedDynamic));
+    // Coverage advisories for accepted runtime-field inventories are emitted
+    // by the security analyzer using its already resolved API-version mode.
+    const runtimeSites=new Set(queries.filter(q=>q.runtimeFieldCoverage).map(q=>q.querySiteId));
+    findings.push(...unresolvedDynamicFindings(scanned.unresolvedDynamic.filter(site=>!site.runtimeFieldCoverage||!runtimeSites.has(site.siteId))));
     recordSoqlCount("findings", findings.length);
 
     const outputDirectory = typeof this.outputDirectory === "function"

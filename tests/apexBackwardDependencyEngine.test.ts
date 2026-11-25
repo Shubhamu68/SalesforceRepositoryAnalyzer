@@ -138,3 +138,12 @@ test("caller dependencies resolve members in the declaring caller class, not the
   const trace=traceApexDependencies(root.source,root.filePath,{expression:"item",offset:root.source.indexOf("Sink.consume")},new ApexRepositoryMethodIndex(files));
   assert.deepEqual(trace.candidates.map(e=>e.value),[textValue("Name")],JSON.stringify(trace));
 });
+
+
+test("add-only unknown iterations preserve known members and explicit incompleteness without inventing a joined String",()=>{
+  const source="public class Worker {public static void run(List<String> extra){Set<String> items=new Set<String>{'A'};if(extra!=null){for(String f:extra){if(String.isNotBlank(f)){items.add(f.trim());}}}Sink.consume(items);}}";
+  const result=traceApexDependencies(source,"Worker.cls",{expression:"items",offset:source.indexOf("Sink.consume")});
+  assert.deepEqual(result.candidates.map(e=>({value:e.value,runtime:e.runtimeMembers})),[{value:{kind:"collection",items:["A"],unique:true},runtime:{}}],JSON.stringify(result));
+  const joined=traceApexDependencies(source,"Worker.cls",{expression:"String.join(items,',')",offset:source.indexOf("Sink.consume")});
+  assert.ok(joined.candidates.every(e=>e.value.kind==="unknown"),JSON.stringify(joined));
+});

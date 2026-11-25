@@ -30,6 +30,8 @@ export interface UnresolvedDynamicSoql {
   partialStructureVariants?:number;
   conditionalFrameworkVariants?:number;
   aggregatedPermissionInventories?:number;
+  /** Known references proven; only schema-constrained SELECT additions remain runtime dependent. */
+  runtimeFieldCoverage?:boolean;
   trace?:SoqlTraceReport;
 }
 export interface DynamicSoqlScanResult {
@@ -155,7 +157,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
       }
       // Aggregate only additional permission evidence. Existing variants
       // keep their IDs, occurrence counts and coverage classifications.
-      let aggregatedPermissionInventories=0;
+      let aggregatedPermissionInventories=0,runtimeFieldCoverage=false;
       if(trace){trace.priorVariants=variants.size;trace.fallback=mode===null?"SKIP_UNKNOWN_ACCESS_MODE":"NOT_ATTEMPTED";}
       if(mode!==null){
         const methods=repositoryIndex?.indexedMethods(filePath,source);
@@ -193,6 +195,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
           covered.set(key,fields);
         }
         const aggregates=aggregatePermissionShapes(shapes,trace?(code)=>note(code):undefined);
+        const runtimeOnly=!!traced?.runtimeFieldQueries?.length&&!traced.bounded&&!local.length&&!callers.length&&shapes.length===traced.queries.length&&aggregates.length===1&&!conflicts.size;
         if(trace){trace.compatibleShapes=shapes.length;trace.aggregateCandidates=aggregates.length;}
         for(const text of aggregates){
           if(variants.size>=MAX_VARIANTS||variants.has(text)){note(variants.size>=MAX_VARIANTS?"VARIANT_LIMIT":"DUPLICATE_VARIANT");continue;}
@@ -204,15 +207,17 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
           if(!parsed){note("FINAL_ROOT_PARSE_FAILED");continue;}
           const declared=shape.mode;
           variants.add(text);partialStructureVariants++;aggregatedPermissionInventories++;
+          if(runtimeOnly)runtimeFieldCoverage=true;
           queries.push({filePath,lineNumber:site.line,query:text,object:parsed.fromName,
             fields:parsed.fields,subqueries:parsed.subqueries,securityMode:declared,
             withUserMode:declared==="USER_MODE"||mode==="USER_MODE",dynamicOrigin:true,
             querySiteId:siteId,queryVariantId:siteId+"#partial-"+(partialStructureVariants-1),
-            coverage:"PROVEN_PARTIAL_STRUCTURE",permissionEvidence:"AGGREGATED_STRUCTURE",...(mode?{dynamicAccessLevel:mode}:{})});
+            coverage:"PROVEN_PARTIAL_STRUCTURE",permissionEvidence:"AGGREGATED_STRUCTURE",...(runtimeOnly?{runtimeFieldCoverage:true}:{}),...(mode?{dynamicAccessLevel:mode}:{})});
         }
         if(trace)trace.added=aggregatedPermissionInventories;
         if(aggregatedPermissionInventories)explanation+=" Permission inventory aggregated from individually validated SOQL structural evidence; representative query is parser-only and is not an executable reconstruction.";
       }
+      if(runtimeFieldCoverage)explanation+=" Known fields are submitted for permission analysis; additional runtime-dependent fields are outside verified coverage.";
       if(partialStructureVariants)explanation+=" Proven partial structural variants: "+partialStructureVariants+
         ". Typed value slots use synthetic parser placeholders, not actual runtime values; only those proven field and object references are submitted for access analysis. Complete execution coverage remains unverified.";
       if(conflicts.size&&mode){
@@ -223,7 +228,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
           explanation;
       }
       unresolved.push({filePath,lineNumber:site.line,siteId,reason:explanation,...(conflicts.size?{securityModeConflict:true}:{}),...(knownVariants?{knownVariants}:{}),
-        ...(partialStructureVariants?{partialStructureVariants}:{}),...(conditionalFrameworkVariants?{conditionalFrameworkVariants}:{}),...(aggregatedPermissionInventories?{aggregatedPermissionInventories}:{}),...(trace?{trace}:{})});
+        ...(partialStructureVariants?{partialStructureVariants}:{}),...(conditionalFrameworkVariants?{conditionalFrameworkVariants}:{}),...(aggregatedPermissionInventories?{aggregatedPermissionInventories}:{}),...(runtimeFieldCoverage?{runtimeFieldCoverage:true}:{}),...(trace?{trace}:{})});
     };
     const failure=flow.failures.get(site.offset);
     if(failure){fail(failure);continue;}

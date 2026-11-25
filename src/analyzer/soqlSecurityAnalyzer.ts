@@ -353,6 +353,24 @@ export class SoqlSecurityAnalyzer {
         reason: mode.description,
       });
     });
+    // A proven schema-filtered SELECT inventory has a coverage advisory,
+    // not a fabricated permission decision. Unknown/invalid execution modes
+    // still require REVIEW. The usual object/field permission findings stand.
+    queries.forEach((query,index)=>{
+      if(!query.runtimeFieldCoverage)return;
+      const mode=modeResults[index];
+      const known=mode.enforcement!=="UNKNOWN"&&mode.enforcement!=="INVALID";
+      findings.push({
+        severity:known?"INFO":"REVIEW",criticality:known?"Low":"Unable to verify",
+        verificationSource:"UNVERIFIED",findingType:known?"PARSER":"QUERY_MODE",
+        filePath:query.filePath,lineNumber:query.lineNumber,object:query.object,
+        field:"(Runtime-dependent additional fields)",
+        ...queryInfo(query.filePath,query.lineNumber,query.queryVariantId),
+        ...(query.queryVariantId?{queryVariantId:query.queryVariantId}:{}),
+        runtimeImpact:"Not assessed",
+        reason:"Known fields have been submitted to OLS/FLS analysis. Additional runtime-dependent fields are outside verified coverage; the additional names are constrained by the same object's schema field map. "+mode.description,
+      });
+    });
     // Tag every finding from a partial caller variant (including relationship
     // and parser diagnostics). The distinct site-level REVIEW remains.
     for(const finding of findings){
@@ -361,6 +379,8 @@ export class SoqlSecurityAnalyzer {
       if(coverage==="KNOWN_CALLER_CONTEXT")
         finding.reason += " Coverage: known repository caller variant only; other execution contexts remain unverified.";
       if(coverage==="CONDITIONAL_FRAMEWORK_CONTEXT")finding.reason += " Coverage: conditional framework receiver scenario only; actual job submission and other receiver states remain unverified.";
+      if(variant&&queryByLocation.get(variant)?.query.runtimeFieldCoverage&&finding.field!=="(Runtime-dependent additional fields)")
+        finding.reason += " Known field references only; additional runtime-dependent fields are outside verified coverage.";
       if(coverage==="PROVEN_PARTIAL_STRUCTURE")
         finding.reason += (variant&&queryByLocation.get(variant)?.query.permissionEvidence==="AGGREGATED_STRUCTURE")
           ?" Coverage: aggregated permission inventory; parser-only representative, not an executable query. Exhaustive structural coverage is not certified."
