@@ -2,6 +2,7 @@ import {analyzeApexInvocations,inspectApexInvocationContexts} from "../core/apex
 import {dynamicDatabaseQuerySelector,type ApexCallSite} from "../core/apex/ApexInvocationModel.js";
 import {explainUncapturedApexQuery} from "../core/apex/ApexExecutionPathDiagnostics.js";
 import type { ApexRepositoryMethodIndex } from "../core/apex/ApexRepositoryMethodIndex.js";
+import {provePartialSoql} from "../analyzer/soqlPartialStructure.js";
 import {describePartialApexText,type ApexValue} from "../core/apex/ApexValueEvaluator.js";
 import {describeMalformedSoql} from "../analyzer/soqlReconstructionDiagnostics.js";
 import { classifySoqlMode } from "../analyzer/soqlExecutionMode.js";
@@ -17,6 +18,7 @@ export interface UnresolvedDynamicSoql {
   reason: string;
   /** Known variants coexist with this unresolved execution site. */
   knownVariants?: number;
+  partialStructureVariants?:number;
 }
 export interface DynamicSoqlScanResult {
   queries: SoqlQuery[];
@@ -44,12 +46,15 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
   const unresolved:UnresolvedDynamicSoql[]=[];
   for(const site of flow.sites){
     const siteId=filePath+"@"+site.offset;
-    const fail=(reason:string)=>{
+    const fail=(reason:string,partialValues:readonly ApexValue[]=[])=>{
       let explanation=reason;
       let knownVariants=0;
+      const partialEvidence=[...partialValues];
+      const variants=new Set<string>();
       const owner=repositoryIndex?.methodAt(filePath,site.offset);
       const mode=explicitMode(site);
-      if(owner?.arity && /dependency|runtime|symbol|join|parameter|helper|unsupported/i.test(reason)){
+      if(owner?.arity && (/dependency|runtime|symbol|join|parameter|helper|unsupported/i.test(reason)||
+        (owner.visibility==="private"&&/budget/i.test(reason)))){
         const evidence=repositoryIndex!.inspectCallers(owner.className,owner.methodName,owner.arity);
         if(evidence.candidateCalls)explanation +=
           " Repository caller index: "+evidence.knownCalls+" known and "+
@@ -59,7 +64,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
             :"");
         const scoped=inspectApexInvocationContexts(filePath,site.offset,[site.argument],resolveExternal,repositoryIndex);
         if(scoped&&(scoped.contexts.known.length||scoped.contexts.partial.length||scoped.receiverContexts)){
-          const variants=new Set<string>();
+          partialEvidence.push(...scoped.partialArguments.map(args=>args[0]).filter((v):v is ApexValue=>v!==undefined));
           // Do not publish a guessed security mode, even if SELECT is valid.
           if(mode!==null)for(const args of scoped.arguments){
             const query=args[0];
@@ -84,13 +89,38 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
           explanation+=" Known repository contexts: "+scoped.contexts.known.length+
             "; partially known contexts: "+scoped.contexts.partial.length+
             (scoped.receiverContexts?"; known framework receiver contexts: "+scoped.receiverContexts:"")+
+            (scoped.contexts.freshEntryContexts?"; sampled direct fresh framework entry contexts: "+scoped.contexts.freshEntryContexts:"")+
             "; structurally valid query variants in probed contexts: "+knownVariants+
             (scoped.bounded?" (bounded sample).":"." )+
             (knownVariants?" Known variants are submitted for separate access analysis;":" Context evidence only;")+
             " complete execution coverage is not proven.";
         }
       }
-      unresolved.push({filePath,lineNumber:site.line,siteId,reason:explanation,...(knownVariants?{knownVariants}:{})});
+      let partialStructureVariants=0;
+      // Grammar-specific proof is intentionally confined to this adapter.
+      // The core Apex value remains unknown; no synthetic query is executed.
+      if(mode!==null)for(const value of partialEvidence){
+        if(variants.size>=MAX_VARIANTS)break;
+        const proof=provePartialSoql(value);
+        if(!proof)continue;
+        const text=proof.text.trim();
+        if(variants.has(text)||!/^SELECT\b/i.test(text))continue;
+        const parsed=parseNestedSoql(text,site.line);
+        const fields=extractSoqlExpressionFields(text);
+        const declared=classifySoqlMode(text);
+        if(!parsed||!fields.parsed||fields.limitations.length||
+          (mode&&declared!=="UNSPECIFIED"&&declared!==mode))continue;
+        variants.add(text);partialStructureVariants++;
+        queries.push({filePath,lineNumber:site.line,query:text,object:parsed.fromName,
+          fields:parsed.fields,subqueries:parsed.subqueries,securityMode:declared,
+          withUserMode:declared==="USER_MODE"||mode==="USER_MODE",dynamicOrigin:true,
+          querySiteId:siteId,queryVariantId:siteId+"#partial-"+(partialStructureVariants-1),
+          coverage:"PROVEN_PARTIAL_STRUCTURE",...(mode?{dynamicAccessLevel:mode}:{})});
+      }
+      if(partialStructureVariants)explanation+=" Proven partial structural variants: "+partialStructureVariants+
+        ". Typed numeric slots use synthetic parser placeholders, not actual runtime values; only those proven field and object references are submitted for access analysis. Complete execution coverage remains unverified.";
+      unresolved.push({filePath,lineNumber:site.line,siteId,reason:explanation,...(knownVariants?{knownVariants}:{}),
+        ...(partialStructureVariants?{partialStructureVariants}:{})});
     };
     const failure=flow.failures.get(site.offset);
     if(failure){fail(failure);continue;}
@@ -109,7 +139,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
       }
       strings.push(...capture.query.values);
     }
-    if(reason){fail("Query dependency unresolved: "+reason);continue;}
+    if(reason){fail("Query dependency unresolved: "+reason,captures.map(c=>c.query));continue;}
     const variants=[...new Set(strings.map(s=>s.trim()))];
     if(!variants.length||variants.length>MAX_VARIANTS){
       fail("Query has no proven complete value or exceeds the variant limit.");continue;
