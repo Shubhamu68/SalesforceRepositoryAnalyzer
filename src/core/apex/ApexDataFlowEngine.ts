@@ -289,15 +289,19 @@ export class ApexDataFlowEngine {
    * Returns the original arguments after mutation, NOT the final parameter
    * bindings: reassigning a parameter does not replace the caller's object.
    */
-  summarizeArgumentEffects(method:IndexedApexMethod,args:readonly ApexValue[]):ApexValue[]|undefined{
+  summarizeArgumentEffects(method:IndexedApexMethod,args:readonly ApexValue[],
+    onReject?:(code:string,offset:number)=>void):ApexValue[]|undefined{
+    const reject=(code:string,offset=method.start):undefined=>{onReject?.(code,offset);return undefined;};
     if(!this.methods.includes(method)||method.parameters.length!==args.length||this.effects.fields.size||
       args.some(v=>v.kind!=="collection"&&v.kind!=="number"&&v.kind!=="null"&&
-        !(v.kind==="text"&&v.values.length===1)))return undefined;
+        !(v.kind==="text"&&v.values.length===1)))return reject("HELPER_EFFECT_INPUT_DOMAIN_UNPROVEN");
     // A modeled String Set and List cannot be interchanged for a source
     // signature. Avoid order-sensitive Set observations in exact summaries.
-    if(args.some((v,i)=>v.kind==="collection"&&canonicalApexType(method.parameterTypes?.[i])!==(v.unique?"set<string>":"list<string>")))return undefined;
+    if(args.some((v,i)=>v.kind==="collection"&&canonicalApexType(method.parameterTypes?.[i])!==(v.unique?"set<string>":"list<string>")))return reject("HELPER_EFFECT_COLLECTION_TYPE_UNPROVEN");
+    if(!this.effects.replaySafe(method))return reject("HELPER_EFFECT_SOURCE_UNSUPPORTED",this.effects.replayFailureOffset(method));
     const plan=this.referenceReplay(method,args);
-    if(!plan||!plan.refs.length||!this.effects.argumentSummarySafe(method))return undefined;
+    if(!plan||!plan.refs.length)return reject("HELPER_EFFECT_REFERENCE_PROOF_UNPROVEN");
+    if(!this.effects.argumentSummarySafe(method))return reject("HELPER_EFFECT_SET_ORDER_UNPROVEN");
     this.budget.reset();this.activeSlice=undefined;this.activeQueryOffset=undefined;
     this.activeStopOffset=undefined;this.argumentProbe=undefined;
     this.activeCalls.clear();this.summaries.clear();this.provenEffectCall=undefined;
@@ -309,7 +313,7 @@ export class ApexDataFlowEngine {
     try{result=this.execute(method.body,[{values,effectFrame:true}],1);}
     finally{this.currentMethod=previous;this.evaluationOffset=previousOffset;this.provenEffectCall=undefined;}
     const replacements=this.referenceReplacements(plan.refs,result);
-    if([...replacements.values()].some(v=>v.kind==="unknown"))return undefined;
+    if([...replacements.values()].some(v=>v.kind==="unknown"))return reject(this.exceeded?"HELPER_EFFECT_EXECUTION_LIMIT":"HELPER_EFFECT_RESULT_UNPROVEN");
     countApex("helper.argument_effect_summaries");
     return args.map(v=>replacements.get(v)??v);
   }

@@ -696,17 +696,26 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
                     const hints=symbols.argumentTypes(frame.method,pieces,n.start);
                     const helper=selectApexOverload(frame.methods.filter(m=>symbols.sameOwner(frame.method,m)&&m.name.toLowerCase()===invocation.name),pieces.length,hints);
                     const effects=memberEffectModel(frame.source,frame.methods);
+                    const effectBlocked=(code:string,symbol=invocation.name):false=>{
+                      note(frame,n.start,code,symbol);
+                      return blocked("SHARED_HELPER_EFFECT_UNPROVEN");
+                    };
                     if(!helper||!helper.isStatic||helper.visibility!=="private"||
                       helper.parameterTypes?.length!==pieces.length||
-                      hints.some((t,i)=>!canonicalApexType(t)||canonicalApexType(t)!==canonicalApexType(helper.parameterTypes?.[i]))||
-                      (declaration&&(eq<0||declaration.name.toLowerCase()===key||declaration.type!==canonicalApexType(helper.returnType)||!effects.resultCannotExposeReference(helper)))||
-                      !exactCurrent||conditional||current.runtimeMembers||current.annotations.length||current.value.kind!=="collection"||
-                      pieces.some((p,i)=>!targetPositions.includes(i)&&rx(name).test(maskApexSource(p)))||
-                      effectPlatforms.some(p=>index?.hasSourceClass(p)||new RegExp("\\bclass\\s+"+p+"\\b","i").test(maskApexSource(frame.source))||
+                      hints.some((t,i)=>!canonicalApexType(t)||canonicalApexType(t)!==canonicalApexType(helper.parameterTypes?.[i])))
+                      return effectBlocked("HELPER_EFFECT_SIGNATURE_UNPROVEN");
+                    if(declaration&&(eq<0||declaration.name.toLowerCase()===key||declaration.type!==canonicalApexType(helper.returnType)||!effects.resultCannotExposeReference(helper)))
+                      return effectBlocked("HELPER_EFFECT_RETURN_ALIAS_UNPROVEN",helper.name);
+                    if(!exactCurrent||conditional||current.runtimeMembers||current.annotations.length||current.value.kind!=="collection")
+                      return effectBlocked("HELPER_EFFECT_REACHING_STATE_UNPROVEN",helper.name);
+                    if(pieces.some((p,i)=>!targetPositions.includes(i)&&rx(name).test(maskApexSource(p))))
+                      return effectBlocked("HELPER_EFFECT_ARGUMENT_ALIAS_UNPROVEN",helper.name);
+                    if(effectPlatforms.some(p=>index?.hasSourceClass(p)||new RegExp("\\bclass\\s+"+p+"\\b","i").test(maskApexSource(frame.source))||
                         frame.methods.some(m=>effects.locals(m).has(p.toLowerCase()))))
-                      return blocked("SHARED_HELPER_EFFECT_UNPROVEN");
+                      return effectBlocked("HELPER_EFFECT_PLATFORM_SHADOWED",helper.name);
                     const args=pieces.map((p,i)=>targetPositions.includes(i)?current:resolve(frame,p,n.start,bindings));
-                    if(args.some((v,i)=>!targetPositions.includes(i)&&!exactValue(v)))return blocked("SHARED_HELPER_EFFECT_UNPROVEN");
+                    const unproven=args.findIndex((v,i)=>!targetPositions.includes(i)&&!exactValue(v));
+                    if(unproven>=0)return effectBlocked("HELPER_EFFECT_ARGUMENT_VALUE_UNPROVEN",helper.parameters[unproven]);
                     if(++effectSummaries>MAX_EFFECT_SUMMARIES){note(frame,n.start,"WORK_LIMIT",helper.name);throw new Bounded("Helper effect summary limit");}
                     let engine=effectEngines.get(frame.filePath);
                     if(!engine){
@@ -719,7 +728,8 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
                           index?.constructInstance(frame.filePath,values[0].values[0],values.slice(1),undefined,types?.slice(1)):undefined});
                       effectEngines.set(frame.filePath,engine);
                     }
-                    const updated=engine.summarizeArgumentEffects(helper,args.map(v=>v.value))?.[targetPositions[0]];
+                    const updated=engine.summarizeArgumentEffects(helper,args.map(v=>v.value),(code,at)=>
+                      note({...frame,method:helper,depth:frame.depth+1},at,code,helper.name))?.[targetPositions[0]];
                     if(updated?.kind!=="collection"||updated.items.length>MAX_COLLECTION_ITEMS)return blocked("SHARED_HELPER_EFFECT_UNPROVEN");
                     current=ev(mark(updated));
                     note(frame,n.start,"SHARED_HELPER_EFFECT_RESOLVED",helper.name);

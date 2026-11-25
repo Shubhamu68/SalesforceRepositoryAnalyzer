@@ -212,3 +212,22 @@ test("complete Field Set lists pass a compound null/empty guard and feed downstr
     }
   }
 });
+
+
+test("backward replay uses nested local scalar helper results and identifies unproven helper source",()=>{
+  const filePath="Builder.cls";
+  const source="public class Builder {public static void run(){Set<String> cols=new Set<String>{'Id'};List<String> paths=new List<String>{' Name ',' Phone '};for(String path:paths){String result=addColumn('Account',path,cols);}Database.query('SELECT '+String.join(cols,',')+' FROM Account WITH USER_MODE');}private static String addColumn(String objectName,String path,Set<String> cols){String name=normalize(path);cols.add(name);return name;}private static String normalize(String path){return path.trim();}}";
+  const analyze=(source:string)=>{
+    const index=new ApexRepositoryMethodIndex([{filePath,source}]);
+    const site=discoverApexInvocations(source,dynamicDatabaseQuerySelector)[0],events:string[]=[];
+    const result=backtrackSoqlPermissionShapes(source,filePath,site,index,undefined,e=>events.push(e.code));
+    return {result,events};
+  };
+  const good=analyze(source);
+  assert.deepEqual(fields(good.result.queries),new Set(["SELECT:Id","SELECT:Name","SELECT:Phone"]),JSON.stringify(good.result));
+  assert.ok(good.events.includes("SHARED_HELPER_EFFECT_RESOLVED"));
+  const bad=analyze(source.replace("normalize(path);cols.add","Other.normalize(path);cols.add"));
+  assert.deepEqual(bad.result.queries,[]);
+  assert.ok(bad.events.includes("HELPER_EFFECT_SOURCE_UNSUPPORTED"));
+  assert.ok(bad.events.includes("SHARED_HELPER_EFFECT_UNPROVEN"));
+});

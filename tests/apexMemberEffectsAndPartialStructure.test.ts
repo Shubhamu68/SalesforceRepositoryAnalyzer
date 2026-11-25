@@ -150,3 +150,21 @@ test("exact AUE effect summaries reject List/Set signature mismatches and order-
   assert.equal(engine.summarizeArgumentEffects(methods[0],[listValue(["Name","Phone"],true)]),undefined);
   assert.equal(engine.summarizeArgumentEffects(methods[0],[listValue(["Name","Phone"])]),undefined);
 });
+
+
+test("shared helper effects replay a direct nested local scalar assignment without duplicating the evaluator",()=>{
+  const source="public class Builder {private static void append(Set<String> fields,String path){String name=normalize(path);fields.add(name);}private static String normalize(String path){return path.trim();}}";
+  const methods=indexApexMethods(source),helper=methods.find(m=>m.name==="append")!;
+  assert.ok(memberEffectModel(source,methods).replaySafe(helper));
+  const original=listValue(["Id"],true);
+  const result=new ApexDataFlowEngine(source,{sourceMethods:methods}).summarizeArgumentEffects(helper,[original,textValue(" Name ")]);
+  assert.deepEqual(result?.[0],listValue(["Id","Name"],true));
+  assert.deepEqual(original,listValue(["Id"],true));
+});
+test("helper effect replay still rejects opaque nested calls and reports the source rejection",()=>{
+  const source="public class Builder {private static void append(Set<String> fields,String path){String name=Other.normalize(path);fields.add(name);}}";
+  const methods=indexApexMethods(source),events:Array<{code:string;offset:number}>=[];
+  const result=new ApexDataFlowEngine(source,{sourceMethods:methods}).summarizeArgumentEffects(methods[0],[listValue(["Id"],true),textValue("Name")],(code,offset)=>events.push({code,offset}));
+  assert.equal(result,undefined);
+  assert.deepEqual(events,[{code:"HELPER_EFFECT_SOURCE_UNSUPPORTED",offset:source.indexOf("String name=")}]);
+});

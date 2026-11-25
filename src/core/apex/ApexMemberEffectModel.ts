@@ -12,6 +12,7 @@ export class ApexMemberEffectModel{
   readonly fields=new Map<string,ScalarMember>();
   private readonly localNames=new Map<IndexedApexMethod,Set<string>>();
   private readonly safe=new Map<IndexedApexMethod,boolean>();
+  private readonly replayFailures=new Map<IndexedApexMethod,number>();
   private readonly masked:string;
   readonly owner:string|undefined;
   private freshEligible=false;
@@ -233,19 +234,36 @@ export class ApexMemberEffectModel{
         }
         // Allow a uniquely resolved nested local private static helper.
         const candidates=this.methods.filter(m=>m.name.toLowerCase()===name.toLowerCase());
-        if(candidates.length===1&&directEffectCall(source.trim().replace(/;$/,""))===name.toLowerCase()&&this.replaySafe(candidates[0]))continue;
+        if(candidates.length===1&&this.replaySafe(candidates[0])){
+          const expression=source.trim().replace(/;\s*$/,"");
+          if(directEffectCall(expression)===name.toLowerCase())continue;
+          // The interpreter already transfers effects for a direct local
+          // assignment RHS. Admit only this exact shape, never a nested
+          // expression, member assignment or unproven reference return.
+          const assignment=/^(?:(?:final\s+)?[\w.]+\s+)?([A-Za-z_]\w*)\s*=(?!=|>)\s*([\s\S]+)$/.exec(expression);
+          const targetType=canonicalApexType(assignment?types.get(assignment[1].toLowerCase()):undefined);
+          const scalarReturn=targetType&&/^(?:string|boolean|integer|long|decimal|double|id|date|datetime|schema\.(?:sobjecttype|sobjectfield|describesobjectresult|describefieldresult|displaytype))$/.test(targetType);
+          if(statement&&assignment&&scalarReturn&&targetType===canonicalApexType(candidates[0].returnType)&&
+            directEffectCall(assignment[2])===name.toLowerCase())continue;
+        }
         return false;
       }
       return true;
     };
-    const visit=(nodes:readonly SourceNode[]):boolean=>nodes.every(node=>
-      node.kind!=="opaque"&&!(node.kind==="for"&&!node.loopVariable)&&
-      node.condition!=="__apex_exception_path_unknown__"&&
-      !(node.kind==="statement"&&!/^\s*(?:return\b|break\s*;|continue\s*;|(?:[\w.]+(?:\s*<[\w\s,.<>]+>)?\s+)?[\w.]+\s*(?:=(?!=|>)|\+=|;)|[\w.]+\s*\()/i.test(maskApexSource(node.text??"")))&&
-      check(node.text??"",node.kind==="statement")&&check(node.condition??"")&&check(node.iterable??"")&&
-      visit(node.body??[])&&visit(node.otherwise??[]));
+    const visit=(nodes:readonly SourceNode[]):boolean=>nodes.every(node=>{
+      const valid=node.kind!=="opaque"&&!(node.kind==="for"&&!node.loopVariable)&&
+        node.condition!=="__apex_exception_path_unknown__"&&
+        !(node.kind==="statement"&&!/^\s*(?:return\b|break\s*;|continue\s*;|(?:[\w.]+(?:\s*<[\w\s,.<>]+>)?\s+)?[\w.]+\s*(?:=(?!=|>)|\+=|;)|[\w.]+\s*\()/i.test(maskApexSource(node.text??"")))&&
+        check(node.text??"",node.kind==="statement")&&check(node.condition??"")&&check(node.iterable??"");
+      if(!valid){this.replayFailures.set(method,node.start);return false;}
+      return visit(node.body??[])&&visit(node.otherwise??[]);
+    });
     const result=visit(method.body);
     this.safe.set(method,result);return result;
+  }
+  /** First source statement rejected by the shared effect proof. */
+  replayFailureOffset(method:IndexedApexMethod):number|undefined{
+    this.replaySafe(method);return this.replayFailures.get(method);
   }
   /** Exact reference summaries must not depend on an unspecified Set
    * iteration order. Reuse the existing typed receiver and replay proofs;
