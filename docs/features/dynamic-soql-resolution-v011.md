@@ -444,3 +444,14 @@ Round two live baseline: 64.886 s total, 25.038 s repository scan, 2.339 s graph
 - Constructors allow a narrow set of supported pure String built-ins; reversed null checks in otherwise canonical lazy getters qualify under the existing write/alias safeguards.
 
 The affected Salesforce business-class source files were not available in this project; these are analyzer-code-backed generic refinements with synthetic regression fixtures, not verified fixes of the eight actual budget failures or the remaining lost OMSQueryService variant. Obtain the affected methods and actual callers/constructors before site-specific work. Batch 3 and Stage 4 remain deferred.
+
+
+## Field Set retrieval correction after P0/P1 live retest
+
+The live retest reported 67.371 s total, 25.082 s repository scan, 595 analyzed queries, and 307 queryAll invocations. All eight queryAll failures were HTTP 400 / INVALID_FIELD in the Field Set category (16 Tooling queries in total). This identifies the failing operation family, not the precise unsupported field or prior SOAP fallback success rate.
+
+The live metadata provider now prefers the existing read-only Metadata API readMetadata(FieldSet, Object.FieldSet) call, with exact fullName validation and ordered displayedFields. The previous two-step Tooling inventory/detail path is retained only when SOAP is unavailable or incomplete. Both paths validate member paths and bounds; if neither proves a complete result the query stays unresolved. No permissions or metadata snapshot lifetime rules were relaxed.
+
+New counters: org.field_set.soap.calls, successes, failures, cumulative_ms; org.field_set.tooling_fallbacks, tooling_inventory.calls/failures, tooling_detail.calls/failures, tooling_fallback_successes, unresolved. SOAP calls are distinct from queryAll counts. Live validation must check both transports, not just a decrease in queryAll failures.
+
+No further speculative execution-engine changes in this patch. The actual Apex classes for the eight budget failures and remaining lost variant are required before source-backed P1 work.
