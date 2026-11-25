@@ -68,7 +68,7 @@ export interface SoqlQuery {
   /** Stable execution-site and variant IDs; not exposed as new Excel columns. */
   dynamicOrigin?: boolean;
   /** Incomplete coverage: explicit caller sample or a typed numeric-slot structure. */
-  coverage?: "KNOWN_CALLER_CONTEXT" | "PROVEN_PARTIAL_STRUCTURE";
+  coverage?: "KNOWN_CALLER_CONTEXT" | "PROVEN_PARTIAL_STRUCTURE" | "CONDITIONAL_FRAMEWORK_CONTEXT";
   querySiteId?: string;
   queryVariantId?: string;
 }
