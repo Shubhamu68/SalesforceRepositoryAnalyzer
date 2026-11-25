@@ -68,9 +68,7 @@ function clone(state:State):State {return {values:new Map(state.values),stopped:
  * and references stored in a bounded nested map. Never mutate snapshot objects. */
 function replaceCollectionAliases(state:State,existing:ApexValue,next:ApexValue):boolean{
   if(!isApexReference(existing))return false;
-  const found=[...state.values.values()].some(value=>value===existing);
-  replaceApexReferences(state.values,new Map([[existing,next]]));
-  return found;
+  return replaceApexReferences(state.values,new Map([[existing,next]]));
 }
 function bool(value: ApexValue): boolean | undefined {
   if(value.kind!=="text"||value.scalarType!=="boolean"||value.values.length!==1)return undefined;
