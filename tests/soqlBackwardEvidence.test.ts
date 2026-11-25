@@ -145,15 +145,20 @@ test("backward Field Set helper reuses scan-scoped metadata resolution",async()=
   assert.equal(reads,1);
   await resolve();assert.equal(reads,1);
 });
-test("runtime-selected metadata helper stays unresolved without broadening the lookup",async()=>{
+test("runtime-selected metadata helper stays unresolved when bounded filtered candidate metadata is unavailable",async()=>{
   const source="public class Report {public static void run(String reportName){Report_Config__mdt cfg=getConfig(reportName);List<String> paths=Utils.getFieldListFromFieldSet(cfg.Object_API_Name__c,cfg.Field_Set_Name__c);Database.query('SELECT '+String.join(paths,',')+' FROM '+cfg.Object_API_Name__c);}private static Report_Config__mdt getConfig(String developerName){if(String.isBlank(developerName)){return null;}List<Report_Config__mdt> cfgs=[SELECT DeveloperName,Object_API_Name__c,Field_Set_Name__c FROM Report_Config__mdt WHERE DeveloperName=:developerName AND Active__c=true LIMIT 1];return cfgs.isEmpty()?null:cfgs[0];}}";
   const filePath="Report.cls",index=new ApexRepositoryMethodIndex([{source,filePath}]);
-  let reads=0;
+  let reads=0,fieldSetReads=0;
   const metadata={
     scopeKey:"test-runtime-config",
     getObjectFieldNames:async()=>({complete:false as const,source:"LIVE_ORG" as const}),
-    getCustomMetadataRecords:async()=>{reads++;return {complete:false as const,source:"LIVE_ORG" as const};},
-    getFieldSetFields:async()=>{reads++;return {complete:false as const,source:"LIVE_ORG" as const};},
+    getCustomMetadataRecords:async(type:string,selected:readonly string[],filters?:readonly {field:string;value:string|number|boolean}[])=>{
+      reads++;assert.equal(type,"Report_Config__mdt");
+      assert.ok(selected.includes("DeveloperName"));
+      assert.deepEqual(filters,[{field:"Active__c",value:true}]);
+      return {complete:false as const,source:"LIVE_ORG" as const};
+    },
+    getFieldSetFields:async()=>{fieldSetReads++;return {complete:false as const,source:"LIVE_ORG" as const};},
   };
   const site=discoverApexInvocations(source,dynamicDatabaseQuerySelector)[0];
   const events:string[]=[];
@@ -161,7 +166,9 @@ test("runtime-selected metadata helper stays unresolved without broadening the l
     backtrackSoqlPermissionShapes(source,filePath,site,index,context.resolveExternal,e=>events.push(e.code)));
   assert.deepEqual(result.queries,[]);
   assert.ok(events.includes("SHARED_HELPER_ARGUMENT_UNPROVEN"));
-  assert.equal(reads,0);
+  assert.ok(events.includes("METADATA_SELECTOR_ROWS_UNAVAILABLE"));
+  assert.equal(reads,1);
+  assert.equal(fieldSetReads,0);
 });
 
 

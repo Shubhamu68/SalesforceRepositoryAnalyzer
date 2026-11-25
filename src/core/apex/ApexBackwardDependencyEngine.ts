@@ -311,8 +311,12 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
               const rows=resolveExternal("Apex.metadataSelectorCandidates",[textValue(query.expression)]);
               note(frame,offset,rows?.kind==="records"?"METADATA_SELECTOR_ROWS_RETURNED":"METADATA_SELECTOR_ROWS_UNAVAILABLE",
                 query.type,rows?.kind==="records"?rows.items.length:undefined);
-              if(rows?.kind!=="records"||!rows.items.length||rows.items.length>MAX_EDGES)
+              if(rows?.kind!=="records"||!rows.items.length||rows.items.length>MAX_EDGES){
+                // Preserve the unresolved source-level helper input in the
+                // consumer explanation when no candidate row is established.
+                note(frame,offset,"SHARED_HELPER_ARGUMENT_UNPROVEN",target.name);
                 return ev(reject("complete bounded metadata selector candidates unavailable","METADATA_SELECTOR_ROWS_UNAVAILABLE"));
+              }
               throw new Expand(rowKey,rows.items.map(row=>({kind:"row",row})));
             }
           }
