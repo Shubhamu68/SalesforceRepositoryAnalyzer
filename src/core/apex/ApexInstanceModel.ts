@@ -184,6 +184,7 @@ export class ApexInstanceIndex {
           continue;
         }
         if(local){
+          if(!parseApexDeclaration(maskApexSource(statement)))return false;
           // Shadowing an existing parameter/local requires a separate lexical
           // binding model. Reject rather than silently changing the outer slot.
           if([...parameters.keys()].some(k=>k.toLowerCase()===local[1].toLowerCase()))return false;
