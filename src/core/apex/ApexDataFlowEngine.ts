@@ -11,6 +11,7 @@ import {ApexLocalLiveness,sharedApexLocalLiveness,declaredLoopLocals} from "./Ap
 import {apexStateIdentity} from "./ApexStateIdentity.js";
 import {compactUnknownStates} from "./ApexUnknownStateCompaction.js";
 import {summarizeUnknownLoopEffects} from "./ApexLoopEffects.js";
+import {targetWithinLoop,targetBranch} from "./ApexInvocationPrefix.js";
 import {ApexExecutionBudget} from "./ApexExecutionBudget.js";
 import {writeInstanceMember} from "./ApexInstanceModel.js";
 import {invocationMayExecute} from "./ApexConditionalInvocation.js";
@@ -483,6 +484,16 @@ export class ApexDataFlowEngine {
     return proven;
   }
   private readonly guardOnlyCache=new Map<string,boolean>();
+  private readonly targetLoopCache=new Map<string,boolean>();
+  private isLoopTarget(depth:number):boolean{
+    const method=this.currentMethod,offset=this.activeStopOffset;
+    if(depth!==0||!method||offset===undefined)return false;
+    const key=method.start+"|"+offset;
+    const hit=this.targetLoopCache.get(key);
+    if(hit!==undefined)return hit;
+    const result=targetWithinLoop(method.body,offset);
+    this.targetLoopCache.set(key,result);return result;
+  }
   /** Record a repeated, pure scalar comparison as a path fact rather than
    * inventing the runtime parameter's value. Require every lexical reference
    * to occur in that identical comparison; writes/aliases/other reads reject it. */
@@ -573,8 +584,12 @@ export class ApexDataFlowEngine {
         if(predicate&&known===undefined)seed.values.set(predicate,booleanValue(truth));
         return scoped(nodes,seed);
       };
-      const paths=[...(known!==false?[branch(true,node.body??[])]:[]),
-        ...(known!==true?[branch(false,node.otherwise??[])]:[])];
+      // A branch that cannot contain the selected invocation cannot
+      // contribute to its prefix. Never prune for a loop-carried target.
+      const selected=depth===0&&this.activeStopOffset!==undefined&&!this.isLoopTarget(depth)
+        ?targetBranch(node,this.activeStopOffset):undefined;
+      const paths=[...(known!==false&&selected!=="else"?[branch(true,node.body??[])]:[]),
+        ...(known!==true&&selected!=="then"?[branch(false,node.otherwise??[])]:[])];
       return {states:paths.flatMap(x=>x.states),returns:paths.flatMap(x=>x.returns)};
     }
     if(node.kind==="for"){
@@ -752,6 +767,11 @@ export class ApexDataFlowEngine {
       // not mutable aliases, fields or loop-carried values, before deduplication.
       if(live)for(const frame of next)live.discardDeadScalars(frame.values,node.end,node.start);
       let distinct=mergeEquivalentStates(next);
+      // The invocation has already been visited; its continuation is not a
+      // live frontier. Earlier statements and branch work still obey budgets.
+      if(depth===0&&this.activeStopOffset!==undefined&&node.start<=this.activeStopOffset&&this.activeStopOffset<node.end&&!this.isLoopTarget(depth)){
+        states=distinct;break;
+      }
       if(distinct.filter(frame=>!frame.stopped).length>this.options.maxPaths){
         const before=distinct.length;
         distinct=compactUnknownStates(distinct);
@@ -836,11 +856,11 @@ export class ApexDataFlowEngine {
 
   /** Collect only lexical same-class callers of an explicitly private helper. */
   private privateCallers(owner:IndexedApexMethod):
-    Array<{offset:number;method:IndexedApexMethod}>{
+    Array<{offset:number;method:IndexedApexMethod;expressions:string[]}>{
     const masked=maskApexSource(this.source);
     const safeName=owner.name; // Apex identifiers cannot contain regex punctuation.
     const pattern=new RegExp("\\b"+safeName+"\\s*\\(","g");
-    const callers:Array<{offset:number;method:IndexedApexMethod}>=[];
+    const callers:Array<{offset:number;method:IndexedApexMethod;expressions:string[]}>=[];
     let match:RegExpExecArray|null;
     while((match=pattern.exec(masked))!==null){
       const containing=this.methods.find(m=>m!==owner&&m.start<=match!.index&&match!.index<m.end);
@@ -851,7 +871,10 @@ export class ApexDataFlowEngine {
         const receiver=/\b([A-Za-z_]\w*)\.\s*$/.exec(prior)?.[1];
         if(receiver!=="this"&&receiver!==this.className)continue;
       }
-      callers.push({offset:match.index,method:containing});
+      const open=masked.indexOf("(",match.index),close=matchingPair(masked,open);
+      if(close<0)continue;
+      const input=this.source.slice(open+1,close);
+      callers.push({offset:match.index,method:containing,expressions:input.trim()?splitApexTopLevel(input,","):[]});
     }
     return callers;
   }
@@ -917,13 +940,14 @@ export class ApexDataFlowEngine {
         // call-site must supply a proven argument context to claim RESOLVED.
         for(const caller of callers){
           this.activeStopOffset=caller.offset;
+          this.activeSlice=invocationDependencySlice(caller.method.body,caller.offset,caller.expressions.join(" "));
           const before=(this.captures.get(site.offset)?.length??0)+(this.skippedInvocations.get(site.offset)??0);
           const env=new Map<string,ApexValue>();
           caller.method.parameters.forEach((p,i)=>env.set(p,runtimeParameter(p,caller.method.parameterTypes?.[i],"Runtime caller parameter: "+p)));
           const previousMethod:IndexedApexMethod|undefined=this.currentMethod;
           this.currentMethod=caller.method;
           try{this.execute(caller.method.body,[{values:env}],0);}
-          finally{this.currentMethod=previousMethod;}
+          finally{this.currentMethod=previousMethod;this.activeSlice=undefined;}
           if((this.captures.get(site.offset)?.length??0)+(this.skippedInvocations.get(site.offset)??0)===before)
             this.failures.set(site.offset,
               "Private helper caller did not establish a complete query execution context.");
