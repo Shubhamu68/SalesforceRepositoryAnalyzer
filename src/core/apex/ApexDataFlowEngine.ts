@@ -1,5 +1,5 @@
 import {countApex,timeApex} from "./ApexPerformance.js";
-import {memberEffectModel,type ApexMemberEffectModel} from "./ApexMemberEffectModel.js";
+import {memberEffectModel,directEffectCall,type ApexMemberEffectModel} from "./ApexMemberEffectModel.js";
 import {
   indexApexMethods, maskApexSource, matchingPair, sourceLine, splitApexTopLevel,
   type IndexedApexMethod, type SourceNode,
@@ -264,8 +264,9 @@ export class ApexDataFlowEngine {
    * longer a safe complete field inventory. Scalars remain immutable.
    */
   private taintCollectionsPassedToUnknownCalls(source:string,state:State,provenCall?:string):void{
-    if(!source.includes("(") || ![...state.values.values()].some(v=>
-      v.kind==="collection"||v.kind==="map"||v.kind==="instance"||v.kind==="instanceList"))return;
+    const hasTrackedMembers=[...this.effects.fields.values()].some(field=>state.values.has(field.key));
+    if(!source.includes("(") || (!hasTrackedMembers&&![...state.values.values()].some(v=>
+      v.kind==="collection"||v.kind==="map"||v.kind==="instance"||v.kind==="instanceList")))return;
     const masked=maskApexSource(source);
     const call=/\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(/g;
     const pure=/^(?:String\.(?:join|isBlank|isNotBlank|escapeSingleQuotes)|System\.debug|Math\.\w+|Database\.(?:query|queryWithBinds|countQuery|countQueryWithBinds|getQueryLocator|getQueryLocatorWithBinds))$/i;
@@ -281,6 +282,8 @@ export class ApexDataFlowEngine {
         state.values.get(receiver)?.kind==="collection"){
         call.lastIndex=open+1;continue;
       }
+      if(hasTrackedMembers&& !/^(?:String\.(?:valueOf|isEmpty)|System\.Label\.\w+|Schema\.[\w.]+|[\w.]+\.(?:getFieldPath|getFields|getMap|split|length|substring|trim|endsWith|startsWith|contains|containsKey|isEmpty|size|get|keySet))$/i.test(name))
+        this.effects.unknownMembers(state.values,"Unsupported call may alter mutable static state.");
       const argumentText=maskApexSource(source.slice(open+1,close));
       for(const [identifier,value] of [...state.values]){
         if(value.kind!=="collection"&&value.kind!=="map"&&value.kind!=="instance"&&value.kind!=="instanceList")continue;
@@ -431,6 +434,13 @@ export class ApexDataFlowEngine {
     if(member){
       const [,receiver,field,operator,rhs]=member;
       const existing=state.values.get(receiver);
+      const staticKey=existing===undefined?this.effects.key(this.currentMethod,receiver+"."+field):undefined;
+      if(staticKey){
+        const next=this.evaluate(rhs,state,depth);
+        state.values.set(staticKey,operator==="="?next:addApexValues(state.values.get(staticKey)??unknown("Incoming mutable static state is not proven."),next));
+        this.taintCollectionsPassedToUnknownCalls(rhs,state);
+        return;
+      }
       if(existing?.kind==="instance"){
         let next=this.evaluate(rhs,state,depth);
         if(operator==="+=")next=this.evaluate(receiver+"."+field+" + ("+rhs+")",state,depth);
@@ -447,7 +457,7 @@ export class ApexDataFlowEngine {
       const [,name,operator,rhs]=assignment;
       const key=!prefix?this.effects.key(this.currentMethod,name)??name:name;
       this.provenEffectCall=undefined;
-      const direct=/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\s*\(/.test(rhs.trim())&&matchingPair(maskApexSource(rhs),maskApexSource(rhs).indexOf("("))===rhs.length-1;
+      const direct=!!directEffectCall(rhs);
       const value=this.evaluate(rhs,state,depth,direct);
       const proven=this.provenEffectCall;
       this.provenEffectCall=undefined;
@@ -476,7 +486,7 @@ export class ApexDataFlowEngine {
       const receiver=target.includes(".")?state.values.get(target.split(".")[0]):undefined;
       if(receiver?.kind==="instance")replaceCollectionAliases(state,receiver,next);
       else if(!replaceCollectionAliases(state,existing,next))
-        state.values.set(target.includes(".")?target.toLowerCase():target,next);
+        state.values.set(this.effects.key(this.currentMethod,target)??(target.includes(".")?target.toLowerCase():target),next);
       return;
     }
     const declaration=trackedStandaloneDeclaration(original);
@@ -485,7 +495,7 @@ export class ApexDataFlowEngine {
     // their body. Evaluate their arguments without executing arbitrary Apex.
     if(/^(?:(?:this|[A-Za-z_]\w*)\.)?[A-Za-z_]\w*\s*\(/.test(original)){
       this.provenEffectCall=undefined;
-      this.evaluate(original,state,depth,true);
+      this.evaluate(original,state,depth,!!directEffectCall(original));
       const proven=this.provenEffectCall;this.provenEffectCall=undefined;
       this.taintCollectionsPassedToUnknownCalls(original,state,proven);
     }
