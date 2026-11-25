@@ -1,6 +1,7 @@
 import path from "node:path";
 import {countApex,timeApex} from "./ApexPerformance.js";
 import { ApexDataFlowEngine } from "./ApexDataFlowEngine.js";
+import {memberEffectModel} from "./ApexMemberEffectModel.js";
 import { ApexRepositorySyntaxInventory, maskApexSource, matchingPair, splitApexTopLevel,
   type IndexedApexMethod } from "./ApexSourceModel.js";
 import { unknown, type ApexValue } from "./ApexValueEvaluator.js";
@@ -37,6 +38,8 @@ export interface ApexCallerContexts {
   readonly candidateCalls:number;
   readonly externallyCallable:boolean;
   readonly bounded:boolean;
+  /** Samples under an explicit direct framework entry, never a closed context. */
+  readonly freshEntryContexts?:number;
 }
 export interface ApexCallerEvidence {
   knownCalls: number;
@@ -402,15 +405,15 @@ export class ApexRepositoryMethodIndex {
   /** Reuse complete scalar argument probes only in the same resolver scope.
    * No mutable reference results, failed probes or cross-pass metadata reuse. */
   private probeArguments(owner:IndexedSource,method:IndexedApexMethod,offset:number,expressions:readonly string[],seed:ApexValue[]|undefined,
-    resolveExternal?: (name:string,args:ApexValue[])=>ApexValue|undefined):ApexValue[][]{
+    resolveExternal?: (name:string,args:ApexValue[])=>ApexValue|undefined,freshEntry=false):ApexValue[][]{
     const scalar=(v:ApexValue)=>v.kind==="text"||v.kind==="number"||v.kind==="null";
     const eligible=!this.active.size&&(!seed||seed.every(v=>scalar(v)||v.kind==="unknown"));
-    const key=eligible?JSON.stringify([owner.filePath,method.start,offset,expressions,seed?argumentIdentity(seed):null,this.scopeId(resolveExternal)]):undefined;
+    const key=eligible?JSON.stringify([owner.filePath,method.start,offset,expressions,seed?argumentIdentity(seed):null,this.scopeId(resolveExternal),freshEntry]):undefined;
     const cached=key?this.argumentProbes.get(key):undefined;
     if(cached){countApex("caller.probe_cache_hit");return cached.map(args=>[...args]);}
     const engine=new ApexDataFlowEngine(owner.source,{sourceMethods:owner.methods,maxOperations:2000,
       resolveExternal:(name,args)=>resolveExternal?.(name,args)??this.evaluateReturn(owner.filePath,name,args,resolveExternal)});
-    const values=engine.evaluateArgumentsAt(method,offset,expressions,seed);
+    const values=engine.evaluateArgumentsAt(method,offset,expressions,seed,freshEntry);
     if(key&&values.length&&values.every(args=>args.every(scalar))){
       if(this.argumentProbes.size>=MAX_CACHED_SUMMARIES)this.argumentProbes.delete(this.argumentProbes.keys().next().value!);
       this.argumentProbes.set(key,values.map(args=>[...args]));
@@ -443,7 +446,7 @@ export class ApexRepositoryMethodIndex {
       return {...empty,candidateCalls:candidates.length,unknownCalls:candidates.length,bounded:true};
     const known=new Map<string,ApexValue[]>();
     const partial=new Map<string,ApexValue[]>();
-    let unknownCalls=0,bounded=false,inheritedBounded=false;
+    let unknownCalls=0,bounded=false,inheritedBounded=false,freshEntryContexts=0;
     for(const call of candidates){
       // A variable shadowing a class name or an instance-qualified call
       // cannot establish static dispatch. Only explicit static targets qualify.
@@ -458,10 +461,23 @@ export class ApexRepositoryMethodIndex {
       // evaluation, while distinct reference alias topologies stay distinct.
       const uniqueSeeds=[...new Map(seeds.map(seed=>[seed?argumentIdentity(seed):"runtime-entry",seed])).values()];
       if(upstream?.bounded)inheritedBounded=true;
+      freshEntryContexts+=upstream?.freshEntryContexts??0;
       let unproven=false;
       for(const seed of uniqueSeeds){
         if(work.remaining--<=0){bounded=true;break;}
         const contexts=this.probeArguments(call.caller,call.method,call.offset,call.expressions,seed,resolveExternal);
+        // A direct @AuraEnabled request may start a fresh transaction. Probe
+        // that supported framework scenario separately; the ordinary Apex
+        // entry still has unknown mutable state. Never feed this into the
+        // exhaustive private closure evaluator.
+        if(seed===undefined&&work.remaining>0&&contexts.some(args=>args.some(v=>v.kind==="unknown"))&&
+          memberEffectModel(call.caller.source,call.caller.methods).freshEntry(call.method)){
+          work.remaining--;
+          const fresh=this.probeArguments(call.caller,call.method,call.offset,call.expressions,undefined,resolveExternal,true);
+          const samples=fresh.filter(args=>args.some(v=>v.kind!=="unknown"));
+          freshEntryContexts+=samples.length;
+          contexts.push(...samples);
+        }
         for(const args of contexts){
           if(args.length!==target.parameters.length){unproven=true;continue;}
           const incomplete=args.some(v=>v.kind==="unknown");
@@ -481,7 +497,8 @@ export class ApexRepositoryMethodIndex {
       if(bounded)break;
     }
     const result:ApexCallerContexts={known:[...known.values()],partial:[...partial.values()],unknownCalls,
-      candidateCalls:candidates.length,externallyCallable:target.visibility!=="private",bounded:bounded||inheritedBounded};
+      candidateCalls:candidates.length,externallyCallable:target.visibility!=="private",bounded:bounded||inheritedBounded,
+      ...(freshEntryContexts?{freshEntryContexts}:{})};
     // Recursive calls can encounter a shallower cycle/budget cut. Cache only
     // root results; never persist an incomplete nested traversal as exhaustive.
     if(stack.size===0){
