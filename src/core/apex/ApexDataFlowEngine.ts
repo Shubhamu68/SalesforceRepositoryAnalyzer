@@ -203,7 +203,13 @@ export class ApexDataFlowEngine {
         // A target-bearing helper is an invocation probe, not a reusable
         // return summary. A cached return would also suppress captures.
         const capturesTarget=this.activeQueryOffset!==undefined&&candidates[0].start<=this.activeQueryOffset&&this.activeQueryOffset<candidates[0].end;
-        const replay=allowEffects&&!capturesTarget&&this.effects.replaySafe(candidates[0])&&
+        const referenceInputsSafe=args.every((v,i)=>{
+          const type=candidates[0].parameterTypes?.[i]??"";
+          if(v.kind==="collection")return /^(?:List|Set)\s*<\s*String\s*>$|^List\s*<\s*Schema\.FieldSetMember\s*>$/i.test(type);
+          if(v.kind==="map")return /^Map\s*<\s*String\s*,\s*String\s*>$/i.test(type)&&v.entries.every(([,item])=>item.kind==="text"||item.kind==="null"||item.kind==="unknown");
+          return v.kind!=="instance"&&v.kind!=="instanceList";
+        });
+        const replay=allowEffects&&!capturesTarget&&referenceInputsSafe&&this.effects.replaySafe(candidates[0])&&
           (this.effects.fields.size>0||args.some(v=>v.kind==="collection"||v.kind==="map"));
         const cacheable=!replay&&!capturesTarget&&args.every(v=>v.kind==="text"||v.kind==="number"||v.kind==="null"||v.kind==="unknown");
         const cached=cacheable?this.summaries.get(key):undefined;
@@ -341,6 +347,13 @@ export class ApexDataFlowEngine {
     this.captureArgumentProbe(node.start,node.end,state,depth);
     this.captureCalls(node.start,node.end,state,depth);
     if(!original)return;
+    // DML may invoke triggers or other application callbacks in the same
+    // transaction. A previously proven private static value is no longer
+    // proof after that unmodeled side effect.
+    if(/^(?:insert|update|upsert|delete|undelete|merge)\b/i.test(original)){
+      this.effects.unknownMembers(state.values,"DML may alter mutable static state through application callbacks.");
+      return;
+    }
     if(/^(?:break|continue)$/i.test(original)){
       state.loopControl=original.toLowerCase() as "break"|"continue";return;
     }
