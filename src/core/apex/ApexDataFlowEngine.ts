@@ -477,7 +477,10 @@ export class ApexDataFlowEngine {
       const key=!prefix?this.effects.key(this.currentMethod,name)??existingName??name:name;
       this.provenEffectCall=undefined;
       const direct=!!directEffectCall(rhs);
-      const value=this.evaluate(rhs,state,depth,direct);
+      let value=this.evaluate(rhs,state,depth,direct);
+      const declaredType=prefix?prefix.replace(/^final\s+/i,"").trim():this.symbols.lookup(this.currentMethod,name,this.evaluationOffset);
+      if(operator==="="&&value.kind==="unknown"&&/^id$/i.test(declaredType??""))
+        value=runtimeParameter(name,"Id",value.reason);
       const proven=this.provenEffectCall===directEffectCall(rhs)?this.provenEffectCall:undefined;
       this.provenEffectCall=undefined;
       if(operator==="=")state.values.set(key,value);
