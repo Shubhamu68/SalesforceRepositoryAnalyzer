@@ -592,7 +592,7 @@ export class ApexRepositoryMethodIndex {
    * Evidence is kept separate from the all-path verdict and from permissions. */
   probeInvocationContexts(filePath:string,offset:number,expressions:readonly string[],
     resolveExternal?: (name:string,args:ApexValue[])=>ApexValue|undefined):{
-      contexts:ApexCallerContexts;arguments:ApexValue[][];bounded:boolean;receiverContexts?:number
+      contexts:ApexCallerContexts;arguments:ApexValue[][];partialArguments:ApexValue[][];bounded:boolean;receiverContexts?:number
     }|undefined {
     const owner=this.paths.get(path.resolve(filePath));
     const method=owner?.methods.filter(m=>m.start<=offset&&offset<m.end)
@@ -600,6 +600,7 @@ export class ApexRepositoryMethodIndex {
     if(!owner||!method||!method.parameters.length)return undefined;
     const contexts=this.resolveCallerContexts(filePath,method,resolveExternal);
     const argumentsByValue=new Map<string,ApexValue[]>();
+    const partialArguments=new Map<string,ApexValue[]>();
     const maxSeeds=8;
     const seeds=[...new Map([...contexts.known,...contexts.partial].map(seed=>[argumentIdentity(seed),seed])).values()];
     const relevant=invocationRelevantIdentifiers(method.body,offset,expressions.join(" "));
@@ -609,13 +610,19 @@ export class ApexRepositoryMethodIndex {
     let bounded=contexts.bounded||seeds.length>selected.length;
     for(const seed of selected){
       for(const args of this.probeArguments(owner,method,offset,expressions,seed,resolveExternal)){
-        if(args.some(v=>v.kind==="unknown"))continue;
+        if(args.some(v=>v.kind==="unknown")){
+          // Retain only bounded abstract text evidence. The consumer must
+          // prove any structural interpretation, never close the site.
+          if(partialArguments.size<32&&args.some(v=>v.kind==="unknown"&&!!v.fragments))
+            partialArguments.set(argumentIdentity(args),args);
+          continue;
+        }
         argumentsByValue.set(JSON.stringify(args),args);
       }
     }
     const batch=this.probeBatchReceivers(owner,method,offset,expressions,resolveExternal);
     for(const args of batch.arguments)argumentsByValue.set(JSON.stringify(args),args);
-    return {contexts,arguments:[...argumentsByValue.values()],bounded:bounded||batch.bounded,receiverContexts:batch.count};
+    return {contexts,arguments:[...argumentsByValue.values()],partialArguments:[...partialArguments.values()],bounded:bounded||batch.bounded,receiverContexts:batch.count};
   }
 
   /**
