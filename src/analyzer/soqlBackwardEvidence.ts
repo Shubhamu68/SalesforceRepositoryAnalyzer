@@ -5,6 +5,7 @@ import type {ApexRepositoryMethodIndex} from "../core/apex/ApexRepositoryMethodI
 import type {ApexCallSite} from "../core/apex/ApexInvocationModel.js";
 import type {ApexCallResolver} from "../core/apex/ApexTypeSystem.js";
 import {maskApexSource} from "../core/apex/ApexSourceModel.js";
+import {reportApexDependency,type ApexDependencyObserver} from "../core/apex/ApexDependencyDiagnostics.js";
 import {provePartialSoql} from "./soqlPartialStructure.js";
 import {aggregatePermissionShapes,simplePermissionShape,type SoqlPermissionShape} from "./soqlPermissionAggregation.js";
 const one=(v:ApexValue)=>v.kind==="text"&&v.values.length===1&&!v.scalarType?v.values[0]:undefined;
@@ -129,21 +130,34 @@ function mergeSoqlAppends(base:Evidence,additions:readonly ApexDependencyAppend<
   return ev(stop("conditional fragment is not a proven query, predicate or field list"));
 }
 export function backtrackSoqlPermissionShapes(source:string,filePath:string,site:ApexCallSite,
-  index?:ApexRepositoryMethodIndex,resolveExternal?:ApexCallResolver):{queries:string[];bounded:boolean;callerEdges:number;metadataRows:number}{
-  if(/\bclass\s+Database\b/i.test(maskApexSource(source)))return {queries:[],bounded:false,callerEdges:0,metadataRows:0};
+  index?:ApexRepositoryMethodIndex,resolveExternal?:ApexCallResolver,observe?:ApexDependencyObserver):{queries:string[];bounded:boolean;callerEdges:number;metadataRows:number}{
+  const note=(code:string,count?:number)=>reportApexDependency(observe,code,{filePath,source,depth:0},site.offset,undefined,count);
+  if(/\bclass\s+Database\b/i.test(maskApexSource(source))){note("SHADOWED_DATABASE");return {queries:[],bounded:false,callerEdges:0,metadataRows:0};}
   const trace=traceApexDependencies<Use>(source,filePath,{expression:site.argument,offset:site.offset},index,resolveExternal,{
+    observe,
     abstractExpression:abstractSoqlExpression,
     allowMetadataCandidateRows:true,
     join:(list,separator)=>{
       if(list.value.kind!=="collection"||separator!==","||list.value.items.length>MAX_FIELDS||list.value.items.some(s=>!path.test(s.trim())))return undefined;
       return ev(textValue(list.value.items.join(",")),list.value.items.map(fieldPath=>({fieldPath:fieldPath.trim(),context:"SELECT"})));
     },
-    mergeConditionalAppends:mergeSoqlAppends
+    mergeConditionalAppends:(base,additions)=>{
+      const result=mergeSoqlAppends(base,additions);
+      if(result.value.kind==="unknown")note("SOQL_CONDITIONAL_MERGE_REJECTED");
+      else note("SOQL_CONDITIONAL_MERGE_ACCEPTED",additions.length);
+      return result;
+    }
   });
   const queries=new Set<string>();
+  note("BACKWARD_CANDIDATES",trace.candidates.length);
   for(const proof of trace.candidates){
-    const text=parseText(proof.value),shape=text?simplePermissionShape(text,site.line):undefined;
-    if(shape&&matches(shape,proof.annotations))queries.add(text!.trim());
+    const text=parseText(proof.value),shape=text?simplePermissionShape(text,site.line,observe?(code)=>note(code):undefined):undefined;
+    if(!text){
+      note(proof.value.kind==="unknown"?(proof.value.fragments?.length?"SOQL_RUNTIME_SLOT_UNPROVEN":"SOQL_VALUE_UNRESOLVED"):"SOQL_NON_TEXT_CANDIDATE");
+    }else if(shape&&matches(shape,proof.annotations)){
+      queries.add(text!.trim());note("SOQL_CANDIDATE_VALIDATED",shape.fields.length);
+    }else if(shape)note("SOQL_REQUIRED_REFERENCE_MISMATCH");
   }
+  note("BACKWARD_VALIDATED_QUERIES",queries.size);
   return {queries:[...queries],bounded:trace.bounded,callerEdges:trace.callerEdges,metadataRows:trace.metadataRows};
 }

@@ -9,6 +9,7 @@ import {setImmediate as yieldToEventLoop} from "node:timers/promises";
 import { classifySoqlMode } from "../analyzer/soqlExecutionMode.js";
 import { parseNestedSoql, maskSoql } from "../analyzer/nestedSoqlScopes.js";
 import { extractDynamicSoqlQueries, type UnresolvedDynamicSoql } from "./dynamicSoqlScanner.js";
+import {emitSoqlTraceReports} from "../analyzer/soqlTraceDiagnostics.js";
 import type {ApexValue} from "../core/apex/ApexValueEvaluator.js";
 import {ApexAnalysisEngine} from "../core/apex/ApexAnalysisEngine.js";
 import { ApexRepositoryMethodIndex } from "../core/apex/ApexRepositoryMethodIndex.js";
@@ -71,7 +72,8 @@ export async function scanApexSoqlWithUnresolved(
   repositoryPath: string, metadata?: ApexMetadataProvider, onProgress?:ScanProgress,
 ): Promise<SoqlScanInventory> {
   const root = path.resolve(repositoryPath);
-  const cacheKey = root + "|" + (metadata?.scopeKey ?? "REPOSITORY_ONLY");
+  const traceEnabled=process.env.SALESFORCE_SOQL_TRACE==="1";
+  const cacheKey = root + "|" + (metadata?.scopeKey ?? "REPOSITORY_ONLY")+(traceEnabled?"|TRACE":"");
   const pending = inFlightScans.get(cacheKey);
   if (pending) {
     recordSoqlCount("scanner.inflight_reuse");
@@ -84,7 +86,7 @@ export async function scanApexSoqlWithUnresolved(
   job.work=scanRepositoryApex(root,cacheKey,metadata,(completed,total)=>{
     job.completed=completed;job.total=total;
     for(const listener of job.listeners)listener(completed,total);
-  });
+  },traceEnabled);
   inFlightScans.set(cacheKey,job);
   try{return await job.work;}
   finally{if(inFlightScans.get(cacheKey)===job)inFlightScans.delete(cacheKey);}
@@ -121,7 +123,7 @@ function preserveDynamicFailureDiagnostics(
 
 
 async function scanRepositoryApex(
-  repositoryPath: string, cacheKey: string, metadata?: ApexMetadataProvider, onProgress?:ScanProgress,
+  repositoryPath: string, cacheKey: string, metadata?: ApexMetadataProvider, onProgress?:ScanProgress,traceEnabled=false,
 ): Promise<SoqlScanInventory> {
   const apexFiles = await timeSoqlPhase("scanner.discovery", () => findApexClasses(repositoryPath));
   apexFiles.sort((a, b) => a.localeCompare(b));
@@ -176,7 +178,7 @@ async function scanRepositoryApex(
         :extractSoqlQueries(entry.source,entry.filePath);
       const dynamic=hasDynamicCall?await engine.analyze(entry.filePath,context=>
         preserveDynamicFailureDiagnostics(entry.source,entry.filePath,
-          extractDynamicSoqlQueries(entry.source,entry.filePath,context.resolveExternal,context.repositoryIndex),
+          extractDynamicSoqlQueries(entry.source,entry.filePath,context.resolveExternal,context.repositoryIndex,traceEnabled),
           context.resolveLocal)):{queries:[],unresolved:[]};
       if(!hasDynamicCall)recordSoqlCount("scanner.static_only_files");
       await finishFile();
@@ -204,11 +206,9 @@ async function scanRepositoryApex(
     queries.push(...entry.queries);
     unresolvedDynamic.push(...entry.unresolvedDynamic);
   }
-  return {
-    queries:queries.sort((a,b)=>a.filePath.localeCompare(b.filePath)||a.lineNumber-b.lineNumber),
-    unresolvedDynamic:unresolvedDynamic.sort((a,b)=>
-      a.filePath.localeCompare(b.filePath)||a.lineNumber-b.lineNumber),
-  };
+  const sorted=unresolvedDynamic.sort((a,b)=>a.filePath.localeCompare(b.filePath)||a.lineNumber-b.lineNumber);
+  if(traceEnabled)emitSoqlTraceReports(sorted);
+  return {queries:queries.sort((a,b)=>a.filePath.localeCompare(b.filePath)||a.lineNumber-b.lineNumber),unresolvedDynamic:sorted};
 }
 
 /**

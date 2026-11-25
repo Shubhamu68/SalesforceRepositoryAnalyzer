@@ -15,6 +15,7 @@ import { classifySoqlMode } from "../analyzer/soqlExecutionMode.js";
 import { extractSoqlExpressionFields } from "../analyzer/soqlExpressionInventory.js";
 import { parseNestedSoql } from "../analyzer/nestedSoqlScopes.js";
 import type { SoqlQuery } from "../models/SoqlQuery.js";
+import {collectSoqlTrace,newSoqlTraceReport,type SoqlTraceReport} from "../analyzer/soqlTraceDiagnostics.js";
 
 export interface UnresolvedDynamicSoql {
   filePath: string;
@@ -27,6 +28,7 @@ export interface UnresolvedDynamicSoql {
   partialStructureVariants?:number;
   conditionalFrameworkVariants?:number;
   aggregatedPermissionInventories?:number;
+  trace?:SoqlTraceReport;
 }
 export interface DynamicSoqlScanResult {
   queries: SoqlQuery[];
@@ -42,7 +44,7 @@ function explicitMode(site:ApexCallSite){return parseApexAccessLevel(site.access
  */
 export function extractDynamicSoqlQueries(source:string,filePath:string,
   resolveExternal?: (name:string,args:ApexValue[])=>ApexValue|undefined,
-  repositoryIndex?: ApexRepositoryMethodIndex):DynamicSoqlScanResult {
+  repositoryIndex?: ApexRepositoryMethodIndex,traceEnabled=false):DynamicSoqlScanResult {
   if(!/\bDatabase\s*\.\s*(?:query|countQuery|getQueryLocator)/i.test(source))
     return {queries:[],unresolved:[]};
   const flow=analyzeApexInvocations(source,filePath,dynamicDatabaseQuerySelector,resolveExternal,repositoryIndex);
@@ -52,6 +54,9 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
     const siteId=filePath+"@"+site.offset;
     const fail=(reason:string,partialValues:readonly ApexValue[]=[])=>{
       let explanation=reason;
+      const trace=traceEnabled?newSoqlTraceReport(filePath,site.line,site.offset,site.argument):undefined;
+      const observe=trace?collectSoqlTrace(trace):undefined;
+      const note=(code:string,count?:number)=>{if(trace)observe?.({code,file:trace.file,line:site.line,depth:0,...(count===undefined?{}:{count})});};
       let knownVariants=0,conditionalFrameworkVariants=0;
       const partialEvidence=[...partialValues];
       let callerSeeds:readonly ApexValue[][]=[];
@@ -145,6 +150,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
       // Aggregate only additional permission evidence. Existing variants
       // keep their IDs, occurrence counts and coverage classifications.
       let aggregatedPermissionInventories=0;
+      if(trace){trace.priorVariants=variants.size;trace.fallback=mode===null?"SKIP_UNKNOWN_ACCESS_MODE":"NOT_ATTEMPTED";}
       if(mode!==null){
         const methods=repositoryIndex?.indexedMethods(filePath,source);
         // Never reinterpret arbitrary unresolved captures as complete
@@ -156,11 +162,17 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
         ]:[];
         const callers=callerSeeds.length?proveCallerPermissionShapes(source,site,callerSeeds,methods):[];
         const traced=variants.size===0&&!local.length&&!callers.length
-          ?backtrackSoqlPermissionShapes(source,filePath,site,repositoryIndex,resolveExternal):undefined;
+          ?backtrackSoqlPermissionShapes(source,filePath,site,repositoryIndex,resolveExternal,observe):undefined;
+        if(trace){
+          trace.localCandidates=local.length;trace.callerCandidates=callers.length;
+          trace.fallback=traced?"ATTEMPTED":variants.size?"SKIP_EXISTING_VARIANTS":local.length?"SKIP_LOCAL_CANDIDATES":"SKIP_CALLER_CANDIDATES";
+          if(traced){trace.backwardCandidates=traced.queries.length;trace.callerEdges=traced.callerEdges;trace.metadataRows=traced.metadataRows;trace.bounded=traced.bounded;}
+        }
         if(traced?.queries.length)explanation+=" Backward structural dependency evidence from "+traced.callerEdges+" explicit caller edge(s) and "+traced.metadataRows+" metadata row candidate(s); intended predicate literals are parser-only, not an injection-safety proof.";
         if(traced?.bounded)explanation+=" Backward dependency trace reached its work bound.";
         const shapes=[...local,...callers,...(traced?.queries??[])].flatMap(text=>{
-          const shape=simplePermissionShape(text,site.line);
+          const shape=simplePermissionShape(text,site.line,trace?(code)=>note(code):undefined);
+          if(shape&&mode&&shape.mode!=="UNSPECIFIED"&&shape.mode!==mode)note("ACCESS_MODE_CONFLICT");
           return shape&&(!mode||shape.mode==="UNSPECIFIED"||shape.mode===mode)?[shape]:[];
         });
         // A whole validated group is kept if it introduces a new reference.
@@ -175,14 +187,16 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
           for(const field of shape.fields)fields.add(fieldKey(field));
           covered.set(key,fields);
         }
-        for(const text of aggregatePermissionShapes(shapes)){
-          if(variants.size>=MAX_VARIANTS||variants.has(text))continue;
-          const shape=simplePermissionShape(text,site.line);
+        const aggregates=aggregatePermissionShapes(shapes,trace?(code)=>note(code):undefined);
+        if(trace){trace.compatibleShapes=shapes.length;trace.aggregateCandidates=aggregates.length;}
+        for(const text of aggregates){
+          if(variants.size>=MAX_VARIANTS||variants.has(text)){note(variants.size>=MAX_VARIANTS?"VARIANT_LIMIT":"DUPLICATE_VARIANT");continue;}
+          const shape=simplePermissionShape(text,site.line,trace?(code)=>note(code):undefined);
           if(!shape)continue;
           const existing=covered.get(groupKey(shape));
-          if(existing&&shape.fields.every(f=>existing.has(fieldKey(f))))continue;
+          if(existing&&shape.fields.every(f=>existing.has(fieldKey(f)))){note("REFERENCES_ALREADY_COVERED");continue;}
           const parsed=parseNestedSoql(text,site.line);
-          if(!parsed)continue;
+          if(!parsed){note("FINAL_ROOT_PARSE_FAILED");continue;}
           const declared=shape.mode;
           variants.add(text);partialStructureVariants++;aggregatedPermissionInventories++;
           queries.push({filePath,lineNumber:site.line,query:text,object:parsed.fromName,
@@ -191,12 +205,13 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
             querySiteId:siteId,queryVariantId:siteId+"#partial-"+(partialStructureVariants-1),
             coverage:"PROVEN_PARTIAL_STRUCTURE",permissionEvidence:"AGGREGATED_STRUCTURE",...(mode?{dynamicAccessLevel:mode}:{})});
         }
+        if(trace)trace.added=aggregatedPermissionInventories;
         if(aggregatedPermissionInventories)explanation+=" Permission inventory aggregated from individually validated SOQL structural evidence; representative query is parser-only and is not an executable reconstruction.";
       }
       if(partialStructureVariants)explanation+=" Proven partial structural variants: "+partialStructureVariants+
         ". Typed value slots use synthetic parser placeholders, not actual runtime values; only those proven field and object references are submitted for access analysis. Complete execution coverage remains unverified.";
       unresolved.push({filePath,lineNumber:site.line,siteId,reason:explanation,...(knownVariants?{knownVariants}:{}),
-        ...(partialStructureVariants?{partialStructureVariants}:{}),...(conditionalFrameworkVariants?{conditionalFrameworkVariants}:{}),...(aggregatedPermissionInventories?{aggregatedPermissionInventories}:{})});
+        ...(partialStructureVariants?{partialStructureVariants}:{}),...(conditionalFrameworkVariants?{conditionalFrameworkVariants}:{}),...(aggregatedPermissionInventories?{aggregatedPermissionInventories}:{}),...(trace?{trace}:{})});
     };
     const failure=flow.failures.get(site.offset);
     if(failure){fail(failure);continue;}

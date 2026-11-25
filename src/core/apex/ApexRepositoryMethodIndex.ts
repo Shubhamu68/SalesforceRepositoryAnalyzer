@@ -259,11 +259,11 @@ export class ApexRepositoryMethodIndex {
 
   /** Reuse the existing overload/receiver proof. This API exposes syntax,
    * not evaluated arguments, and does not change engine selection or budgets. */
-  sourceCallers(filePath:string,target:IndexedApexMethod):readonly ApexCallerSource[]{
+  sourceCallers(filePath:string,target:IndexedApexMethod,observe?:(stats:{status:"CALLER_INDEX_MISSING"|"CALLER_INDEX_LIMIT"|"CALLER_INDEX_CANDIDATES";candidates:number;eligible:number})=>void):readonly ApexCallerSource[]{
     const owner=this.paths.get(path.resolve(filePath));
-    if(!owner||!owner.methods.includes(target))return [];
+    if(!owner||!owner.methods.includes(target)){observe?.({status:"CALLER_INDEX_MISSING",candidates:0,eligible:0});return [];}
     const candidates=this.callers.get(this.methodKey(owner.className,target.name,target.parameters.length))??[];
-    if(candidates.length>MAX_CALL_CONTEXTS)return [];
+    if(candidates.length>MAX_CALL_CONTEXTS){observe?.({status:"CALLER_INDEX_LIMIT",candidates:candidates.length,eligible:0});return [];}
     const direct=(call:Caller):boolean=>{
       const at=(nodes:readonly import("./ApexSourceModel.js").SourceNode[]):import("./ApexSourceModel.js").SourceNode|undefined=>{
         for(const n of nodes){
@@ -286,11 +286,13 @@ export class ApexRepositoryMethodIndex {
       const close=matchingPair(text,open);
       return close>=0&&/^\s*;\s*$/.test(text.slice(close+1));
     };
-    return candidates.filter(call=>call.targetStart===target.start&&
+    const eligible=candidates.filter(call=>call.targetStart===target.start&&
       (target.isStatic||call.privateInstanceEdge)&&
       (call.caller===owner||target.visibility==="public"||target.visibility==="global")&&direct(call))
       .map(call=>({filePath:call.caller.filePath,source:call.caller.source,methods:call.caller.methods,
         method:call.method,offset:call.offset,expressions:[...call.expressions]}));
+    observe?.({status:"CALLER_INDEX_CANDIDATES",candidates:candidates.length,eligible:eligible.length});
+    return eligible;
   }
 
   indexedMethods(filePath:string,source:string):IndexedApexMethod[]|undefined{
