@@ -1,13 +1,13 @@
 import type {ApexValue} from "../core/apex/ApexValueEvaluator.js";
 import {proveApexPartialStructure,type ApexPartialStructure} from "../core/apex/ApexPartialStructure.js";
 
-/** Only typed Integer/Long numeric slots and exact quoted Id slots.
+/** Typed scalar value slots, never structural slots.
  * Never assume that runtime String values, field lists, object names, sort
  * expressions, quoted fragments or arbitrary predicates are safe. */
 export function provePartialSoql(value:ApexValue):ApexPartialStructure|undefined{
   return proveApexPartialStructure(value,(prefix,hole,suffix)=>{
     const type=hole.symbol?.type?.toLowerCase();
-    if(type!=="id"&&type!=="integer"&&type!=="long")return undefined;
+    if(!type||!["id","integer","long","decimal","double","boolean","date","datetime"].includes(type))return undefined;
     // Require a complete token boundary after the numeric value; a hole
     // within an identifier, a quoted value or punctuation is not a proof.
     const boundary=/^(?:\s*$|\s+(?:AND\b|OR\b|GROUP\s+BY\b|ORDER\s+BY\b|LIMIT\b|OFFSET\b|WITH\b|HAVING\b|FOR\b)|\s*\))/i;
@@ -31,9 +31,11 @@ export function provePartialSoql(value:ApexValue):ApexPartialStructure|undefined
     // Require that a literal space separates a numeric slot from a LIMIT
     // or OFFSET keyword. For simple predicates, the parser must separately
     // establish the field and complete expression.
-    if(/\bLIMIT\s+$/i.test(visible))return "1";
-    if(/\bOFFSET\s+$/i.test(visible))return "0";
-    if(/\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\s*(?:!=|<=|>=|=|<|>)\s*$/i.test(visible))return "0";
+    const integer=type==="integer"||type==="long";
+    if(integer&&/\bLIMIT\s+$/i.test(visible))return "1";
+    if(integer&&/\bOFFSET\s+$/i.test(visible))return "0";
+    if(/\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\s*(?:!=|<=|>=|=|<|>)\s*$/i.test(visible))
+      return type==="date"?"2000-01-01":type==="datetime"?"2000-01-01T00:00:00Z":type==="boolean"?"true":"0";
     return undefined;
   });
 }

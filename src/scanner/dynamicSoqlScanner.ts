@@ -3,6 +3,8 @@ import {dynamicDatabaseQuerySelector,type ApexCallSite} from "../core/apex/ApexI
 import {explainUncapturedApexQuery} from "../core/apex/ApexExecutionPathDiagnostics.js";
 import type { ApexRepositoryMethodIndex } from "../core/apex/ApexRepositoryMethodIndex.js";
 import {provePartialSoql} from "../analyzer/soqlPartialStructure.js";
+import {proveLocalSoqlPermissionShape} from "../analyzer/soqlSourceStructuralEvidence.js";
+import {aggregatePermissionShapes,simplePermissionShape} from "../analyzer/soqlPermissionAggregation.js";
 import {describePartialApexText,type ApexValue} from "../core/apex/ApexValueEvaluator.js";
 import {describeMalformedSoql} from "../analyzer/soqlReconstructionDiagnostics.js";
 import { classifySoqlMode } from "../analyzer/soqlExecutionMode.js";
@@ -137,8 +139,29 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
           querySiteId:siteId,queryVariantId:siteId+"#partial-"+(partialStructureVariants-1),
           coverage:"PROVEN_PARTIAL_STRUCTURE",...(mode?{dynamicAccessLevel:mode}:{})});
       }
+      // Additive SOQL-only fallback. Preserve established caller/framework
+      // evidence and its existing sampling budgets. Aggregate source-proven
+      // root fields by usage and mode, not by runtime value combinations.
+      if(mode!==null&&variants.size===0){
+        const shapes=partialEvidence.flatMap(value=>value.kind==="text"?value.values.flatMap(text=>{
+          const shape=simplePermissionShape(text,site.line);return shape?[shape]:[];
+        }):[]);
+        const texts=[...aggregatePermissionShapes(shapes),...proveLocalSoqlPermissionShape(source,site,repositoryIndex?.indexedMethods(filePath,source))];
+        for(const text of texts){
+          if(variants.has(text)||variants.size>=MAX_VARIANTS)continue;
+          const parsed=parseNestedSoql(text,site.line),declared=classifySoqlMode(text);
+          if(!parsed||(mode&&declared!=="UNSPECIFIED"&&declared!==mode))continue;
+          variants.add(text);partialStructureVariants++;
+          queries.push({filePath,lineNumber:site.line,query:text,object:parsed.fromName,
+            fields:parsed.fields,subqueries:parsed.subqueries,securityMode:declared,
+            withUserMode:declared==="USER_MODE"||mode==="USER_MODE",dynamicOrigin:true,
+            querySiteId:siteId,queryVariantId:siteId+"#partial-"+(partialStructureVariants-1),
+            coverage:"PROVEN_PARTIAL_STRUCTURE",...(mode?{dynamicAccessLevel:mode}:{})});
+        }
+        if(texts.length&&partialStructureVariants)explanation+=" Permission inventory aggregated from individually validated SOQL structural evidence; representative query is parser-only and is not an executable reconstruction.";
+      }
       if(partialStructureVariants)explanation+=" Proven partial structural variants: "+partialStructureVariants+
-        ". Typed numeric or quoted Id slots use synthetic parser placeholders, not actual runtime values; only those proven field and object references are submitted for access analysis. Complete execution coverage remains unverified.";
+        ". Typed value slots use synthetic parser placeholders, not actual runtime values; only those proven field and object references are submitted for access analysis. Complete execution coverage remains unverified.";
       unresolved.push({filePath,lineNumber:site.line,siteId,reason:explanation,...(knownVariants?{knownVariants}:{}),
         ...(partialStructureVariants?{partialStructureVariants}:{}),...(conditionalFrameworkVariants?{conditionalFrameworkVariants}:{})});
     };
