@@ -1,6 +1,7 @@
 import {provePartialSoql} from "../src/analyzer/soqlPartialStructure.js";
 import assert from "node:assert/strict";
 import {test} from "node:test";
+import {withApexPerformance} from "../src/core/apex/ApexPerformance.js";
 import {ApexAnalysisEngine} from "../src/core/apex/ApexAnalysisEngine.js";
 import {ApexRepositoryMethodIndex} from "../src/core/apex/ApexRepositoryMethodIndex.js";
 import {outerApexClass,supportsApexAllocation} from "../src/core/apex/ApexClassModel.js";
@@ -115,4 +116,31 @@ test("constructor normal-path scenario with business Id remains conditional and 
   const result=await scan([{filePath:"Work.cls",source:batch}],"Work.cls");
   assert.ok(result.queries.some(q=>q.query==="SELECT Id FROM Account WHERE CreatedById = '000000000000000'"&&q.coverage==="CONDITIONAL_FRAMEWORK_CONTEXT"),JSON.stringify(result));
   assert.equal(result.unresolved.length,1);
+});
+
+test("batch receiver inventory is shared across sites but site-specific control flow remains distinct",async()=>{
+  const config="public class Config {public class Item {public String objectName;public Item(String o){objectName=o;}}public static Map<Integer,Item> make(){Map<Integer,Item> m=new Map<Integer,Item>{1=>new Item('Account'),2=>new Item('Contact')};return m;}}";
+  const batch="public class Work implements Database.Batchable<SObject>{private Integer step;private Map<Integer,Config.Item> settings;public Work(Integer step){this.step=step;this.settings=Config.make();}public Database.QueryLocator start(Database.BatchableContext bc){Config.Item item=settings.get(step);String objectName=item.objectName;if(step==1){return Database.getQueryLocator('SELECT Id FROM '+objectName);}return Database.getQueryLocator('SELECT Name FROM '+objectName);}}";
+  const counts=new Map<string,number>();
+  const result=await withApexPerformance({count:(name,n)=>counts.set(name,(counts.get(name)??0)+n),duration:()=>{}},
+    ()=>scan([{filePath:"Config.cls",source:config},{filePath:"Work.cls",source:batch}],"Work.cls"));
+  assert.ok(result.queries.some(q=>q.query==="SELECT Id FROM Account"&&q.coverage==="CONDITIONAL_FRAMEWORK_CONTEXT"),JSON.stringify(result));
+  assert.ok(result.queries.some(q=>q.query==="SELECT Name FROM Contact"&&q.coverage==="CONDITIONAL_FRAMEWORK_CONTEXT"),JSON.stringify(result));
+  assert.ok(!result.queries.some(q=>q.query==="SELECT Id FROM Contact"||q.query==="SELECT Name FROM Account"),JSON.stringify(result));
+  assert.equal(counts.get("caller.batch_receiver_inventory_evaluations"),1);
+  assert.ok((counts.get("caller.batch_receiver_cache_hits")??0)>=1);
+});
+
+test("duplicate batch query arguments leave bounded sampling capacity for later configuration keys",async()=>{
+  const entries=Array.from({length:36},(_,i)=>`${i+1}=>new Item('${i<32?"Account":["Contact","Case","Lead","Opportunity"][i-32]}')`).join(",");
+  const config=`public class Config {public class Item {public String objectName;public Item(String o){objectName=o;}}public static Map<Integer,Item> make(){Map<Integer,Item> m=new Map<Integer,Item>{${entries}};return m;}}`;
+  const batch="public class Work implements Database.Batchable<SObject>{private Integer step;private Map<Integer,Config.Item> settings;public Work(Integer step){this.step=step;this.settings=Config.make();}public Database.QueryLocator start(Database.BatchableContext bc){Config.Item item=settings.get(step);return Database.getQueryLocator('SELECT Id FROM '+item.objectName);}}";
+  const counts=new Map<string,number>();
+  const result=await withApexPerformance({count:(name,n)=>counts.set(name,(counts.get(name)??0)+n),duration:()=>{}},
+    ()=>scan([{filePath:"Config.cls",source:config},{filePath:"Work.cls",source:batch}],"Work.cls"));
+  const queries=result.queries.filter(q=>q.coverage==="CONDITIONAL_FRAMEWORK_CONTEXT").map(q=>q.query);
+  assert.deepEqual(new Set(queries),new Set(["Account","Contact","Case","Lead","Opportunity"].map(o=>"SELECT Id FROM "+o)),JSON.stringify(result));
+  assert.equal(result.unresolved.length,1);
+  assert.ok((counts.get("caller.batch_receiver_overflow_samples")??0)>0);
+  assert.ok((counts.get("caller.batch_receiver_overflow_samples")??0)<=32);
 });

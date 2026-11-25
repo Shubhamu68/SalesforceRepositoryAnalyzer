@@ -98,6 +98,16 @@ export function selectApexCallerSeeds(seeds:readonly ApexValue[][],parameters:re
 const MAX_METHOD_DEPTH = 6;
 const MAX_CALL_CONTEXTS = 64;
 const MAX_CACHED_SUMMARIES = 1024;
+const MAX_RECEIVER_SNAPSHOTS = 32;
+const BASE_RECEIVER_KEY_LIMIT = 32;
+const BASE_RECEIVER_SAMPLE_LIMIT = 40;
+const MAX_EXTRA_RECEIVER_SAMPLES = 32;
+type BatchReceiver = Extract<ApexValue,{kind:"instance"}>;
+interface BatchReceiverInventory {
+  count:number;
+  bounded:boolean;
+  candidates:Array<{value:BatchReceiver;hypothetical:boolean}>;
+}
 
 /**
  * Immutable, repository-scoped class/method/caller index.
@@ -122,6 +132,7 @@ export class ApexRepositoryMethodIndex {
   private readonly active=new Set<string>();
   private readonly summaries=new Map<string,ApexValue>();
   private readonly argumentProbes=new Map<string,ApexValue[][]>();
+  private readonly batchReceiverInventories=new Map<string,BatchReceiverInventory>();
   private readonly scopes=new WeakMap<Function,number>();
   private nextScope=1;
 
@@ -537,6 +548,59 @@ export class ApexRepositoryMethodIndex {
     return result;
   }
 
+  /** Cache only the incoming receiver inventory, never a query-site proof.
+   * Resolver identity prevents reuse across metadata discovery passes. Cloning
+   * preserves internal aliases and isolates cached values from consumers. */
+  private batchReceiverInventory(owner:IndexedSource,method:IndexedApexMethod,
+    resolveExternal?:ApexCallResolver):BatchReceiverInventory {
+    const key=JSON.stringify([owner.filePath,method.start,this.scopeId(resolveExternal)]);
+    const eligible=this.active.size===0;
+    const cached=eligible?this.batchReceiverInventories.get(key):undefined;
+    if(cached){
+      countApex("caller.batch_receiver_cache_hits");
+      return structuredClone(cached);
+    }
+    countApex("caller.batch_receiver_inventory_evaluations");
+    const inventory=timeApex("caller.batch_receiver_inventory_ms",()=>{
+      const calls=this.batchAllocations.get(owner.className.toLowerCase())??[];
+      const receivers=new Map<string,Extract<ApexValue,{kind:"instance"}>>();
+      let bounded=calls.length>8;
+      for(const call of calls.slice(0,8)){
+        countApex("caller.batch_submission_probes");
+        const engine=new ApexDataFlowEngine(call.caller.source,{sourceMethods:call.caller.methods,maxOperations:2000,
+          resolveExternal:(name,args,types)=>{
+            if(name==="Apex.construct"&&args[0]?.kind==="text"&&args[0].values.length===1)
+              return this.constructInstance(call.caller.filePath,args[0].values[0],args.slice(1),resolveExternal,types?.slice(1));
+            return resolveExternal?.(name,args,types)??this.evaluateReturn(call.caller.filePath,name,args,resolveExternal,types);
+          }});
+        for(const args of engine.evaluateArgumentsAt(call.method,call.offset,call.expressions)){
+          const instance=args[0];
+          if(instance?.kind==="instance"&&instance.className.toLowerCase()===owner.className.toLowerCase())
+            receivers.set(argumentIdentity([instance]),instance);
+          if(receivers.size>=8){bounded=true;break;}
+        }
+        if(receivers.size>=8)break;
+      }
+      const candidates=[...receivers.values()].map(value=>({value,hypothetical:false}));
+      if(!candidates.length){
+        // Explicitly separate a source-initialized scenario from an observed
+        // submission. Public mutable fields may differ at runtime.
+        for(const signature of this.instances.constructorSignatures(owner.className)){
+          const args=signature.parameters.map((name,i)=>runtimeParameter(name,signature.parameterTypes[i],"Conditional constructor input: "+name));
+          countApex("caller.batch_constructor_probes");
+          const value=this.constructInstance(owner.filePath,owner.className,args,resolveExternal,signature.parameterTypes,true);
+          if(value?.kind==="instance")candidates.push({value,hypothetical:true});
+        }
+      }
+      return {count:receivers.size,bounded,candidates};
+    });
+    if(eligible){
+      if(this.batchReceiverInventories.size>=MAX_RECEIVER_SNAPSHOTS)this.batchReceiverInventories.clear();
+      this.batchReceiverInventories.set(key,structuredClone(inventory));
+    }
+    return inventory;
+  }
+
   /**
    * Partial receiver evidence for direct Database.executeBatch(new T(...)).
    * Direct framework invocation after a restricted scalar local prefix.
@@ -550,46 +614,17 @@ export class ApexRepositoryMethodIndex {
     const declaration=outerApexClass(owner.source);
     if(!declaration?.batch||declaration.parent||declaration.name.toLowerCase()!==owner.className.toLowerCase()||
        !/^database\.batchablecontext$/i.test(method.parameterTypes?.[0]??""))return empty;
-    const calls=this.batchAllocations.get(owner.className.toLowerCase())??[];
-    const receivers=new Map<string,Extract<ApexValue,{kind:"instance"}>>();
-    let bounded=calls.length>8;
-    for(const call of calls.slice(0,8)){
-      const engine=new ApexDataFlowEngine(call.caller.source,{sourceMethods:call.caller.methods,maxOperations:2000,
-        resolveExternal:(name,args,types)=>{
-          if(name==="Apex.construct"&&args[0]?.kind==="text"&&args[0].values.length===1)
-            return this.constructInstance(call.caller.filePath,args[0].values[0],args.slice(1),resolveExternal,types?.slice(1));
-          return resolveExternal?.(name,args,types)??this.evaluateReturn(call.caller.filePath,name,args,resolveExternal,types);
-        }});
-      for(const args of engine.evaluateArgumentsAt(call.method,call.offset,call.expressions)){
-        const instance=args[0];
-        if(instance?.kind==="instance"&&instance.className.toLowerCase()===owner.className.toLowerCase())
-          receivers.set(JSON.stringify(instance),instance);
-        if(receivers.size>=8){bounded=true;break;}
-      }
-      if(receivers.size>=8)break;
-    }
+    const inventory=this.batchReceiverInventory(owner,method,resolveExternal);
+    let bounded=inventory.bounded;
+    const {candidates}=inventory;
     const argumentsByValue=new Map<string,ApexValue[]>();
     const conditionalArguments=new Map<string,ApexValue[]>();
     const partialArguments=new Map<string,ApexValue[]>();
-    const candidates=[...receivers.values()].map(value=>({value,hypothetical:false}));
-    if(!candidates.length){
-      // Explicitly separate a source-initialized scenario from an observed
-      // submission. Public mutable fields may differ at runtime.
-      for(const signature of this.instances.constructorSignatures(owner.className)){
-        const args=signature.parameters.map((name,i)=>runtimeParameter(name,signature.parameterTypes[i],"Conditional constructor input: "+name));
-        const value=this.constructInstance(owner.filePath,owner.className,args,resolveExternal,signature.parameterTypes,true);
-        if(value?.kind==="instance")candidates.push({value,hypothetical:true});
-      }
-    }
     let samples=0,scenarioCount=0;
-    for(const {value:original,hypothetical} of candidates){
-      if(!supportsReceiverPrefix(method,offset,original))continue;
-      const domain=receiverMapSamples(method,original,Math.max(0,32-samples));
-      bounded=bounded||domain.bounded;
-      for(const instance of domain.receivers){
-        if(++samples>40){bounded=true;break;}
-        const conditional=hypothetical||instance!==original;
-        if(conditional)scenarioCount++;
+    const overflow:BatchReceiver[]=[];
+    const probe=(instance:BatchReceiver,conditional:boolean)=>{
+      samples++;
+      if(conditional)scenarioCount++;
       const engine=new ApexDataFlowEngine(owner.source,{sourceMethods:owner.methods,maxOperations:2000,
         resolveExternal:(name,args,types)=>{
           if(name==="Apex.scopeField"&&args[0]?.kind==="text"&&args[0].values[0]?.toLowerCase()===owner.className.toLowerCase()&&args[1]?.kind==="text"&&args[3]?.kind==="text"&&args[3].values[0]!=="true"){
@@ -609,10 +644,35 @@ export class ApexRepositoryMethodIndex {
         }
         (conditional?conditionalArguments:argumentsByValue).set(argumentIdentity(args),args);
       }
+    };
+    for(const {value:original,hypothetical} of candidates){
+      if(!supportsReceiverPrefix(method,offset,original))continue;
+      const limit=Math.max(0,BASE_RECEIVER_KEY_LIMIT-samples);
+      const domain=receiverMapSamples(method,original,limit);
+      bounded=bounded||domain.bounded;
+      for(const instance of domain.receivers){
+        if(samples>=BASE_RECEIVER_SAMPLE_LIMIT){bounded=true;break;}
+        probe(instance,hypothetical||instance!==original);
+      }
+      // Retain the original sampling order and baseline budget. Only consider
+      // extra map keys after all baseline candidates have been evaluated.
+      if(domain.bounded&&overflow.length<MAX_EXTRA_RECEIVER_SAMPLES){
+        const expanded=receiverMapSamples(method,original,limit+MAX_EXTRA_RECEIVER_SAMPLES-overflow.length);
+        overflow.push(...expanded.receivers.slice(domain.receivers.length));
       }
     }
+    // Exact argument-vector deduplication is generic; the SOQL adapter still
+    // validates grammar and enforces its own 32-variant cap. Never equate
+    // merely similar source objects or claim complete runtime coverage.
+    let extra=0;
+    for(const instance of overflow){
+      if(conditionalArguments.size+argumentsByValue.size>=BASE_RECEIVER_KEY_LIMIT||extra>=MAX_EXTRA_RECEIVER_SAMPLES)break;
+      probe(instance,true);
+      extra++;
+    }
+    if(extra)countApex("caller.batch_receiver_overflow_samples",extra);
     if(samples)countApex("caller.batch_receiver_samples",samples);
-    return {count:receivers.size,arguments:[...argumentsByValue.values()],conditionalArguments:[...conditionalArguments.values()],partialArguments:[...partialArguments.values()],scenarioCount,bounded};
+    return {count:inventory.count,arguments:[...argumentsByValue.values()],conditionalArguments:[...conditionalArguments.values()],partialArguments:[...partialArguments.values()],scenarioCount,bounded};
   }
 
   /** Evaluate selected invocation arguments in proven incoming contexts.
