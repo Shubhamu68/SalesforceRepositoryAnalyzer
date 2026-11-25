@@ -19,6 +19,7 @@ export interface UnresolvedDynamicSoql {
   /** Known variants coexist with this unresolved execution site. */
   knownVariants?: number;
   partialStructureVariants?:number;
+  conditionalFrameworkVariants?:number;
 }
 export interface DynamicSoqlScanResult {
   queries: SoqlQuery[];
@@ -48,7 +49,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
     const siteId=filePath+"@"+site.offset;
     const fail=(reason:string,partialValues:readonly ApexValue[]=[])=>{
       let explanation=reason;
-      let knownVariants=0;
+      let knownVariants=0,conditionalFrameworkVariants=0;
       const partialEvidence=[...partialValues];
       const variants=new Set<string>();
       const owner=repositoryIndex?.methodAt(filePath,site.offset);
@@ -63,7 +64,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
             ?" Method is externally callable; complete caller coverage cannot be established from repository metadata."
             :"");
         const scoped=inspectApexInvocationContexts(filePath,site.offset,[site.argument],resolveExternal,repositoryIndex);
-        if(scoped&&(scoped.contexts.known.length||scoped.contexts.partial.length||scoped.receiverContexts)){
+        if(scoped&&(scoped.contexts.known.length||scoped.contexts.partial.length||scoped.receiverContexts||scoped.receiverScenarios)){
           partialEvidence.push(...scoped.partialArguments.map(args=>args[0]).filter((v):v is ApexValue=>v!==undefined));
           // Do not publish a guessed security mode, even if SELECT is valid.
           if(mode!==null)for(const args of scoped.arguments){
@@ -86,9 +87,23 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
             }
           }
           knownVariants=variants.size;
+          if(mode!==null)for(const args of scoped.conditionalArguments){
+            if(args[0]?.kind!=="text")continue;
+            for(const value of args[0].values){
+              const text=value.trim();
+              if(!/^SELECT\b/i.test(text)||variants.has(text)||variants.size>=MAX_VARIANTS)continue;
+              const parsed=parseNestedSoql(text,site.line),fields=extractSoqlExpressionFields(text),declared=classifySoqlMode(text);
+              if(!parsed||!fields.parsed||fields.limitations.length||(mode&&declared!=="UNSPECIFIED"&&declared!==mode))continue;
+              variants.add(text);conditionalFrameworkVariants++;
+              queries.push({filePath,lineNumber:site.line,query:text,object:parsed.fromName,fields:parsed.fields,subqueries:parsed.subqueries,
+                withUserMode:declared==="USER_MODE"||mode==="USER_MODE",securityMode:declared,dynamicOrigin:true,querySiteId:siteId,
+                queryVariantId:siteId+"#framework-"+(conditionalFrameworkVariants-1),coverage:"CONDITIONAL_FRAMEWORK_CONTEXT",...(mode?{dynamicAccessLevel:mode}:{})});
+            }
+          }
           explanation+=" Known repository contexts: "+scoped.contexts.known.length+
             "; partially known contexts: "+scoped.contexts.partial.length+
             (scoped.receiverContexts?"; known framework receiver contexts: "+scoped.receiverContexts:"")+
+            (scoped.receiverScenarios?"; conditional framework receiver scenarios: "+scoped.receiverScenarios:"")+
             (scoped.contexts.freshEntryContexts?"; sampled direct fresh framework entry contexts: "+scoped.contexts.freshEntryContexts:"")+
             "; structurally valid query variants in probed contexts: "+knownVariants+
             (scoped.bounded?" (bounded sample).":"." )+
@@ -96,6 +111,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
             " complete execution coverage is not proven.";
         }
       }
+      if(conditionalFrameworkVariants)explanation+=" Conditional framework variants: "+conditionalFrameworkVariants+". Constructor-only or sampled map-key scenarios are conditional source evidence, not observed batch submissions. Other receiver states remain unverified.";
       let partialStructureVariants=0;
       // Grammar-specific proof is intentionally confined to this adapter.
       // The core Apex value remains unknown; no synthetic query is executed.
@@ -120,7 +136,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
       if(partialStructureVariants)explanation+=" Proven partial structural variants: "+partialStructureVariants+
         ". Typed numeric slots use synthetic parser placeholders, not actual runtime values; only those proven field and object references are submitted for access analysis. Complete execution coverage remains unverified.";
       unresolved.push({filePath,lineNumber:site.line,siteId,reason:explanation,...(knownVariants?{knownVariants}:{}),
-        ...(partialStructureVariants?{partialStructureVariants}:{})});
+        ...(partialStructureVariants?{partialStructureVariants}:{}),...(conditionalFrameworkVariants?{conditionalFrameworkVariants}:{})});
     };
     const failure=flow.failures.get(site.offset);
     if(failure){fail(failure);continue;}
