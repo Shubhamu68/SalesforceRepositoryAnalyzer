@@ -41,6 +41,7 @@ export function collectApexReferences(inputs:readonly ApexValue[],limit=128):Ape
 /** Simultaneous identity-based substitutions. An updated root already
  * carries its updated descendants; do not rewrite it a second time. */
 export function replaceApexReferences(values:ApexEnvironment,replacements:ReadonlyMap<ApexValue,ApexValue>):boolean{
+  if(!replacements.size)return false;
   let found=false;
   const memo=new Map<ApexValue,ApexValue>();
   const visit=(value:ApexValue,depth:number):ApexValue=>{
