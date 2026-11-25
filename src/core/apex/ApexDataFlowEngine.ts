@@ -9,6 +9,7 @@ import {
 } from "./ApexValueEvaluator.js";
 import {ApexLocalLiveness,sharedApexLocalLiveness,declaredLoopLocals} from "./ApexLocalLiveness.js";
 import {apexStateIdentity} from "./ApexStateIdentity.js";
+import {compactUnknownStates} from "./ApexUnknownStateCompaction.js";
 import {ApexExecutionBudget} from "./ApexExecutionBudget.js";
 import {writeInstanceMember} from "./ApexInstanceModel.js";
 import {invocationMayExecute} from "./ApexConditionalInvocation.js";
@@ -729,7 +730,12 @@ export class ApexDataFlowEngine {
       // Drop proven dead root-local and declared scalar parameter bindings,
       // not mutable aliases, fields or loop-carried values, before deduplication.
       if(live)for(const frame of next)live.discardDeadScalars(frame.values,node.end,node.start);
-      const distinct=mergeEquivalentStates(next);
+      let distinct=mergeEquivalentStates(next);
+      if(distinct.filter(frame=>!frame.stopped).length>this.options.maxPaths){
+        const before=distinct.length;
+        distinct=compactUnknownStates(distinct);
+        if(distinct.length<before)countApex("paths.unknown_provenance_compacted",before-distinct.length);
+      }
       if(!this.budget.checkPaths(distinct.filter(frame=>!frame.stopped).length,node.start,owner?.name??"(unknown method)")){
         states=[{values:new Map([...distinct[0].values.keys()].map((k):[string,ApexValue]=>[k,
           unknown("Query path enumeration budget exceeded.")]))}];
