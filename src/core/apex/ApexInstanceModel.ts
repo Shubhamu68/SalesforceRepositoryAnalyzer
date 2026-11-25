@@ -116,6 +116,11 @@ export class ApexInstanceIndex {
       // No arbitrary helper calls from constructors: effects and heap transfer
       // are not modeled here. Pure scalar expressions and metadata constants
       // can be evaluated using the existing expression interpreter.
+      const factory=/^\s*([A-Za-z_]\w*\.[A-Za-z_]\w*)\s*\(\s*\)\s*$/.exec(expr);
+      if(factory){
+        const result=resolve?.("Apex.constructorFactory",[{kind:"text",values:[factory[1]]}]);
+        if(result?.kind==="map")return result;
+      }
       const calls=[...maskApexSource(expr).matchAll(/\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(/g)];
       const allocation=/^new\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(/i.exec(expr.trim());
       if(calls.some(call=>!/^String\.(?:isBlank|isNotBlank|valueOf|escapeSingleQuotes)$/i.test(call[1])&&!(allocation&&call===calls[0]&&call[1].toLowerCase()===allocation[1].toLowerCase()))){unsupportedEffect=true;return unknown("Constructor expression has unproven effects.");}
