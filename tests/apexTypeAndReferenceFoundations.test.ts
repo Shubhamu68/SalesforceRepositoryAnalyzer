@@ -71,3 +71,18 @@ test("unknown or divergent instance effects never produce a complete stale query
   assert.equal(report.queries.length,0);
   assert.equal(report.unresolved.length,1);
 });
+
+test("private overload caller closure uses the matching declaration, not another overload",async()=>{
+  const source="public class C {public static void run(){execute('Name');execute(new List<String>{'Phone'});}private static void execute(String field){Database.query('SELECT '+field+' FROM Account');}private static void execute(List<String> fields){Database.query('SELECT '+String.join(fields,',')+' FROM Contact');}}";
+  const index=new ApexRepositoryMethodIndex([{filePath:"C.cls",source}]);
+  const report=await new ApexAnalysisEngine(index).analyze("C.cls",ctx=>extractDynamicSoqlQueries(source,"C.cls",ctx.resolveExternal,ctx.repositoryIndex));
+  assert.equal(report.unresolved.length,0,JSON.stringify(report.unresolved));
+  assert.deepEqual(report.queries.map(q=>q.query),["SELECT Name FROM Account","SELECT Phone FROM Contact"]);
+});
+test("outer class static calls never dispatch to a nested class method of the same name",async()=>{
+  const caller="public class C {public static void run(){Inspector.inspect(Helper.build('Name'));}}";
+  const helper="public class Helper {public class Nested {public static String build(String v){return 'Nested';}}public static String build(String v){return 'Outer';}}";
+  const index=new ApexRepositoryMethodIndex([{filePath:"C.cls",source:caller},{filePath:"Helper.cls",source:helper}]);
+  const report=await new ApexAnalysisEngine(index).analyzeInvocations(caller,"C.cls",selector);
+  assert.deepEqual(report.captures.get(report.sites[0].offset)?.[0]?.query,textValue("Outer"));
+});
