@@ -1,5 +1,7 @@
 import path from "node:path";
 import {countApex,timeApex} from "./ApexPerformance.js";
+import {apexSymbols} from "./ApexSymbolTable.js";
+import {selectApexOverload,type ApexArgumentTypes,type ApexCallResolver} from "./ApexTypeSystem.js";
 import { ApexDataFlowEngine } from "./ApexDataFlowEngine.js";
 import {memberEffectModel} from "./ApexMemberEffectModel.js";
 import { ApexRepositorySyntaxInventory, maskApexSource, matchingPair, splitApexTopLevel,
@@ -29,6 +31,7 @@ interface Caller {
   method: IndexedApexMethod;
   offset: number;
   expressions: string[];
+  targetStart?:number;
 }
 export interface ApexCallerContexts {
   readonly known:ApexValue[][];
@@ -191,9 +194,10 @@ export class ApexRepositoryMethodIndex {
         const args=expressions?splitApexTopLevel(expressions,","):[];
         const key=this.methodKey(candidate[0].className,name,args.length);
         const targets=this.findMethods(candidate[0].className,name,args.length);
-        if(targets.length!==1)continue;
+        if(!targets.length)continue;
+        const chosen=selectApexOverload(targets.map(t=>t.method),args.length,targets.length>1?apexSymbols(owner.source,owner.methods).argumentTypes(sourceMethods[0],args,match.index):undefined);
         const callers=this.callers.get(key)??[];
-        callers.push({caller:owner,method:sourceMethods[0],offset:match.index,expressions:args});
+        callers.push({caller:owner,method:sourceMethods[0],offset:match.index,expressions:args,targetStart:chosen?.start});
         this.callers.set(key,callers);
       }
     }
@@ -205,12 +209,12 @@ export class ApexRepositoryMethodIndex {
     return owner?.source===source?owner.methods:undefined;
   }
 
-  constructInstance(filePath:string,name:string,args:ApexValue[],resolveExternal?: (name:string,args:ApexValue[])=>ApexValue|undefined):ApexValue|undefined{
-    return this.instances.construct(name,args,filePath,resolveExternal);
+  constructInstance(filePath:string,name:string,args:ApexValue[],resolveExternal?: ApexCallResolver,types?:ApexArgumentTypes):ApexValue|undefined{
+    return this.instances.construct(name,args,filePath,resolveExternal,types);
   }
 
   /** Source-backed scalar initializers; unresolved/mutable values fail closed. */
-  evaluateConstant(name:string,metadata?: (name:string,args:ApexValue[])=>ApexValue|undefined):ApexValue|undefined {
+  evaluateConstant(name:string,metadata?: ApexCallResolver):ApexValue|undefined {
     const cls=name.split(".")[0];
     if(!this.staticValues.hasClass(cls) && /^[a-z]/.test(cls))return undefined;
     return this.staticValues.resolve(name,metadata);
@@ -223,7 +227,7 @@ export class ApexRepositoryMethodIndex {
 
   /** Resolve an unqualified static/instance member using its actual owner. */
   evaluateScopeField(owner:string,field:string,mode:"this"|"unqualified",
-    inStaticMethod:boolean,metadata?: (name:string,args:ApexValue[])=>ApexValue|undefined):ApexValue|undefined {
+    inStaticMethod:boolean,metadata?: ApexCallResolver):ApexValue|undefined {
     if(!this.staticValues.hasClass(owner))return undefined;
     if(mode==="this"){
       return inStaticMethod?unknown("Cannot read this."+field+" inside a static method."):
@@ -240,7 +244,7 @@ export class ApexRepositoryMethodIndex {
     return this.methodsByKey.get(this.methodKey(cls,name,arity))??[];
   }
 
-  private scopeId(resolveExternal?: (name:string,args:ApexValue[])=>ApexValue|undefined):number {
+  private scopeId(resolveExternal?: ApexCallResolver):number {
     if(!resolveExternal)return 0;
     const previous=this.scopes.get(resolveExternal);
     if(previous)return previous;
@@ -254,15 +258,17 @@ export class ApexRepositoryMethodIndex {
    * declared body, parameters and all feasible return values are proven.
    */
   evaluateReturn(fromFilePath:string,name:string,args:ApexValue[],
-    resolveExternal?: (name:string,args:ApexValue[])=>ApexValue|undefined):ApexValue|undefined {
+    resolveExternal?: ApexCallResolver,types?:ApexArgumentTypes):ApexValue|undefined {
     const match=/^([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/.exec(name.trim());
     if(!match)return undefined;
     const [,cls,methodName]=match;
     const owners=this.classes.get(cls.toLowerCase());
     if(!owners)return undefined;
     const matches=this.findMethods(cls,methodName,args.length);
-    if(matches.length!==1)return unknown("Ambiguous or missing indexed Apex method: "+name);
-    const {owner,method}=matches[0];
+    const chosen=selectApexOverload(matches.map(m=>m.method),args.length,types);
+    const selected=matches.find(m=>m.method===chosen);
+    if(!selected||owners.length!==1)return unknown("Ambiguous or missing indexed Apex method: "+name);
+    const {owner,method}=selected;
     const crossClass=path.resolve(fromFilePath)!==path.resolve(owner.filePath);
     if(crossClass && (method.visibility==="private" || method.visibility==="unspecified"))
       return unknown("Cross-class Apex method is not provably accessible: "+name);
@@ -280,8 +286,8 @@ export class ApexRepositoryMethodIndex {
     let result:ApexValue;
     try {
       const engine=new ApexDataFlowEngine(owner.source,{sourceMethods:owner.methods,
-        resolveExternal:(nestedName,nestedArgs)=>resolveExternal?.(nestedName,nestedArgs) ??
-          this.evaluateReturn(owner.filePath,nestedName,nestedArgs,resolveExternal),
+        resolveExternal:(nestedName,nestedArgs,nestedTypes)=>resolveExternal?.(nestedName,nestedArgs,nestedTypes) ??
+          this.evaluateReturn(owner.filePath,nestedName,nestedArgs,resolveExternal,nestedTypes),
       });
       result=timeApex("helper.repository_evaluation_ms",()=>engine.summarizeMethodReturn(method,args));
       if(result.kind==="instance"||result.kind==="instanceList")result=unknown("Instance-return alias transfer is not yet proven.");
@@ -302,7 +308,7 @@ export class ApexRepositoryMethodIndex {
    * invalidate the entire closure. Never union unknown and known paths.
    */
   resolvePrivateContexts(filePath:string,target:IndexedApexMethod,
-    resolveExternal?: (name:string,args:ApexValue[])=>ApexValue|undefined
+    resolveExternal?: ApexCallResolver
   ):ApexValue[][]|undefined {
     if(target.visibility!=="private")return undefined;
     const owner=this.paths.get(path.resolve(filePath));
@@ -351,7 +357,10 @@ export class ApexRepositoryMethodIndex {
         const overloads=owner.methods.filter(method=>
           method.name.toLowerCase()===target.name.toLowerCase()&&
           method.parameters.length===expressions.length);
-        if(overloads.length!==1||containing===target){failed=true;break;}
+        const selected=selectApexOverload(overloads,expressions.length,apexSymbols(owner.source,owner.methods).argumentTypes(containing,expressions,match.index));
+        if(!selected){failed=true;break;}
+        if(selected!==target)continue;
+        if(containing===target){failed=true;break;}
         callCount++;
         const callerContexts=containing.visibility==="private"
           ?this.resolvePrivateContexts(owner.filePath,containing,resolveExternal)
@@ -363,8 +372,8 @@ export class ApexRepositoryMethodIndex {
         const seeds=callerContexts?.length?callerContexts:[undefined];
         for(const seed of seeds){
           const engine=new ApexDataFlowEngine(owner.source,{sourceMethods:owner.methods,
-            resolveExternal:(name,args)=>resolveExternal?.(name,args) ??
-              this.evaluateReturn(owner.filePath,name,args,resolveExternal),
+            resolveExternal:(name,args,types)=>resolveExternal?.(name,args,types) ??
+              this.evaluateReturn(owner.filePath,name,args,resolveExternal,types),
           });
           const values=engine.evaluateArgumentsAt(containing,match.index,expressions,seed);
           if(!values.length || values.some(args=>
@@ -405,14 +414,14 @@ export class ApexRepositoryMethodIndex {
   /** Reuse complete scalar argument probes only in the same resolver scope.
    * No mutable reference results, failed probes or cross-pass metadata reuse. */
   private probeArguments(owner:IndexedSource,method:IndexedApexMethod,offset:number,expressions:readonly string[],seed:ApexValue[]|undefined,
-    resolveExternal?: (name:string,args:ApexValue[])=>ApexValue|undefined,freshEntry=false):ApexValue[][]{
+    resolveExternal?: ApexCallResolver,freshEntry=false):ApexValue[][]{
     const scalar=(v:ApexValue)=>v.kind==="text"||v.kind==="number"||v.kind==="null";
     const eligible=!this.active.size&&(!seed||seed.every(v=>scalar(v)||v.kind==="unknown"));
     const key=eligible?JSON.stringify([owner.filePath,method.start,offset,expressions,seed?argumentIdentity(seed):null,this.scopeId(resolveExternal),freshEntry]):undefined;
     const cached=key?this.argumentProbes.get(key):undefined;
     if(cached){countApex("caller.probe_cache_hit");return cached.map(args=>[...args]);}
     const engine=new ApexDataFlowEngine(owner.source,{sourceMethods:owner.methods,maxOperations:2000,
-      resolveExternal:(name,args)=>resolveExternal?.(name,args)??this.evaluateReturn(owner.filePath,name,args,resolveExternal)});
+      resolveExternal:(name,args,types)=>resolveExternal?.(name,args,types)??this.evaluateReturn(owner.filePath,name,args,resolveExternal,types)});
     const values=engine.evaluateArgumentsAt(method,offset,expressions,seed,freshEntry);
     if(key&&values.length&&values.every(args=>args.every(scalar))){
       if(this.argumentProbes.size>=MAX_CACHED_SUMMARIES)this.argumentProbes.delete(this.argumentProbes.keys().next().value!);
@@ -428,7 +437,7 @@ export class ApexRepositoryMethodIndex {
    * happens to pass literal values. Do not narrow open dispatch to known calls.
    */
   resolveCallerContexts(filePath:string,target:IndexedApexMethod,
-    resolveExternal?: (name:string,args:ApexValue[])=>ApexValue|undefined,
+    resolveExternal?: ApexCallResolver,
     stack:ReadonlySet<string>=new Set(),work={remaining:64}):ApexCallerContexts {
     const owner=this.paths.get(path.resolve(filePath));
     const empty:ApexCallerContexts={known:[],partial:[],unknownCalls:0,candidateCalls:0,
@@ -440,9 +449,8 @@ export class ApexRepositoryMethodIndex {
     countApex("caller.context_evaluations");
     if(stack.has(key)||stack.size>=MAX_METHOD_DEPTH||work.remaining<=0)return {...empty,bounded:true};
     const nextStack=new Set(stack);nextStack.add(key);
-    const candidates=this.callers.get(this.methodKey(owner.className,target.name,target.parameters.length))??[];
-    if(candidates.length>MAX_CALL_CONTEXTS||
-      this.findMethods(owner.className,target.name,target.parameters.length).length!==1)
+    const candidates=(this.callers.get(this.methodKey(owner.className,target.name,target.parameters.length))??[]).filter(c=>c.targetStart===undefined||c.targetStart===target.start);
+    if(candidates.length>MAX_CALL_CONTEXTS)
       return {...empty,candidateCalls:candidates.length,unknownCalls:candidates.length,bounded:true};
     const known=new Map<string,ApexValue[]>();
     const partial=new Map<string,ApexValue[]>();
@@ -450,7 +458,7 @@ export class ApexRepositoryMethodIndex {
     for(const call of candidates){
       // A variable shadowing a class name or an instance-qualified call
       // cannot establish static dispatch. Only explicit static targets qualify.
-      if(!target.isStatic){unknownCalls++;continue;}
+      if(!target.isStatic||call.targetStart!==target.start){unknownCalls++;continue;}
       const closed=call.method.visibility==="private"
         ?this.resolvePrivateContexts(call.caller.filePath,call.method,resolveExternal):undefined;
       const upstream=closed?.length?undefined:
@@ -514,7 +522,7 @@ export class ApexRepositoryMethodIndex {
    * No intervening member writes, arbitrary calls, or heap transfer.
    */
   private probeBatchReceivers(owner:IndexedSource,method:IndexedApexMethod,offset:number,expressions:readonly string[],
-    resolveExternal?: (name:string,args:ApexValue[])=>ApexValue|undefined):
+    resolveExternal?: ApexCallResolver):
     {count:number;arguments:ApexValue[][];bounded:boolean}{
     const empty={count:0,arguments:[] as ApexValue[][],bounded:false};
     if(method.isStatic||method.name.toLowerCase()!=="start"||method.parameters.length!==1)return empty;
@@ -555,10 +563,10 @@ export class ApexRepositoryMethodIndex {
     let bounded=calls.length>8;
     for(const call of calls.slice(0,8)){
       const engine=new ApexDataFlowEngine(call.caller.source,{sourceMethods:call.caller.methods,maxOperations:2000,
-        resolveExternal:(name,args)=>{
+        resolveExternal:(name,args,types)=>{
           if(name==="Apex.construct"&&args[0]?.kind==="text"&&args[0].values.length===1)
-            return this.constructInstance(call.caller.filePath,args[0].values[0],args.slice(1),resolveExternal);
-          return resolveExternal?.(name,args)??this.evaluateReturn(call.caller.filePath,name,args,resolveExternal);
+            return this.constructInstance(call.caller.filePath,args[0].values[0],args.slice(1),resolveExternal,types?.slice(1));
+          return resolveExternal?.(name,args,types)??this.evaluateReturn(call.caller.filePath,name,args,resolveExternal,types);
         }});
       for(const args of engine.evaluateArgumentsAt(call.method,call.offset,call.expressions)){
         const instance=args[0];
@@ -572,13 +580,13 @@ export class ApexRepositoryMethodIndex {
     for(const instance of receivers.values()){
       if([...requiredFields].some(field=>!instance.entries.some(([key])=>key.toLowerCase()===field)))continue;
       const engine=new ApexDataFlowEngine(owner.source,{sourceMethods:owner.methods,maxOperations:2000,
-        resolveExternal:(name,args)=>{
+        resolveExternal:(name,args,types)=>{
           if(name==="Apex.scopeField"&&args[0]?.kind==="text"&&args[0].values[0]?.toLowerCase()===owner.className.toLowerCase()&&args[1]?.kind==="text"){
             const fieldName=args[1].values[0]?.toLowerCase();
             const field=instance.entries.find(([key])=>key.toLowerCase()===fieldName);
             if(field)return field[1];
           }
-          return resolveExternal?.(name,args)??this.evaluateReturn(owner.filePath,name,args,resolveExternal);
+          return resolveExternal?.(name,args,types)??this.evaluateReturn(owner.filePath,name,args,resolveExternal,types);
         }});
       for(const args of engine.evaluateArgumentsAt(method,offset,expressions)){
         if(args.some(v=>v.kind==="unknown"))continue;
@@ -591,7 +599,7 @@ export class ApexRepositoryMethodIndex {
   /** Evaluate selected invocation arguments in proven incoming contexts.
    * Evidence is kept separate from the all-path verdict and from permissions. */
   probeInvocationContexts(filePath:string,offset:number,expressions:readonly string[],
-    resolveExternal?: (name:string,args:ApexValue[])=>ApexValue|undefined):{
+    resolveExternal?: ApexCallResolver):{
       contexts:ApexCallerContexts;arguments:ApexValue[][];partialArguments:ApexValue[][];bounded:boolean;receiverContexts?:number
     }|undefined {
     const owner=this.paths.get(path.resolve(filePath));
@@ -653,7 +661,7 @@ export class ApexRepositoryMethodIndex {
       let allKnown=true;
       for(const seed of seeds){
         const engine=new ApexDataFlowEngine(call.caller.source,{sourceMethods:call.caller.methods,
-          resolveExternal:(name,args)=>this.evaluateReturn(call.caller.filePath,name,args),
+          resolveExternal:(name,args,types)=>this.evaluateReturn(call.caller.filePath,name,args,undefined,types),
         });
         const contexts=engine.evaluateArgumentsAt(call.method,call.offset,call.expressions,seed);
         if(!contexts.length||contexts.some(args=>
