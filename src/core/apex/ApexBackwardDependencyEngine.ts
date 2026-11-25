@@ -488,7 +488,7 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
                 new RegExp("\\b"+n.loopVariable+"\\s*(?:=(?!=|>)|[+\\-*/%&|^]=|\\+\\+|--)","i").test(body)||
                 (identifier.test(clean(n.iterable))&&rx(clean(n.iterable)).test(body)))return blocked("LOOP_EFFECT_UNSUPPORTED");
               note(frame,n.start,"LOOP_ITERABLE_RESOLVED",name,items.length);
-              if(!exact(iterable))exactCurrent=false;
+              if(!exact(iterable)||iterable.value.kind==="collection"&&iterable.value.unique&&items.length>1)exactCurrent=false;
               iterating.add(n);
               try{
                 for(const item of items){

@@ -163,3 +163,19 @@ test("runtime-selected metadata helper stays unresolved without broadening the l
   assert.ok(events.includes("SHARED_HELPER_ARGUMENT_UNPROVEN"));
   assert.equal(reads,0);
 });
+
+
+test("AUE helper effects supply the final SELECT fields to backward permission analysis",()=>{
+  const source="public class Builder {public static void run(){Set<String> cols=new Set<String>{'Id','Industry'};List<String> paths=new List<String>{'Name','Phone'};for(String path:paths){String result=addColumn(cols,path);}removeUnused(cols);Database.query('SELECT '+String.join(cols,',')+' FROM Account WITH USER_MODE');}private static String addColumn(Set<String> cols,String path){cols.add(path);return path;}private static void removeUnused(Set<String> cols){cols.remove('Industry');}}";
+  const result=evidence([{filePath:"Builder.cls",source}]);
+  assert.deepEqual(fields(result.queries),new Set(["SELECT:Id","SELECT:Name","SELECT:Phone"]),JSON.stringify(result));
+  assert.ok(result.queries.every(q=>q.includes("WITH USER_MODE")));
+  const scan=extractDynamicSoqlQueries(source,"Builder.cls");
+  assert.deepEqual(fields(scan.queries.map(q=>q.query)),new Set(["SELECT:Id","SELECT:Name","SELECT:Phone"]));
+  const unsafe=source.replace("removeUnused(cols);","Other.mutate(cols);removeUnused(cols);");
+  assert.deepEqual(evidence([{filePath:"Builder.cls",source:unsafe}]).queries,[]);
+});
+test("destructive helper effect is not replayed over unspecified Set iteration order",()=>{
+  const source="public class Builder {public static void run(){Set<String> cols=new Set<String>{'Id'};Set<String> paths=new Set<String>{'Name','Phone'};for(String path:paths){replaceColumn(cols,path);}Database.query('SELECT '+String.join(cols,',')+' FROM Account');}private static void replaceColumn(Set<String> cols,String path){cols.clear();cols.add(path);}}";
+  assert.deepEqual(evidence([{filePath:"Builder.cls",source}]).queries,[]);
+});

@@ -3,7 +3,7 @@ import {applyApexStringCollectionMutation,apexIterationValues} from "./ApexColle
 import {collectApexReferences,isApexReference,referenceMember,replaceApexReferences} from "./ApexReferenceState.js";
 import {proveInstanceArgumentEffects} from "./ApexInstanceEffects.js";
 import {apexSymbols,type ApexSymbolTable} from "./ApexSymbolTable.js";
-import {selectApexOverload,type ApexCallResolver} from "./ApexTypeSystem.js";
+import {canonicalApexType,selectApexOverload,type ApexCallResolver} from "./ApexTypeSystem.js";
 import {countApex,timeApex} from "./ApexPerformance.js";
 import {memberEffectModel,directEffectCall,isLiteralFieldSetRead,type ApexMemberEffectModel} from "./ApexMemberEffectModel.js";
 import {
@@ -291,8 +291,11 @@ export class ApexDataFlowEngine {
     if(!this.methods.includes(method)||method.parameters.length!==args.length||this.effects.fields.size||
       args.some(v=>v.kind!=="collection"&&v.kind!=="number"&&v.kind!=="null"&&
         !(v.kind==="text"&&v.values.length===1)))return undefined;
+    // A modeled String Set and List cannot be interchanged for a source
+    // signature. Avoid order-sensitive Set observations in exact summaries.
+    if(args.some((v,i)=>v.kind==="collection"&&canonicalApexType(method.parameterTypes?.[i])!==(v.unique?"set<string>":"list<string>")))return undefined;
     const plan=this.referenceReplay(method,args);
-    if(!plan||!plan.refs.length||!this.effects.replaySafe(method))return undefined;
+    if(!plan||!plan.refs.length||!this.effects.argumentSummarySafe(method))return undefined;
     this.budget.reset();this.activeSlice=undefined;this.activeQueryOffset=undefined;
     this.activeStopOffset=undefined;this.argumentProbe=undefined;
     this.activeCalls.clear();this.summaries.clear();this.provenEffectCall=undefined;

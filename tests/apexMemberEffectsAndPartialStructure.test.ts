@@ -141,3 +141,12 @@ test("shared AUE effect summary rejects unsupported calls and divergent referenc
     if(body.startsWith("Other"))assert.equal(engine.summarizeArgumentEffects(methods[0],[listValue(["Id"]),{kind:"text",values:["true"],scalarType:"boolean"}]),undefined);
   }
 });
+
+
+test("exact AUE effect summaries reject List/Set signature mismatches and order-dependent Set effects",()=>{
+  const source="public class Builder {private static void change(Set<String> cols){for(String path:cols){cols.clear();cols.add(path);}}}";
+  const methods=indexApexMethods(source);
+  const engine=new ApexDataFlowEngine(source,{sourceMethods:methods});
+  assert.equal(engine.summarizeArgumentEffects(methods[0],[listValue(["Name","Phone"],true)]),undefined);
+  assert.equal(engine.summarizeArgumentEffects(methods[0],[listValue(["Name","Phone"])]),undefined);
+});

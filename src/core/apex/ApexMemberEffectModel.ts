@@ -247,6 +247,31 @@ export class ApexMemberEffectModel{
     const result=visit(method.body);
     this.safe.set(method,result);return result;
   }
+  /** Exact reference summaries must not depend on an unspecified Set
+   * iteration order. Reuse the existing typed receiver and replay proofs;
+   * conservatively reject potentially ordered observations of a Set,
+   * including conversions to List. Ordinary forward replay is unchanged. */
+  argumentSummarySafe(method:IndexedApexMethod):boolean{
+    if(!this.replaySafe(method))return false;
+    const checked=new Set<IndexedApexMethod>();
+    const visit=(helper:IndexedApexMethod):boolean=>{
+      if(checked.has(helper))return true;
+      checked.add(helper);
+      const body=this.masked.slice(helper.start,helper.end);
+      const hasSet=[...this.types(helper).values()].some(t=>canonicalApexType(t)?.startsWith("set<"))||
+        /\bnew\s+Set\s*</i.test(body);
+      if(hasSet&&/\bfor\s*\(|\bString\s*\.\s*join\s*\(|\bnew\s+List\s*<|\.\s*get\s*\(|\[[^\]]*\]/i.test(body))return false;
+      // replaySafe admits only uniquely resolved nested private static calls;
+      // inspect those same source targets for Set ordering as well.
+      for(const hit of body.matchAll(/\b([A-Za-z_]\w*)\s*\(/g)){
+        if(/\.\s*$/.test(body.slice(0,hit.index)))continue;
+        const candidates=this.methods.filter(m=>m.name.toLowerCase()===hit[1].toLowerCase());
+        if(candidates.length===1&&this.replaySafe(candidates[0])&&!visit(candidates[0]))return false;
+      }
+      return true;
+    };
+    return visit(method);
+  }
   /** An ignored scalar or inert DTO result cannot expose a mutable input
    * collection through a returned alias. Do not assume arbitrary DTOs are inert. */
   resultCannotExposeReference(method:IndexedApexMethod):boolean{
@@ -267,8 +292,11 @@ export function memberEffectModel(source:string,methods:readonly IndexedApexMeth
 /** A single top-level call whose arguments contain no invocations. Effects
  * cannot be replayed inside an arbitrary expression or speculative branch. */
 export function directEffectInvocation(source:string):{name:string;argumentText:string}|undefined{
-  const expr=source.trim();
-  const visible=maskApexSource(expr);
+  const masked=maskApexSource(source);
+  const start=masked.length-masked.trimStart().length;
+  const end=masked.trimEnd().length;
+  const expr=source.slice(start,end);
+  const visible=masked.slice(start,end);
   const call=/^([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(/.exec(visible);
   if(!call)return undefined;
   const open=visible.indexOf("(");
