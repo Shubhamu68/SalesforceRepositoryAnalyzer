@@ -947,7 +947,7 @@ export class ApexDataFlowEngine {
     Array<{offset:number;method:IndexedApexMethod;expressions:string[]}>{
     const masked=maskApexSource(this.source);
     const safeName=owner.name; // Apex identifiers cannot contain regex punctuation.
-    const pattern=new RegExp("\\b"+safeName+"\\s*\\(","g");
+    const pattern=new RegExp("\\b"+safeName+"\\s*\\(","gi");
     const callers:Array<{offset:number;method:IndexedApexMethod;expressions:string[]}>=[];
     let match:RegExpExecArray|null;
     while((match=pattern.exec(masked))!==null){
@@ -957,7 +957,7 @@ export class ApexDataFlowEngine {
       const dot=/\.\s*$/.test(prior);
       if(dot){
         const receiver=/\b([A-Za-z_]\w*)\.\s*$/.exec(prior)?.[1];
-        if(receiver!=="this"&&receiver!==this.className)continue;
+        if(receiver?.toLowerCase()!=="this"&&receiver?.toLowerCase()!==this.className?.toLowerCase())continue;
       }
       const open=masked.indexOf("(",match.index),close=matchingPair(masked,open);
       if(close<0)continue;

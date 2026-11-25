@@ -16,6 +16,7 @@ import { ApexStaticValueIndex } from "./ApexStaticValueIndex.js";
 import {discoverApexInvocations} from "./ApexInvocationModel.js";
 import {apexStateIdentity} from "./ApexStateIdentity.js";
 import {invocationRelevantIdentifiers} from "./ApexDependencySlice.js";
+import {hasIncomingArgumentEvidence,isDirectPrivateInstanceCall} from "./ApexCallerArgumentEvidence.js";
 
 /** Shared repository evidence, independent of SOQL and persona permissions. */
 export interface ApexRepositorySource {
@@ -36,6 +37,8 @@ interface Caller {
   offset: number;
   expressions: string[];
   targetStart?:number;
+  /** Proven argument-only same-receiver edge, never a receiver snapshot. */
+  privateInstanceEdge?:boolean;
 }
 export interface ApexCallerContexts {
   readonly known:ApexValue[][];
@@ -75,7 +78,10 @@ export function selectApexCallerSeeds(seeds:readonly ApexValue[][],parameters:re
     // Unknown provenance text is not a useful diversity signal. This only
     // groups candidates for selection; original values remain untouched.
     const group=argumentIdentity(projection.map(value=>value.kind==="unknown"
-      ?unknown("Unproven projected argument."):value));
+      ?value.fragments?.some(f=>f.kind==="literal"&&f.text.length>0)
+        ?{...value,reason:"Partially proven projected argument."}
+        :unknown("Unproven projected argument.")
+      :value));
     return {seed,order,group,known:projection.filter(v=>v.kind!=="unknown").length};
   }).sort((a,b)=>b.known-a.known||a.order-b.order);
   const groups=new Map<string,typeof ranked>();
@@ -224,7 +230,10 @@ export class ApexRepositoryMethodIndex {
         if(!targets.length)continue;
         const chosen=selectApexOverload(targets.map(t=>t.method),args.length,targets.length>1?apexSymbols(owner.source,owner.methods).argumentTypes(sourceMethods[0],args,match.index):undefined);
         const callers=this.callers.get(key)??[];
-        callers.push({caller:owner,method:sourceMethods[0],offset:match.index,expressions:args,targetStart:chosen?.start});
+        const privateInstanceEdge=!!chosen&&!chosen.isStatic&&chosen.visibility==="private"&&candidate[0]===owner&&
+          apexSymbols(owner.source,owner.methods).sameOwner(sourceMethods[0],chosen)&&
+          isDirectPrivateInstanceCall(owner.source,sourceMethods[0],match.index,receiver,args);
+        callers.push({caller:owner,method:sourceMethods[0],offset:match.index,expressions:args,targetStart:chosen?.start,privateInstanceEdge});
         this.callers.set(key,callers);
       }
     }
@@ -380,7 +389,7 @@ export class ApexRepositoryMethodIndex {
     let proven:ApexValue[][]|undefined;
     try {
       const masked=maskApexSource(owner.source);
-      const pattern=new RegExp("\\b"+target.name+"\\s*\\(","g");
+      const pattern=new RegExp("\\b"+target.name+"\\s*\\(","gi");
       const contexts:ApexValue[][]=[];
       let callCount=0;
       let failed=false;
@@ -402,7 +411,7 @@ export class ApexRepositoryMethodIndex {
         const prior=masked.slice(Math.max(0,match.index-80),match.index);
         if(/\.\s*$/.test(prior)){
           const receiver=/\b([A-Za-z_]\w*)\.\s*$/.exec(prior)?.[1];
-          if(receiver!=="this"&&receiver?.toLowerCase()!==owner.className.toLowerCase()){
+          if(receiver?.toLowerCase()!=="this"&&receiver?.toLowerCase()!==owner.className.toLowerCase()){
             failed=true;break;
           }
         }
@@ -514,9 +523,11 @@ export class ApexRepositoryMethodIndex {
     const partial=new Map<string,ApexValue[]>();
     let unknownCalls=0,bounded=false,inheritedBounded=false,freshEntryContexts=0;
     for(const call of candidates){
-      // A variable shadowing a class name or an instance-qualified call
-      // cannot establish static dispatch. Only explicit static targets qualify.
-      if(!target.isStatic||call.targetStart!==target.start){unknownCalls++;continue;}
+      // Admit exact static dispatch as before, plus a strictly proven direct
+      // private same-receiver edge. This transfers arguments only; no object
+      // state, virtual dispatch or exhaustive caller claim is inferred.
+      if(call.targetStart!==target.start||(!target.isStatic&&!call.privateInstanceEdge)){unknownCalls++;continue;}
+      if(call.privateInstanceEdge)countApex("caller.private_instance_argument_edges");
       const closed=call.method.visibility==="private"
         ?this.resolvePrivateContexts(call.caller.filePath,call.method,resolveExternal):undefined;
       const upstream=closed?.length?undefined:
@@ -540,7 +551,7 @@ export class ApexRepositoryMethodIndex {
           memberEffectModel(call.caller.source,call.caller.methods).freshEntry(call.method)){
           work.remaining--;
           const fresh=this.probeArguments(call.caller,call.method,call.offset,call.expressions,undefined,resolveExternal,true);
-          const samples=fresh.filter(args=>args.some(v=>v.kind!=="unknown"));
+          const samples=fresh.filter(hasIncomingArgumentEvidence);
           freshEntryContexts+=samples.length;
           contexts.push(...samples);
         }
@@ -552,7 +563,8 @@ export class ApexRepositoryMethodIndex {
             // Keep a runtime bind unknown rather than discarding the other
             // proven inputs. Only the selected invocation arguments need to
             // become complete later; no unknown placeholder becomes a grant.
-            if(args.every(v=>v.kind==="unknown"))continue;
+            if(!hasIncomingArgumentEvidence(args))continue;
+            if(args.every(v=>v.kind==="unknown"))countApex("caller.fragment_only_contexts");
             partial.set(argumentIdentity(args),args);
           }else known.set(argumentIdentity(args),args);
           if(known.size+partial.size>=MAX_CALL_CONTEXTS){bounded=true;break;}
@@ -877,7 +889,12 @@ export class ApexRepositoryMethodIndex {
     const maxSeeds=8;
     const seeds=[...new Map([...contexts.known,...contexts.partial].map(seed=>[argumentIdentity(seed),seed])).values()];
     const relevant=invocationRelevantIdentifiers(method.body,offset,expressions.join(" "));
-    const selected=selectApexCallerSeeds(seeds,method.parameters,relevant,maxSeeds);
+    // Preserve the previous sampling priority: fragment-only vectors use
+    // remaining capacity, never displace already-supported caller seeds.
+    const established=seeds.filter(seed=>seed.some(v=>v.kind!=="unknown"));
+    const fragmentOnly=seeds.filter(seed=>seed.every(v=>v.kind==="unknown"));
+    const selected=selectApexCallerSeeds(established,method.parameters,relevant,maxSeeds);
+    selected.push(...selectApexCallerSeeds(fragmentOnly,method.parameters,relevant,maxSeeds-selected.length));
     countApex("caller.candidate_seeds",seeds.length);
     countApex("caller.selected_seeds",selected.length);
     let bounded=contexts.bounded||seeds.length>selected.length;
