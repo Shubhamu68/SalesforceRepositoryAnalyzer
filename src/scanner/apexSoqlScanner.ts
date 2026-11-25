@@ -113,8 +113,10 @@ function preserveDynamicFailureDiagnostics(
     const original=localReasons.get(finding.siteId);
     if(!original || /Invocation is outside a supported method or execution path/i.test(original))
       return finding;
-    return {...finding,reason:"Repository caller execution path not established; "+
-      "source-local dependency: "+original};
+    // Keep the repository-aware dependency explanation when the existing
+    // diagnostic-only fallback supplies a more useful forward reason.
+    return {...finding,reason:(finding.backwardExplanation?finding.backwardExplanation+" ":"")+
+      "Repository caller execution path not established; source-local dependency: "+original};
   })};
 }
 

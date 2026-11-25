@@ -6,6 +6,9 @@ import os from "node:os";
 import ExcelJS from "exceljs";
 import { writeSoqlReport } from "../src/reporter/soqlReportWriter.js";
 import type { SoqlSecurityFinding } from "../src/models/SoqlSecurityFinding.js";
+import {SoqlAnalysisService} from "../src/services/SoqlAnalysisService.js";
+import type {SoqlSecurityAnalyzer} from "../src/analyzer/soqlSecurityAnalyzer.js";
+import type {Persona} from "../src/models/Persona.js";
 
 const example: SoqlSecurityFinding = {
   severity: "ERROR",
@@ -73,4 +76,43 @@ test("existing legacy TXT reports remain untouched; no new TXT report is created
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+
+test("runtime configuration dependency is propagated to the actual Excel Explanation cell without trace logging",async()=>{
+  const root=await mkdtemp(path.join(os.tmpdir(),"sf-excel-backward-reason-"));
+  try{
+    const source=[
+      "public class Report {",
+      " public static void run(String reportName){",
+      "  Report_Config__mdt cfg=getConfig(reportName);",
+      "  String obj=cfg.Object_API_Name__c;",
+      "  List<String> paths=Utils.getFieldListFromFieldSet(obj,cfg.Field_Set_Name__c);",
+      "  String q='SELECT '+String.join(paths,',')+' FROM '+obj;",
+      "  Database.query(q);",
+      " }",
+      " private static Report_Config__mdt getConfig(String key){",
+      "  if(String.isBlank(key)){return null;}",
+      "  List<Report_Config__mdt> cfgs=[SELECT DeveloperName,Object_API_Name__c,Field_Set_Name__c FROM Report_Config__mdt WHERE DeveloperName=:key AND Active__c=true LIMIT 1];",
+      "  return cfgs.isEmpty()?null:cfgs[0];",
+      " }",
+      "}"
+    ].join("\n");
+    await writeFile(path.join(root,"Report.cls"),source);
+    const analyzer={analyze:async()=>[] as SoqlSecurityFinding[]} as unknown as SoqlSecurityAnalyzer;
+    const result=await new SoqlAnalysisService(root,analyzer,path.join(root,"reports")).analyze({name:"Test"} as Persona);
+    assert.equal(result.findings.length,1,JSON.stringify(result.findings));
+    assert.equal(result.findings[0].severity,"REVIEW");
+    assert.equal(result.findings[0].criticality,"Unable to verify");
+    const workbook=new ExcelJS.Workbook();await workbook.xlsx.readFile(result.reports.summaryReportPath);
+    const sheet=workbook.getWorksheet("Summary")!;
+    const explanation=String(sheet.getCell("F7").value);
+    assert.match(explanation,/Backward dependency assessment/);
+    assert.match(explanation,/reportName.*no proven source caller/);
+    assert.match(explanation,/Custom Metadata.*Object_API_Name__c/);
+    assert.match(explanation,/getConfig.*getFieldListFromFieldSet/);
+    assert.match(explanation,/OLS\/FLS analysis was not performed/);
+    assert.equal(sheet.getCell("E7").value,"Unable to verify");
+    assert.equal(sheet.getCell("E7").font.color?.argb,"FFB42332");
+  }finally{await rm(root,{recursive:true,force:true});}
 });

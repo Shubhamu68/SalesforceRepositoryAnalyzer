@@ -16,6 +16,7 @@ import { extractSoqlExpressionFields } from "../analyzer/soqlExpressionInventory
 import { parseNestedSoql } from "../analyzer/nestedSoqlScopes.js";
 import type { SoqlQuery } from "../models/SoqlQuery.js";
 import {collectSoqlTrace,newSoqlTraceReport,type SoqlTraceReport} from "../analyzer/soqlTraceDiagnostics.js";
+import {collectApexDependencyBlockers,type ApexDependencyObserver} from "../core/apex/ApexDependencyDiagnostics.js";
 
 export interface UnresolvedDynamicSoql {
   filePath: string;
@@ -23,6 +24,8 @@ export interface UnresolvedDynamicSoql {
   /** Immutable call-site identity, even if two sites share a source line. */
   siteId?: string;
   reason: string;
+  /** Compact source evidence retained independently of opt-in trace logging. */
+  backwardExplanation?:string;
   /** Structurally validated source candidates with conflicting explicit declarations. */
   securityModeConflict?: boolean;
   /** Known variants coexist with this unresolved execution site. */
@@ -58,6 +61,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
     const siteId=filePath+"@"+site.offset;
     const fail=(reason:string,partialValues:readonly ApexValue[]=[],initialConflict?:DeclaredSoqlMode)=>{
       let explanation=reason;
+      let backwardExplanation:string|undefined;
       const trace=traceEnabled?newSoqlTraceReport(filePath,site.line,site.offset,site.argument):undefined;
       const observe=trace?collectSoqlTrace(trace):undefined;
       const note=(code:string,count?:number)=>{if(trace)observe?.({code,file:trace.file,line:site.line,depth:0,...(count===undefined?{}:{count})});};
@@ -169,8 +173,29 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
           ...proveLabelBackedPermissionShapes(source,site,resolveExternal,methods)
         ]:[];
         const callers=callerSeeds.length?proveCallerPermissionShapes(source,site,callerSeeds,methods):[];
+        // The report must retain actual blockers even when no query could
+        // be reconstructed. Do not require the opt-in verbose trace, and
+        // never perform a second backward analysis just for explanations.
+        const blockers=collectApexDependencyBlockers();
+        const structuralCodes=new Set<string>();
+        const reportObserver:ApexDependencyObserver=event=>{
+          blockers.observe(event);observe?.(event);
+          if(["SOQL_CONDITIONAL_MERGE_REJECTED","SOQL_RUNTIME_SLOT_UNPROVEN","SOQL_REQUIRED_REFERENCE_MISMATCH","SOQL_VALUE_UNRESOLVED","RUNTIME_SELECT_DOMAIN_MISMATCH"].includes(event.code))
+            structuralCodes.add(event.code);
+        };
         const traced=variants.size===0&&!local.length&&!callers.length
-          ?backtrackSoqlPermissionShapes(source,filePath,site,repositoryIndex,resolveExternal,observe):undefined;
+          ?backtrackSoqlPermissionShapes(source,filePath,site,repositoryIndex,resolveExternal,reportObserver):undefined;
+        if(traced&&!traced.queries.length){
+          const details=blockers.summarize();
+          const structure=structuralCodes.has("SOQL_CONDITIONAL_MERGE_REJECTED")
+            ?" Conditional query fragments could not be combined into a validated permission structure."
+            :structuralCodes.has("RUNTIME_SELECT_DOMAIN_MISMATCH")||structuralCodes.has("SOQL_REQUIRED_REFERENCE_MISMATCH")
+              ?" Required field or object references could not be validated."
+              :structuralCodes.has("SOQL_RUNTIME_SLOT_UNPROVEN")
+                ?" One or more query fragments remain structurally unproven."
+                :structuralCodes.has("SOQL_VALUE_UNRESOLVED")?" A complete query value could not be established.":"";
+          if(details||structure)backwardExplanation="Backward dependency assessment: "+(details??"")+structure;
+        }
         if(trace){
           trace.localCandidates=local.length;trace.callerCandidates=callers.length;
           trace.fallback=traced?"ATTEMPTED":variants.size?"SKIP_EXISTING_VARIANTS":local.length?"SKIP_LOCAL_CANDIDATES":"SKIP_CALLER_CANDIDATES";
@@ -217,6 +242,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
         if(trace)trace.added=aggregatedPermissionInventories;
         if(aggregatedPermissionInventories)explanation+=" Permission inventory aggregated from individually validated SOQL structural evidence; representative query is parser-only and is not an executable reconstruction.";
       }
+      if(backwardExplanation)explanation=backwardExplanation+" Original analysis diagnostic: "+explanation;
       if(runtimeFieldCoverage)explanation+=" Known fields are submitted for permission analysis; additional runtime-dependent fields are outside verified coverage.";
       if(partialStructureVariants)explanation+=" Proven partial structural variants: "+partialStructureVariants+
         ". Typed value slots use synthetic parser placeholders, not actual runtime values; only those proven field and object references are submitted for access analysis. Complete execution coverage remains unverified.";
@@ -227,7 +253,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
           ". Verify the intended Salesforce execution mode and align the declarations. Runtime enforcement is not established; conflicting candidates were excluded from OLS/FLS analysis. "+
           explanation;
       }
-      unresolved.push({filePath,lineNumber:site.line,siteId,reason:explanation,...(conflicts.size?{securityModeConflict:true}:{}),...(knownVariants?{knownVariants}:{}),
+      unresolved.push({filePath,lineNumber:site.line,siteId,reason:explanation,...(backwardExplanation?{backwardExplanation}:{}),...(conflicts.size?{securityModeConflict:true}:{}),...(knownVariants?{knownVariants}:{}),
         ...(partialStructureVariants?{partialStructureVariants}:{}),...(conditionalFrameworkVariants?{conditionalFrameworkVariants}:{}),...(aggregatedPermissionInventories?{aggregatedPermissionInventories}:{}),...(runtimeFieldCoverage?{runtimeFieldCoverage:true}:{}),...(trace?{trace}:{})});
     };
     const failure=flow.failures.get(site.offset);

@@ -200,9 +200,9 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
           const record=variable(frame,member[1],offset,locals,[...new Set([...members,...names,member[2]])]);
           if(record.value.kind==="record"){
             const field=record.value.entries.find(([key])=>key.toLowerCase()===member[2].toLowerCase());
-            return ev(field?.[1]??reject("metadata member unavailable","METADATA_MEMBER_UNAVAILABLE"));
+            return ev(field?.[1]??reject("metadata member unavailable","METADATA_MEMBER_UNAVAILABLE",member[2]));
           }
-          return ev(reject("metadata record unresolved","METADATA_RECORD_UNRESOLVED"));
+          return ev(reject("metadata record unresolved","METADATA_RECORD_UNRESOLVED",member[2]));
         }
         // Constant resolution is allowed only for class-qualified names;
         // an unknown instance member is not an immutable static constant.
