@@ -1,9 +1,10 @@
+import {provePartialSoql} from "../src/analyzer/soqlPartialStructure.js";
 import assert from "node:assert/strict";
 import {test} from "node:test";
 import {ApexAnalysisEngine} from "../src/core/apex/ApexAnalysisEngine.js";
 import {ApexRepositoryMethodIndex} from "../src/core/apex/ApexRepositoryMethodIndex.js";
 import {outerApexClass,supportsApexAllocation} from "../src/core/apex/ApexClassModel.js";
-import {evaluateApexExpression,textValue} from "../src/core/apex/ApexValueEvaluator.js";
+import {evaluateApexExpression,textValue,runtimeParameter,addApexValues} from "../src/core/apex/ApexValueEvaluator.js";
 import {extractDynamicSoqlQueries} from "../src/scanner/dynamicSoqlScanner.js";
 
 const scan=async (files: {filePath:string;source:string}[],filePath:string)=>{
@@ -55,4 +56,45 @@ test("unproven intervening callback cannot leave a stale constructor-derived que
   const result=await scan([{filePath:"Work.cls",source:batch}],"Work.cls");
   assert.equal(result.queries.length,0);
   assert.equal(result.unresolved.length,1);
+});
+
+test("bounded private instance initialization propagates fields into a submitted receiver",async()=>{
+  const batch="public class Work implements Database.Batchable<SObject>{private String query;public Work(){initialize();}private void initialize(){String field='Name';this.query='SELECT '+field+' FROM Account';}public Database.QueryLocator start(Database.BatchableContext bc){return Database.getQueryLocator(query);}}";
+  const caller="public class Submitter {public static void go(){Database.executeBatch(new Work(),100);}}";
+  const result=await scan([{filePath:"Work.cls",source:batch},{filePath:"Submitter.cls",source:caller}],"Work.cls");
+  assert.ok(result.queries.some(q=>q.query==="SELECT Name FROM Account"&&q.coverage==="KNOWN_CALLER_CONTEXT"),JSON.stringify(result));
+});
+test("exact Custom Metadata getInstance discovers fields through existing metadata provider",async()=>{
+  const source="public class C { public static void run(){ Example__mdt settings=Example__mdt.getInstance('Default'); Database.query('SELECT '+settings.Field__c+' FROM Account'); }}";
+  const index=new ApexRepositoryMethodIndex([{filePath:"C.cls",source}]);
+  const reads:Array<{type:string;fields:readonly string[]}>=[]; 
+  const provider={
+    scopeKey:"fixture-mdt",
+    getObjectFieldNames:async()=>({complete:false as const,source:"LIVE_ORG" as const}),
+    getCustomMetadataRecords:async(type:string,fields:readonly string[])=>{
+      reads.push({type,fields});
+      return {complete:true as const,source:"LIVE_ORG" as const,value:[Object.fromEntries(fields.map(f=>[f,f==="DeveloperName"?"Default":"Name"]))]};
+    },
+  };
+  const result=await new ApexAnalysisEngine(index,provider).analyze("C.cls",ctx=>extractDynamicSoqlQueries(source,"C.cls",ctx.resolveExternal,ctx.repositoryIndex));
+  assert.deepEqual(result.queries.map(q=>q.query),["SELECT Name FROM Account"],JSON.stringify(result));
+  assert.ok(reads.some(r=>r.type==="Example__mdt"&&r.fields.includes("Field__c")));
+  const unavailable=await scan([{filePath:"C.cls",source}],"C.cls");
+  assert.equal(unavailable.queries.length,0);
+});
+test("quoted typed Id holes are safe only at exact literal boundaries",()=>{
+  const id=runtimeParameter("id","Id","runtime");
+  const make=(prefix:string,value:ReturnType<typeof runtimeParameter>,suffix:string)=>addApexValues(addApexValues(textValue(prefix),value),textValue(suffix));
+  const proof=provePartialSoql(make("SELECT Id FROM Account WHERE Id = '",id,"'"));
+  assert.deepEqual(proof,{text:"SELECT Id FROM Account WHERE Id = '000000000000000'",holes:1});
+  assert.equal(provePartialSoql(make("SELECT Id FROM Account WHERE Id = '",runtimeParameter("id","String","runtime"),"'")),undefined);
+  assert.equal(provePartialSoql(make("SELECT Id FROM Account WHERE Id = 'prefix",id,"'")),undefined);
+  assert.equal(provePartialSoql(make("SELECT Id FROM Account WHERE Id = 'prefix\\'",id,"'")),undefined);
+  assert.equal(provePartialSoql(make("SELECT Id FROM ",id,"")),undefined);
+});
+test("an unknown declared Id assignment retains type without claiming a business record value",()=>{
+  const source="public class C {public static void run(){Id recordId=Other.lookup();Database.query('SELECT Id FROM Account WHERE Id = \\''+recordId+'\\'');}}";
+  const result=extractDynamicSoqlQueries(source,"C.cls");
+  assert.equal(result.unresolved.length,1);
+  assert.equal(result.queries[0]?.coverage,"PROVEN_PARTIAL_STRUCTURE",JSON.stringify(result));
 });
