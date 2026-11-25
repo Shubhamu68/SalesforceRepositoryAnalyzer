@@ -87,6 +87,9 @@ export class SoqlAnalysisService {
     const queries: SoqlQuery[] = scanned.queries
       .filter((query) => isDataAccessAnalysisObject(query.object));
     recordSoqlCount("queries.analyzed", queries.length);
+    recordSoqlCount("queries.partial_structure", queries.filter(q=>q.coverage==="PROVEN_PARTIAL_STRUCTURE").length);
+    recordSoqlCount("queries.known_caller", queries.filter(q=>q.coverage==="KNOWN_CALLER_CONTEXT").length);
+    recordSoqlCount("queries.complete", queries.filter(q=>!q.coverage).length);
 
     // Keep the pre-existing analyzer path for callers without progress
     // (including CLI/tests). With progress, the SAME preparation/evaluation
@@ -181,6 +184,9 @@ export class SoqlAnalysisService {
       const queries = scanned.queries
         .filter((query) => isDataAccessAnalysisObject(query.object));
       recordSoqlCount("queries.analyzed", queries.length);
+    recordSoqlCount("queries.partial_structure", queries.filter(q=>q.coverage==="PROVEN_PARTIAL_STRUCTURE").length);
+    recordSoqlCount("queries.known_caller", queries.filter(q=>q.coverage==="KNOWN_CALLER_CONTEXT").length);
+    recordSoqlCount("queries.complete", queries.filter(q=>!q.coverage).length);
       recordSoqlCount("personas.analyzed", personas.length);
 
       progress?.moveTo("preparing");
