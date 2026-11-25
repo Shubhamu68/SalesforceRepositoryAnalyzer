@@ -531,8 +531,8 @@ export class ApexRepositoryMethodIndex {
    */
   private probeBatchReceivers(owner:IndexedSource,method:IndexedApexMethod,offset:number,expressions:readonly string[],
     resolveExternal?: ApexCallResolver):
-    {count:number;arguments:ApexValue[][];bounded:boolean}{
-    const empty={count:0,arguments:[] as ApexValue[][],bounded:false};
+    {count:number;arguments:ApexValue[][];conditionalArguments:ApexValue[][];partialArguments:ApexValue[][];scenarioCount:number;bounded:boolean}{
+    const empty={count:0,arguments:[] as ApexValue[][],conditionalArguments:[] as ApexValue[][],partialArguments:[] as ApexValue[][],scenarioCount:0,bounded:false};
     if(method.isStatic||method.name.toLowerCase()!=="start"||method.parameters.length!==1)return empty;
     const declaration=outerApexClass(owner.source);
     if(!declaration?.batch||declaration.parent||declaration.name.toLowerCase()!==owner.className.toLowerCase()||
@@ -556,13 +556,24 @@ export class ApexRepositoryMethodIndex {
       if(receivers.size>=8)break;
     }
     const argumentsByValue=new Map<string,ApexValue[]>();
-    let samples=0;
-    for(const original of receivers.values()){
+    const conditionalArguments=new Map<string,ApexValue[]>();
+    const partialArguments=new Map<string,ApexValue[]>();
+    const candidates=[...receivers.values()].map(value=>({value,hypothetical:false}));
+    if(!candidates.length){
+      // Explicitly separate a source-initialized scenario from an observed
+      // submission. Public mutable fields may differ at runtime.
+      const value=this.constructInstance(owner.filePath,owner.className,[],resolveExternal,[]);
+      if(value?.kind==="instance")candidates.push({value,hypothetical:true});
+    }
+    let samples=0,scenarioCount=0;
+    for(const {value:original,hypothetical} of candidates){
       if(!supportsReceiverPrefix(method,offset,original))continue;
       const domain=receiverMapSamples(method,original,Math.max(0,32-samples));
       bounded=bounded||domain.bounded;
       for(const instance of domain.receivers){
         if(++samples>40){bounded=true;break;}
+        const conditional=hypothetical||instance!==original;
+        if(conditional)scenarioCount++;
       const engine=new ApexDataFlowEngine(owner.source,{sourceMethods:owner.methods,maxOperations:2000,
         resolveExternal:(name,args,types)=>{
           if(name==="Apex.scopeField"&&args[0]?.kind==="text"&&args[0].values[0]?.toLowerCase()===owner.className.toLowerCase()&&args[1]?.kind==="text"&&args[3]?.kind==="text"&&args[3].values[0]!=="true"){
@@ -573,20 +584,23 @@ export class ApexRepositoryMethodIndex {
           return resolveExternal?.(name,args,types)??this.evaluateReturn(owner.filePath,name,args,resolveExternal,types);
         }});
       for(const args of engine.evaluateArgumentsAt(method,offset,expressions)){
-        if(args.some(v=>v.kind==="unknown"))continue;
-        argumentsByValue.set(JSON.stringify(args),args);
+        if(args.some(v=>v.kind==="unknown")){
+          if(!conditional&&partialArguments.size<32&&args.some(v=>v.kind==="unknown"&&!!v.fragments))partialArguments.set(argumentIdentity(args),args);
+          continue;
+        }
+        (conditional?conditionalArguments:argumentsByValue).set(argumentIdentity(args),args);
       }
       }
     }
     if(samples)countApex("caller.batch_receiver_samples",samples);
-    return {count:receivers.size,arguments:[...argumentsByValue.values()],bounded};
+    return {count:receivers.size,arguments:[...argumentsByValue.values()],conditionalArguments:[...conditionalArguments.values()],partialArguments:[...partialArguments.values()],scenarioCount,bounded};
   }
 
   /** Evaluate selected invocation arguments in proven incoming contexts.
    * Evidence is kept separate from the all-path verdict and from permissions. */
   probeInvocationContexts(filePath:string,offset:number,expressions:readonly string[],
     resolveExternal?: ApexCallResolver):{
-      contexts:ApexCallerContexts;arguments:ApexValue[][];partialArguments:ApexValue[][];bounded:boolean;receiverContexts?:number
+      contexts:ApexCallerContexts;arguments:ApexValue[][];partialArguments:ApexValue[][];conditionalArguments:ApexValue[][];bounded:boolean;receiverContexts?:number;receiverScenarios?:number
     }|undefined {
     const owner=this.paths.get(path.resolve(filePath));
     const method=owner?.methods.filter(m=>m.start<=offset&&offset<m.end)
@@ -616,7 +630,8 @@ export class ApexRepositoryMethodIndex {
     }
     const batch=this.probeBatchReceivers(owner,method,offset,expressions,resolveExternal);
     for(const args of batch.arguments)argumentsByValue.set(JSON.stringify(args),args);
-    return {contexts,arguments:[...argumentsByValue.values()],partialArguments:[...partialArguments.values()],bounded:bounded||batch.bounded,receiverContexts:batch.count};
+    for(const args of batch.partialArguments)if(partialArguments.size<32)partialArguments.set(argumentIdentity(args),args);
+    return {contexts,arguments:[...argumentsByValue.values()],partialArguments:[...partialArguments.values()],conditionalArguments:batch.conditionalArguments,bounded:bounded||batch.bounded,receiverContexts:batch.count,receiverScenarios:batch.scenarioCount};
   }
 
   /**
