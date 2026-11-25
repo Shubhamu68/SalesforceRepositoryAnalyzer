@@ -362,7 +362,7 @@ export class SoqlSecurityAnalyzer {
         finding.reason += " Coverage: known repository caller variant only; other execution contexts remain unverified.";
       if(coverage==="CONDITIONAL_FRAMEWORK_CONTEXT")finding.reason += " Coverage: conditional framework receiver scenario only; actual job submission and other receiver states remain unverified.";
       if(coverage==="PROVEN_PARTIAL_STRUCTURE")
-        finding.reason += " Coverage: proven partial SOQL structure only; numeric placeholders are synthetic, not runtime values. Other execution contexts remain unverified.";
+        finding.reason += " Coverage: proven partial SOQL structure only; numeric or Id placeholders are synthetic, not runtime values. Other execution contexts remain unverified.";
     }
     return findings;
   }
