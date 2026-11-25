@@ -65,7 +65,7 @@ test("known false ternary skips malformed query, known true still reports malfor
   assert.equal(skipped.queries.length,0);assert.equal(skipped.unresolved.length,0);
   const executed=extractDynamicSoqlQueries(wrap("Map<String,String> fields=new Map<String,String>{'Name'=>'Name'}; List<Account> records=!fields.isEmpty()?Database.query('SELECT , FROM Account'):new List<Account>();"),"Consumer.cls");
   assert.equal(executed.queries.length,0);assert.equal(executed.unresolved.length,1);
-  assert.match(executed.unresolved[0].reason,/failed SOQL parsing/);
+  assert.match(executed.unresolved[0].reason,/reconstructed SOQL could not be parsed/);
 });
 test("unknown ternary guard retains both feasible invocations; adjacent arguments not skipped",()=>{
   const code="public class Consumer { public static void run(Boolean flag){ CustomInspector.inspect(flag?CustomInspector.pick('A'):CustomInspector.pick('B'),CustomInspector.pick('C')); } }";

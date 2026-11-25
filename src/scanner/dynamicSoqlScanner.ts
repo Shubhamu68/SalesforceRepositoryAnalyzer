@@ -18,12 +18,15 @@ import type { SoqlQuery } from "../models/SoqlQuery.js";
 import {collectSoqlTrace,newSoqlTraceReport,type SoqlTraceReport} from "../analyzer/soqlTraceDiagnostics.js";
 import {collectApexDependencyBlockers,type ApexDependencyObserver} from "../core/apex/ApexDependencyDiagnostics.js";
 
+/** Failure category, independent of wording shown to users. */
+export type DynamicSoqlFailureKind = "QUERY_DEPENDENCY" | "NO_CAPTURE" | "ENGINE_FAILURE" | "OTHER";
 export interface UnresolvedDynamicSoql {
   filePath: string;
   lineNumber: number;
   /** Immutable call-site identity, even if two sites share a source line. */
   siteId?: string;
   reason: string;
+  failureKind?:DynamicSoqlFailureKind;
   /** Compact source evidence retained independently of opt-in trace logging. */
   backwardExplanation?:string;
   /** Structurally validated source candidates with conflicting explicit declarations. */
@@ -59,7 +62,8 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
   const unresolved:UnresolvedDynamicSoql[]=[];
   for(const site of flow.sites){
     const siteId=filePath+"@"+site.offset;
-    const fail=(reason:string,partialValues:readonly ApexValue[]=[],initialConflict?:DeclaredSoqlMode)=>{
+    const fail=(reason:string,partialValues:readonly ApexValue[]=[],initialConflict?:DeclaredSoqlMode,
+      failureKind:DynamicSoqlFailureKind="OTHER")=>{
       let explanation=reason;
       let backwardExplanation:string|undefined;
       const trace=traceEnabled?newSoqlTraceReport(filePath,site.line,site.offset,site.argument):undefined;
@@ -77,8 +81,15 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
         conflicts.add(declared);note("ACCESS_MODE_CONFLICT");return true;
       };
       if(initialConflict)hasModeConflict(initialConflict);
-      if(owner && (owner.arity>0||(owner.visibility==="private"&&!owner.isStatic)) && (/dependency|runtime|symbol|join|parameter|helper|unsupported/i.test(reason)||
-        (owner.visibility==="private"&&/budget/i.test(reason)))){
+      // A captured but unresolved query argument always warrants caller /
+      // receiver probing, even if its reason mentions only constructor state.
+      // Older core engine failures still supply raw internal diagnostics:
+      // keep their existing eligibility checks until the core exposes typed
+      // failure categories. Never test the formatted report explanation.
+      const shouldProbe=failureKind==="QUERY_DEPENDENCY"||
+        /dependency|runtime|symbol|join|parameter|helper|unsupported/i.test(reason)||
+        (owner?.visibility==="private"&&/budget/i.test(reason));
+      if(owner && (owner.arity>0||(owner.visibility==="private"&&!owner.isStatic)) && shouldProbe){
         const evidence=repositoryIndex!.inspectCallers(owner.className,owner.methodName,owner.arity);
         if(evidence.candidateCalls)explanation +=
           " Source callers: "+evidence.knownCalls+" known and "+
@@ -253,15 +264,15 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
           ". Make both declarations use the intended mode. Actual permission enforcement is unclear; the conflicting query was excluded from OLS/FLS checks. "+
           explanation;
       }
-      unresolved.push({filePath,lineNumber:site.line,siteId,reason:explanation,...(backwardExplanation?{backwardExplanation}:{}),...(conflicts.size?{securityModeConflict:true}:{}),...(knownVariants?{knownVariants}:{}),
+      unresolved.push({filePath,lineNumber:site.line,siteId,reason:explanation,failureKind,...(backwardExplanation?{backwardExplanation}:{}),...(conflicts.size?{securityModeConflict:true}:{}),...(knownVariants?{knownVariants}:{}),
         ...(partialStructureVariants?{partialStructureVariants}:{}),...(conditionalFrameworkVariants?{conditionalFrameworkVariants}:{}),...(aggregatedPermissionInventories?{aggregatedPermissionInventories}:{}),...(runtimeFieldCoverage?{runtimeFieldCoverage:true}:{}),...(trace?{trace}:{})});
     };
     const failure=flow.failures.get(site.offset);
-    if(failure){fail(failure);continue;}
+    if(failure){fail(failure,[],undefined,"ENGINE_FAILURE");continue;}
     if(flow.unreachable.has(site.offset))continue;
     const captures=flow.captures.get(site.offset)??[];
     if(!captures.length){fail("Invocation is outside a supported method or execution path. "+
-      explainUncapturedApexQuery(source,site.offset,site.argument));continue;}
+      explainUncapturedApexQuery(source,site.offset,site.argument),[],undefined,"NO_CAPTURE");continue;}
     const mode=explicitMode(site);
     if(mode===null){fail("Could not determine the query's Database AccessLevel.");continue;}
     const strings:string[]=[];
@@ -274,7 +285,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
       }
       strings.push(...capture.query.values);
     }
-    if(reason){fail("Could not build the full query: "+reason,captures.map(c=>c.query));continue;}
+    if(reason){fail("Could not build the full query: "+reason,captures.map(c=>c.query),undefined,"QUERY_DEPENDENCY");continue;}
     const variants=[...new Set(strings.map(s=>s.trim()))];
     if(!variants.length||variants.length>MAX_VARIANTS){
       fail("Could not reconstruct a complete query or the query version limit was reached.");continue;

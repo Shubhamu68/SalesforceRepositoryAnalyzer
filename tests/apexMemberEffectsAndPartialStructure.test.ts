@@ -90,7 +90,7 @@ test("Field Set iterator and inert UI DTO preserve a sampled cross-class SELECT 
   const report=await new ApexAnalysisEngine(index,provider).analyze("QueryService.cls",ctx=>extractDynamicSoqlQueries(service,"QueryService.cls",ctx.resolveExternal,ctx.repositoryIndex));
   assert.equal(report.unresolved.length,1,JSON.stringify(report));
   assert.ok(report.queries.some(q=>q.query==="SELECT Id,Name,Phone FROM Account WHERE Id = :recordId WITH SECURITY_ENFORCED"&&q.coverage==="KNOWN_CALLER_CONTEXT"),JSON.stringify(report));
-  assert.match(report.unresolved[0].reason,/fresh framework entry/);
+  assert.match(report.unresolved[0].reason,/sampled new framework instances/);
 });
 
 test("numeric runtime slots are separate structural evidence; String, object and field holes stay unknown",()=>{

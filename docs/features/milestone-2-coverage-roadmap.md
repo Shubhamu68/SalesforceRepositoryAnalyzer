@@ -149,3 +149,7 @@ Normal unresolved-site explanations now receive a compact, bounded, source-only 
 ### Issue 2C.1 final wording pass
 
 Use plain-language explanations for normal SOQL findings, mode descriptions, incomplete coverage, dependency blockers and mixed severity. Keep source symbols, class/method/line references, original provider/parse diagnostics and explicit coverage limits. Group repeated locations in the shared Apex dependency summary instead of repeating full class/method names. Retain detailed trace codes and all query/permission decisions unchanged. Slightly increase maximum Excel row height for longer explanations. No runtime metadata expansion or new analysis rules.
+
+### Wording regression follow-up
+
+The simplified prefix removed the word "dependency", accidentally disabling caller/receiver probing for captured unknown query values (including constructor-derived instance fields). Restore the previously validated selection policy using the explicit QUERY_DEPENDENCY category, not the user-facing prefix. Also use NO_CAPTURE for repository diagnostic fallback. Legacy engine failures still provide raw diagnostic strings and retain the previous eligibility filter; replacing those raw engine diagnostics with structured codes is a separate core refactor. Update only the three stale wording assertions; preserve all query/coverage assertions and add a constructor recovery regression that checks both the failure category and conditional query output. No changes to candidate selection algorithms or permission rules.

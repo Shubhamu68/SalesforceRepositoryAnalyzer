@@ -102,21 +102,20 @@ function preserveDynamicFailureDiagnostics(
   analysis:ReturnType<typeof extractDynamicSoqlQueries>,
   standaloneResolver?: (name:string,args:ApexValue[])=>ApexValue|undefined,
 ):ReturnType<typeof extractDynamicSoqlQueries> {
-  if(!analysis.unresolved.some(finding=>
-    /Invocation is outside a supported method or execution path/i.test(finding.reason)))
+  if(!analysis.unresolved.some(finding=>finding.failureKind==="NO_CAPTURE"))
     return analysis;
   const local=extractDynamicSoqlQueries(source,filePath,standaloneResolver);
-  const localReasons=new Map(local.unresolved.map(finding=>[finding.siteId,finding.reason]));
+  const localReasons=new Map(local.unresolved.map(finding=>[finding.siteId,finding]));
   return {...analysis,unresolved:analysis.unresolved.map(finding=>{
-    if(finding.securityModeConflict||!/Invocation is outside a supported method or execution path/i.test(finding.reason))
+    if(finding.securityModeConflict||finding.failureKind!=="NO_CAPTURE")
       return finding;
     const original=localReasons.get(finding.siteId);
-    if(!original || /Invocation is outside a supported method or execution path/i.test(original))
+    if(!original || original.failureKind==="NO_CAPTURE")
       return finding;
     // Keep the repository-aware dependency explanation when the existing
     // diagnostic-only fallback supplies a more useful forward reason.
     return {...finding,reason:(finding.backwardExplanation?finding.backwardExplanation+" ":"")+
-      "Could not follow the repository caller; analysis of this class: "+original};
+      "Could not follow the repository caller; analysis of this class: "+original.reason};
   })};
 }
 

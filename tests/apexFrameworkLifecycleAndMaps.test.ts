@@ -251,3 +251,15 @@ test("constructor rejection diagnostics distinguish an unknown condition from an
     assert.ok(!result.queries.some(q=>q.coverage==="CONDITIONAL_FRAMEWORK_CONTEXT"),JSON.stringify(result));
   }
 });
+
+
+test("unresolved constructor field uses typed dependency recovery regardless of report wording",async()=>{
+  const source="public class Work implements Database.Batchable<SObject>{private String query;public Work(){query='SELECT Name FROM Account';}public Database.QueryLocator start(Database.BatchableContext bc){return Database.getQueryLocator(query);}}";
+  const result=await scan([{filePath:"Work.cls",source}],"Work.cls");
+  assert.equal(result.unresolved.length,1);
+  const unresolved=result.unresolved[0];
+  assert.equal(unresolved.failureKind,"QUERY_DEPENDENCY");
+  assert.match(unresolved.reason,/Could not build the full query: Instance field/i);
+  assert.ok(result.queries.some(q=>q.query==="SELECT Name FROM Account"&&q.coverage==="CONDITIONAL_FRAMEWORK_CONTEXT"),JSON.stringify(result));
+  assert.ok(!result.queries.some(q=>!q.coverage),JSON.stringify(result));
+});
