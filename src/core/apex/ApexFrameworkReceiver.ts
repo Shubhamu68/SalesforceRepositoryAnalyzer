@@ -9,27 +9,34 @@ type Instance=Extract<ApexValue,{kind:"instance"}>;
 export function supportsReceiverPrefix(method:IndexedApexMethod,offset:number,receiver:Instance):boolean{
   const fields=new Map(receiver.entries.map(([k,v])=>[k.toLowerCase(),v]));
   const locals=new Set(method.parameters.map(p=>p.toLowerCase()));
-  const expression=(source:string):boolean=>{
+  const expression=(source:string,scope:Set<string>):boolean=>{
     const masked=maskApexSource(source);
+    // A read-only Describe chain returns a runtime Id; no actual record
+    // type Id is fetched or invented by the expression evaluator.
+    if(/^\s*Schema\s*\.\s*getGlobalDescribe\s*\(\s*\)\s*\.\s*get\s*\(\s*[A-Za-z_]\w*\s*\)\s*\.\s*getDescribe\s*\(\s*\)\s*\.\s*getRecordTypeInfosByDeveloperName\s*\(\s*\)\s*\.\s*get\s*\(\s*[A-Za-z_]\w*\s*\)\s*\.\s*getRecordTypeId\s*\(\s*\)\s*$/i.test(masked))return true;
     if(/\b(?:new|throw|insert|update|delete|upsert|merge|super)\b/i.test(masked)||/\+\+|--|\+=|(?:^|[^=!<>])=(?!=|>)/.test(masked))return false;
     for(const hit of masked.matchAll(/\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(/g)){
       const path=hit[1].toLowerCase().replace(/^this\./,"");
       if(/^database\.(?:query|getquerylocator|countquery)$/i.test(path))continue;
       const [field,op,...rest]=path.split(".");
-      if(rest.length||locals.has(field)||fields.get(field)?.kind!=="map"||!["get","containskey"].includes(op))return false;
+      if(rest.length||scope.has(field)||fields.get(field)?.kind!=="map"||!["get","containskey"].includes(op))return false;
     }
     return true;
   };
-  const visit=(nodes:readonly SourceNode[],depth:number):boolean=>{
+  const visit=(nodes:readonly SourceNode[],depth:number,scope:Set<string>):boolean=>{
     if(depth>8)return false;
     for(const node of nodes){
       if(node.start>offset)break;
-      if(node.kind==="block"){if(!visit(node.body??[],depth+1))return false;continue;}
+      if(node.kind==="block"){if(!visit(node.body??[],depth+1,new Set(scope)))return false;continue;}
       if(node.kind==="if"){
-        if(node.condition==="__apex_exception_path_unknown__"||!expression(node.condition??""))return false;
+        if(node.condition==="__apex_exception_path_unknown__"){
+          // A terminating catch cannot reach a later selected invocation.
+          // Do not generalize this to catch continuations or finally.
+          if(offset<node.end||node.otherwise?.length!==1||!/^\s*return\b/i.test(node.otherwise[0].text??""))return false;
+        }else if(!expression(node.condition??"",scope))return false;
         // Scope-local declarations inside conditionals cannot be used as
         // evidence outside their lexical lifetime.
-        if(!visit(node.body??[],depth+1)||!visit(node.otherwise??[],depth+1))return false;
+        if(!visit(node.body??[],depth+1,new Set(scope))||!visit(node.otherwise??[],depth+1,new Set(scope)))return false;
         continue;
       }
       if(node.kind!=="statement")return false;
@@ -39,20 +46,20 @@ export function supportsReceiverPrefix(method:IndexedApexMethod,offset:number,re
         return /^\s*(?:return\s*)?$/.test(maskApexSource((node.text??"").slice(0,offset-node.start)));
       }
       const source=(node.text??"").trim().replace(/;\s*$/,"");
-      if(/^return\b/i.test(source)){if(!expression(source.slice(6)))return false;continue;}
+      if(/^return\b/i.test(source)){if(!expression(source.slice(6),scope))return false;continue;}
       const declaration=parseApexDeclaration(maskApexSource(source));
       if(declaration){
-        if(depth!==0||locals.has(declaration.name.toLowerCase()))return false;
+        if(scope.has(declaration.name.toLowerCase())||fields.has(declaration.name.toLowerCase()))return false;
         const eq=maskApexSource(source).indexOf("=");
-        if(eq>=0&&!expression(source.slice(eq+1)))return false;
-        locals.add(declaration.name.toLowerCase());continue;
+        if(eq>=0&&!expression(source.slice(eq+1),scope))return false;
+        scope.add(declaration.name.toLowerCase());continue;
       }
       const assignment=/^([A-Za-z_]\w*)\s*=(?!=|>)\s*([\s\S]+)$/.exec(source);
-      if(!assignment||!locals.has(assignment[1].toLowerCase())||!expression(assignment[2]))return false;
+      if(!assignment||!scope.has(assignment[1].toLowerCase())||!expression(assignment[2],scope))return false;
     }
     return true;
   };
-  return visit(method.body,0);
+  return visit(method.body,0,locals);
 }
 
 /** A finite map-domain sample is conditional on a successful lookup, never
