@@ -1,5 +1,5 @@
 import {countApex,timeApex} from "./ApexPerformance.js";
-import {memberEffectModel,directEffectCall,type ApexMemberEffectModel} from "./ApexMemberEffectModel.js";
+import {memberEffectModel,directEffectCall,isLiteralFieldSetRead,type ApexMemberEffectModel} from "./ApexMemberEffectModel.js";
 import {
   indexApexMethods, maskApexSource, matchingPair, sourceLine, splitApexTopLevel,
   type IndexedApexMethod, type SourceNode,
@@ -154,6 +154,10 @@ export class ApexDataFlowEngine {
             return unknown("Instance field cannot be accessed via this in a static method.");
           const qualified=(this.className+"."+field.values[0]).toLowerCase();
           const instance=("this."+field.values[0]).toLowerCase();
+          if(mode==="unqualified"&&this.effects.fields.has(field.values[0].toLowerCase())&&this.effects.locals(this.currentMethod).has(field.values[0].toLowerCase())){
+            const local=[...state.values].find(([key])=>key.toLowerCase()===field.values[0].toLowerCase());
+            return local?.[1]??unknown("Shadowed local member name is not initialized.");
+          }
           const override=mode==="this"?state.values.get(instance):
             state.values.get(qualified)??(!this.currentMethod.isStatic?state.values.get(instance):undefined);
           if(override!==undefined)return override;
@@ -252,7 +256,7 @@ export class ApexDataFlowEngine {
           value=distinct.size===1?distinct.values().next().value!:
             unknown("Helper returns incompatible collection or numeric alternatives: "+ownName);
         }
-        if(value.kind==="instance"||value.kind==="instanceList")return unknown("Instance-return alias transfer is not yet proven.");
+        if(value.kind==="instance"||value.kind==="instanceList"||(replay&&(value.kind==="collection"||value.kind==="map")))return unknown("Helper return alias transfer is not yet proven.");
         if(cacheable&&(value.kind==="text"||value.kind==="number"||value.kind==="null"||value.kind==="unknown"))this.summaries.set(key,value);
         return value;
       }};
@@ -282,7 +286,7 @@ export class ApexDataFlowEngine {
         state.values.get(receiver)?.kind==="collection"){
         call.lastIndex=open+1;continue;
       }
-      if(hasTrackedMembers&& !/^(?:String\.(?:valueOf|isEmpty)|System\.Label\.\w+|Schema\.[\w.]+|[\w.]+\.(?:getFieldPath|getFields|getMap|split|length|substring|trim|endsWith|startsWith|contains|containsKey|isEmpty|size|get|keySet))$/i.test(name))
+      if(hasTrackedMembers&&!state.effectFrame&&!isLiteralFieldSetRead(source)&&!this.effects.readOnlyCall(this.currentMethod,name))
         this.effects.unknownMembers(state.values,"Unsupported call may alter mutable static state.");
       const argumentText=maskApexSource(source.slice(open+1,close));
       for(const [identifier,value] of [...state.values]){
@@ -459,7 +463,7 @@ export class ApexDataFlowEngine {
       this.provenEffectCall=undefined;
       const direct=!!directEffectCall(rhs);
       const value=this.evaluate(rhs,state,depth,direct);
-      const proven=this.provenEffectCall;
+      const proven=this.provenEffectCall===directEffectCall(rhs)?this.provenEffectCall:undefined;
       this.provenEffectCall=undefined;
       if(operator==="=")state.values.set(key,value);
       else {
@@ -496,7 +500,7 @@ export class ApexDataFlowEngine {
     if(/^(?:(?:this|[A-Za-z_]\w*)\.)?[A-Za-z_]\w*\s*\(/.test(original)){
       this.provenEffectCall=undefined;
       this.evaluate(original,state,depth,!!directEffectCall(original));
-      const proven=this.provenEffectCall;this.provenEffectCall=undefined;
+      const proven=this.provenEffectCall===directEffectCall(original)?this.provenEffectCall:undefined;this.provenEffectCall=undefined;
       this.taintCollectionsPassedToUnknownCalls(original,state,proven);
     }
   }
@@ -621,6 +625,7 @@ export class ApexDataFlowEngine {
         }
       }
       const condition=this.evaluate(node.condition??"",state,depth);
+      if(!state.effectFrame&&this.effects.fields.size)this.taintCollectionsPassedToUnknownCalls(node.condition??"",state);
       const predicate=this.comparisonGuard(node);
       const prior=predicate?state.values.get(predicate):undefined;
       const known=bool(condition)??(prior?bool(prior):undefined);
