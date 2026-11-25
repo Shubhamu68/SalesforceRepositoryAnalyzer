@@ -1,3 +1,5 @@
+import {collectApexReferences,isApexReference,referenceMember,replaceApexReferences} from "./ApexReferenceState.js";
+import {proveInstanceArgumentEffects} from "./ApexInstanceEffects.js";
 import {apexSymbols,type ApexSymbolTable} from "./ApexSymbolTable.js";
 import {selectApexOverload,type ApexCallResolver} from "./ApexTypeSystem.js";
 import {countApex,timeApex} from "./ApexPerformance.js";
@@ -65,32 +67,9 @@ function clone(state:State):State {return {values:new Map(state.values),stopped:
 /** Replace an abstract collection in this frame, including tracked aliases
  * and references stored in a bounded nested map. Never mutate snapshot objects. */
 function replaceCollectionAliases(state:State,existing:ApexValue,next:ApexValue):boolean{
-  if(existing.kind!=="collection"&&existing.kind!=="map"&&existing.kind!=="instance"&&existing.kind!=="instanceList")return false;
-  const memo=new Map<ApexValue,ApexValue>();
-  const replace=(value:ApexValue,depth=0):ApexValue=>{
-    if(value===existing)return next;
-    const cached=memo.get(value);
-    if(cached!==undefined)return cached;
-    if(value.kind==="instanceList"&&depth<12){
-      const items=value.items.map(item=>replace(item,depth+1));
-      if(items.some((item,i)=>item!==value.items[i])){
-        const changed:ApexValue={...value,items};memo.set(value,changed);return changed;
-      }
-    }
-    if((value.kind==="map"||value.kind==="instance")&&depth<12){
-      const entries=value.entries.map(([k,v]):[string,ApexValue]=>[k,replace(v,depth+1)]);
-      if(entries.some(([,v],i)=>v!==value.entries[i][1])){
-        const changed:ApexValue=value.kind==="instance"?{...value,entries}:{kind:"map",entries};
-        memo.set(value,changed);return changed;
-      }
-    }
-    return value;
-  };
-  let found=false;
-  for(const [key,value] of state.values){
-    const changed=replace(value);
-    if(changed!==value){state.values.set(key,changed);if(value===existing)found=true;}
-  }
+  if(!isApexReference(existing))return false;
+  const found=[...state.values.values()].some(value=>value===existing);
+  replaceApexReferences(state.values,new Map([[existing,next]]));
   return found;
 }
 function bool(value: ApexValue): boolean | undefined {
@@ -217,8 +196,10 @@ export class ApexDataFlowEngine {
           if(v.kind==="map")return /^Map\s*<\s*String\s*,\s*String\s*>$/i.test(type)&&v.entries.every(([,item])=>item.kind==="text"||item.kind==="null"||item.kind==="unknown");
           return v.kind!=="instance"&&v.kind!=="instanceList";
         });
-        const replay=allowEffects&&!capturesTarget&&referenceInputsSafe&&this.effects.replaySafe(candidates[0])&&
-          (this.effects.fields.size>0||args.some(v=>v.kind==="collection"||v.kind==="map"));
+        const refs=allowEffects&&!capturesTarget?collectApexReferences(args):undefined;
+        const instanceReplay=!!refs&&proveInstanceArgumentEffects(candidates[0],args);
+        const replay=allowEffects&&!capturesTarget&&!!refs&&((referenceInputsSafe&&this.effects.replaySafe(candidates[0])&&
+          (this.effects.fields.size>0||args.some(v=>v.kind==="collection"||v.kind==="map")))||instanceReplay);
         const cacheable=!replay&&!capturesTarget&&args.every(v=>v.kind==="text"||v.kind==="number"||v.kind==="null"||v.kind==="unknown");
         const cached=cacheable?this.summaries.get(key):undefined;
         if(cached){countApex("helper.local_cache_hit");return cached;}
@@ -228,7 +209,7 @@ export class ApexDataFlowEngine {
         candidates[0].parameters.forEach((p,i)=>env.set(p,args[i]));
         if(replay){
           for(const {key} of this.effects.fields.values())env.set(key,state.values.get(key)??unknown("Incoming mutable static state is not proven."));
-          args.forEach((v,i)=>{if(v.kind==="collection"||v.kind==="map")env.set("#effect.arg."+i,v);});
+          refs!.forEach((value,i)=>env.set("#effect.ref."+i,value));
         }
         let result:FrameResult;
         const previousMethod:IndexedApexMethod|undefined=this.currentMethod;
@@ -249,9 +230,14 @@ export class ApexDataFlowEngine {
             return first&&values.every(v=>JSON.stringify(v)===JSON.stringify(first))?first:unknown("Helper effects differ across feasible paths.");
           };
           for(const {key} of this.effects.fields.values())state.values.set(key,agreed(key));
-          args.forEach((v,i)=>{if(v.kind==="collection"||v.kind==="map")replaceCollectionAliases(state,v,agreed("#effect.arg."+i));});
+          const projected=result.states.map(frame=>new Map(refs!.map((_,i)=>["#effect.ref."+i,frame.values.get("#effect.ref."+i)??unknown("Missing reference effect pin.")])));
+          const first=projected[0];
+          const consistent=!this.exceeded&&!!first&&result.states.every(frame=>!frame.loopControl)&&projected.every(values=>apexStateIdentity(values,false)===apexStateIdentity(first,false));
+          const replacements=new Map<ApexValue,ApexValue>(refs!.map((value,i)=>[value,consistent?first.get("#effect.ref."+i)!:unknown("Reference effects differ across feasible helper paths.")]));
+          replaceApexReferences(state.values,replacements);
           this.provenEffectCall=name.toLowerCase();
           countApex("helper.effects.transferred");
+          if(instanceReplay)countApex("helper.instance_effects.transferred");
         }else if(allowEffects&&this.effects.fields.size){
           this.effects.unknownMembers(state.values,"Unproven helper effects on mutable static state.");
         }
@@ -398,7 +384,7 @@ export class ApexDataFlowEngine {
     }
     // Abstract collections are immutable snapshots; updates affect only the
     // current frame and direct aliases, never another query or repository scan.
-    const mutate=/^((?:[A-Za-z_]\w*\.)?[A-Za-z_]\w*)\s*\.\s*(add|addAll|clear|remove|put|putAll|removeAll|retainAll|set|sort|reverse)\s*\(([\s\S]*)\)$/i.exec(original);
+    const mutate=/^([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\.\s*(add|addAll|clear|remove|put|putAll|removeAll|retainAll|set|sort|reverse)\s*\(([\s\S]*)\)$/i.exec(original);
     if(mutate){
       const [,name,operation,expr]=mutate;
       const action=operation.toLowerCase();
@@ -462,10 +448,11 @@ export class ApexDataFlowEngine {
     }
     // Explicit instance writes update every alias in this frame, not other
     // allocations with equal field values. Unmodeled receiver writes taint.
-    const member=/^([A-Za-z_]\w*)\s*\.\s*([A-Za-z_]\w*)\s*(\+?=)(?!=|>)\s*([\s\S]+)$/.exec(original);
+    const member=/^([A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)*?)\s*\.\s*([A-Za-z_]\w*)\s*(\+?=)(?!=|>)\s*([\s\S]+)$/.exec(original);
     if(member){
-      const [,receiver,field,operator,rhs]=member;
-      const existing=state.values.get(receiver);
+      const [,rawReceiver,field,operator,rhs]=member;
+      const receiver=rawReceiver.replace(/\s+/g,"");
+      const existing=referenceMember(state.values,receiver);
       const staticKey=existing===undefined?this.effects.key(this.currentMethod,receiver+"."+field):undefined;
       if(staticKey){
         const next=this.evaluate(rhs,state,depth);
@@ -487,7 +474,8 @@ export class ApexDataFlowEngine {
     const validPrefix=!prefix || /^(?:(?:final|static|public|private|protected|global)\s+)*(?:[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*(?:\s*<[\w\s,.<>?]+>)?(?:\[\])?)$/.test(prefix);
     if(assignment&&validPrefix){
       const [,name,operator,rhs]=assignment;
-      const key=!prefix?this.effects.key(this.currentMethod,name)??name:name;
+      const existingName=[...state.values.keys()].find(key=>key.toLowerCase()===name.toLowerCase());
+      const key=!prefix?this.effects.key(this.currentMethod,name)??existingName??name:name;
       this.provenEffectCall=undefined;
       const direct=!!directEffectCall(rhs);
       const value=this.evaluate(rhs,state,depth,direct);
