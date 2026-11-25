@@ -666,6 +666,10 @@ export class ApexDataFlowEngine {
       // Calls in an unknown-length loop may mutate an outer collection via
       // reference parameters even when no direct collection write is visible.
       for(const source of effects.callSources)this.taintCollectionsPassedToUnknownCalls(source,changed);
+      for(const [name,value] of [...changed.values])if(effects.aliasSources.has(name.toLowerCase()))
+        replaceCollectionAliases(changed,value,unknown("Runtime loop may transfer a mutable alias."));
+      if(effects.opaque)for(const key of changed.values.keys())
+        changed.values.set(key,unknown("Unsupported nested control flow in runtime loop."));
       for(const variable of effects.writes){
         const receiver=variable.split(".")[0];
         if(effects.locals.has(receiver.toLowerCase())&&
@@ -682,14 +686,19 @@ export class ApexDataFlowEngine {
         const existing=this.evaluate(variable,changed,depth);
         if(!replaceCollectionAliases(changed,existing,replacement))changed.values.set(target,replacement);
       }
-      // If query occurs inside the body, capture an explicitly unknown version.
+      // Keep incomplete evidence even if another feasible path already
+      // captured a known value at the same invocation.
       for(const site of this.sites){
-        if(site.offset<node.start||site.offset>=node.end)continue;
-        if(this.captures.has(site.offset))continue;
-        this.captures.set(site.offset,[{site,query:unknown("Query occurs in a runtime-dependent loop."),
-          accessLevel:unknown("Loop execution context unknown."),
-          arguments:site.arguments.map(()=>unknown("Loop execution context unknown."))}]);
+        if(site.offset<node.start||site.offset>=node.end||
+          (this.activeQueryOffset!==undefined&&site.offset!==this.activeQueryOffset))continue;
+        const prior=this.captures.get(site.offset)??[];
+        if(prior.some(item=>item.query.kind==="unknown"))continue;
+        const missing=unknown("Invocation occurs in a runtime-dependent loop.");
+        this.captures.set(site.offset,[...prior,{site,query:missing,accessLevel:missing,
+          arguments:site.arguments.map(()=>missing)}]);
       }
+      if(this.argumentProbe&&this.argumentProbe.offset>=node.start&&this.argumentProbe.offset<node.end)
+        this.argumentProbe.results.push(this.argumentProbe.expressions.map(()=>unknown("Runtime loop invocation context is unproven.")));
       return {states:[state,changed],returns:effects.possibleReturn?[unknown("Runtime loop may return an unproven value.")]:[]};
     }
     // Opaque unsupported control flow might modify any previously known symbol.
