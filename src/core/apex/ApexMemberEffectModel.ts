@@ -90,15 +90,30 @@ export class ApexMemberEffectModel{
     const old=this.safe.get(method);if(old!==undefined)return old;
     this.safe.set(method,false);
     if(!method.isStatic||method.visibility!=="private")return false;
-    const locals=this.locals(method);
+    const types=new Map<string,string>();
+    method.parameters.forEach((name,i)=>types.set(name.toLowerCase(),method.parameterTypes?.[i]??""));
+    const collect=(nodes:readonly SourceNode[])=>{for(const node of nodes){
+      const head=node.kind==="for"?node.text??"":node.text??"";
+      const declaration=/^\s*(?:final\s+)?([\w.]+(?:\s*<[\w\s,.<>]+>)?(?:\[\])?)\s+([A-Za-z_]\w*)\s*(?:=|;|:)/i.exec(maskApexSource(head));
+      if(declaration){
+        const key=declaration[2].toLowerCase();
+        if(types.has(key))types.set(key,"");else types.set(key,declaration[1]);
+      }
+      collect(node.body??[]);collect(node.otherwise??[]);
+    }};collect(method.body);
     const check=(source:string):boolean=>{
       const visible=maskApexSource(source);
       if(/\b(?:insert|update|upsert|delete|undelete|merge|throw|switch|try|while|do|new)\b/i.test(visible))return false;
+      const write=/^\s*(?:[\w.]+(?:\s*<[\w\s,.<>]+>)?\s+)?((?:[A-Za-z_]\w*\s*\.\s*)?[A-Za-z_]\w*)\s*(?:=(?!=|>)|\+=|[-*/%&|^]=|\+\+|--)/i.exec(visible);
+      if(write&&!this.key(method,write[1].replace(/\s/g,""))&&!types.has(write[1].toLowerCase()))return false;
       for(const hit of visible.matchAll(/\b([A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)*)\s*\(/g)){
         const name=hit[1].replace(/\s+/g,"");
         if(safeCall.test(name))continue;
         const dot=name.lastIndexOf(".");
-        if(dot>0&&locals.has(name.slice(0,dot).toLowerCase())&&safeMember.test(name.slice(dot+1)))continue;
+        if(dot>0&&safeMember.test(name.slice(dot+1))){
+          const type=types.get(name.slice(0,dot).toLowerCase())??"";
+          if(/^(?:String|List\s*<\s*String\s*>|Set\s*<\s*String\s*>|Map\s*<\s*String\s*,\s*String\s*>|Schema\.FieldSetMember)$/i.test(type))continue;
+        }
         // Allow a uniquely resolved nested local private static helper.
         const candidates=this.methods.filter(m=>m.name.toLowerCase()===name.toLowerCase());
         if(candidates.length===1&&this.replaySafe(candidates[0]))continue;
