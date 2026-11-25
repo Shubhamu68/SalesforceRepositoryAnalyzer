@@ -37,7 +37,7 @@ export interface ApexFlowOptions {
   maxOperations?: number;
   maxDepth?: number;
 }
-interface State { values: ApexEnvironment; stopped?: boolean }
+interface State { values: ApexEnvironment; stopped?: boolean; loopControl?:"break"|"continue" }
 interface FrameResult { states: State[]; returns: ApexValue[] }
 
 /** Identical symbolic states do not represent additional structural query variants. */
@@ -48,7 +48,7 @@ function mergeEquivalentStates(states:State[]):State[] {
     // Completed returns/throws never re-enter the current normal frame.
     // Their return values and invocation evidence have already been recorded
     // independently, so their obsolete environments need not multiply paths.
-    const key=state.stopped?"terminated":apexStateIdentity(state.values,false);
+    const key=state.stopped?"terminated":(state.loopControl??"normal")+"|"+apexStateIdentity(state.values,false);
     if(!distinct.has(key))distinct.set(key,state);
   }
   return [...distinct.values()];
@@ -57,7 +57,7 @@ function mergeEquivalentStates(states:State[]):State[] {
 const DEFAULT_PATHS = 32, DEFAULT_OPERATIONS = 5000, DEFAULT_DEPTH = 6;
 const MAX_LOOP_ITEMS = 100;
 
-function clone(state:State):State {return {values:new Map(state.values),stopped:state.stopped};}
+function clone(state:State):State {return {values:new Map(state.values),stopped:state.stopped,loopControl:state.loopControl};}
 /** Replace an abstract collection in this frame, including tracked aliases
  * and references stored in a bounded nested map. Never mutate snapshot objects. */
 function replaceCollectionAliases(state:State,existing:ApexValue,next:ApexValue):boolean{
@@ -306,6 +306,9 @@ export class ApexDataFlowEngine {
     this.captureArgumentProbe(node.start,node.end,state,depth);
     this.captureCalls(node.start,node.end,state,depth);
     if(!original)return;
+    if(/^(?:break|continue)$/i.test(original)){
+      state.loopControl=original.toLowerCase() as "break"|"continue";return;
+    }
     if(/^throw\b/i.test(original)){
       // Explicit throw ends the current normal path. The parser currently
       // treats catch paths conservatively; do not invent a helper return.
@@ -512,7 +515,7 @@ export class ApexDataFlowEngine {
   }
   private runNode(node:SourceNode,state:State,depth:number):
     {states:State[];returns:ApexValue[]}{
-    if(state.stopped)return {states:[state],returns:[]};
+    if(state.stopped||state.loopControl)return {states:[state],returns:[]};
     if(depth===0&&this.activeSlice&&!this.activeSlice.has(node))return {states:[state],returns:[]};
     if(!this.budget.visit(node.start,this.currentMethod?.name??"(unknown method)")){
       return {states:[{values:new Map([...state.values.keys()].map((k):[string,ApexValue]=>
@@ -585,6 +588,7 @@ export class ApexDataFlowEngine {
         const pin="#iterator:"+node.start;
         const original=clone(state);original.values.set(pin,iterable);
         let states=[original],returns:ApexValue[]=[];
+        let exits:State[]=[];
         const outerKeys=new Set(original.values.keys());
         const locals=declaredLoopLocals(node.body??[]);
         let unsafe=false;
@@ -605,9 +609,13 @@ export class ApexDataFlowEngine {
             const current=frame.values.get(pin);
             if(!frame.stopped&&(current?.kind!=="instanceList"||current.items.length!==iterable.items.length))unsafe=true;
           }
-          states=mergeEquivalentStates(result.states);returns.push(...result.returns);
-          if(unsafe)break;
+          exits=mergeEquivalentStates([...exits,...result.states.filter(frame=>frame.loopControl==="break").map(frame=>({...frame,loopControl:undefined}))]);
+          states=mergeEquivalentStates(result.states.filter(frame=>frame.loopControl!=="break").map(frame=>frame.loopControl==="continue"?{...frame,loopControl:undefined}:frame));
+          returns.push(...result.returns);
+          if(!this.budget.checkPaths([...exits,...states].filter(frame=>!frame.stopped).length,node.start,this.currentMethod?.name??"(unknown method)"))break;
+          if(unsafe||!states.length)break;
         }
+        states=mergeEquivalentStates([...exits,...states]);
         if(unsafe){
           // Never publish earlier captured variants as complete when iteration
           // cardinality or alias state could not be preserved.
@@ -630,6 +638,7 @@ export class ApexDataFlowEngine {
       if((iterable.kind==="collection"||iterable.kind==="records")&&
          node.loopVariable&&iterable.items.length<=MAX_LOOP_ITEMS){
         let states=[clone(state)], returns:ApexValue[]=[];
+        let exits:State[]=[];
         const outerKeys=new Set(state.values.keys());
         const locals=declaredLoopLocals(node.body??[]);
         for(const item of iterable.items){
@@ -651,8 +660,13 @@ export class ApexDataFlowEngine {
                 frame.values.delete(key);
             }
           }
-          states=mergeEquivalentStates(result.states); returns.push(...result.returns);
+          exits=mergeEquivalentStates([...exits,...result.states.filter(frame=>frame.loopControl==="break").map(frame=>({...frame,loopControl:undefined}))]);
+          states=mergeEquivalentStates(result.states.filter(frame=>frame.loopControl!=="break").map(frame=>frame.loopControl==="continue"?{...frame,loopControl:undefined}:frame));
+          returns.push(...result.returns);
+          if(!this.budget.checkPaths([...exits,...states].filter(frame=>!frame.stopped).length,node.start,this.currentMethod?.name??"(unknown method)"))break;
+          if(!states.length)break;
         }
+        states=mergeEquivalentStates([...exits,...states]);
         for(const frame of states){
           if(!state.values.has(node.loopVariable!))frame.values.delete(node.loopVariable!);
           else frame.values.set(node.loopVariable!,state.values.get(node.loopVariable!)!);
@@ -723,7 +737,7 @@ export class ApexDataFlowEngine {
       // Only the source prefix leading to this execution site can contribute
       // to its query value. Helpers (depth>0) must evaluate their full body.
       if(depth===0&&this.activeStopOffset!==undefined&&node.start>this.activeStopOffset)break;
-      if(this.exceeded||states.every(state=>state.stopped))break;
+      if(this.exceeded||states.every(state=>state.stopped||state.loopControl))break;
       // Skip dead nodes once for the whole frontier, avoiding a clone/hash
       // and path-budget check for every otherwise unchanged state.
       if(depth===0&&this.activeSlice&&!this.activeSlice.has(node))continue;
