@@ -109,7 +109,7 @@ Open the Vite URL displayed by the frontend. For desktop packaging, tests, or op
 
 > **Build/version note:** The public `main` branch may contain development changes beyond the separately emailed v0.1.0 ZIP. Verify the exact source commit used for a distributed build before describing it as an official versioned release.
 
-**Packaging distinction:** The browser-portable launcher is not an Electron app; the separate Windows desktop-folder ZIP is an Electron application.
+**Packaging distinction:** The **Windows Portable** browser-based launcher is not an Electron app; the separate Windows desktop-folder ZIP is an Electron application.
 
 ## v0.1.1 — Dynamic SOQL and performance
 
