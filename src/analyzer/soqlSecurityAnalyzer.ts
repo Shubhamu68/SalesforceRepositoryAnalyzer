@@ -378,15 +378,14 @@ export class SoqlSecurityAnalyzer {
     for(const finding of findings){
       const variant=finding.queryVariantId;
       const coverage=variant?queryByLocation.get(variant)?.query.coverage:undefined;
-      if(coverage==="KNOWN_CALLER_CONTEXT")
-        finding.reason += " Only query versions from known callers were checked. Other calls remain unverified.";
-      if(coverage==="CONDITIONAL_FRAMEWORK_CONTEXT")finding.reason += " Checked a possible framework state only; actual job runs and other states remain unverified.";
-      if(variant&&queryByLocation.get(variant)?.query.runtimeFieldCoverage&&finding.field!=="(Runtime-dependent additional fields)")
-        finding.reason += " Only known fields were checked; additional runtime-dependent fields remain unverified.";
-      if(coverage==="PROVEN_PARTIAL_STRUCTURE")
-        finding.reason += (variant&&queryByLocation.get(variant)?.query.permissionEvidence==="AGGREGATED_STRUCTURE")
-          ?" Known references were combined for permission checks, not to build an executable query. Full query coverage is not verified."
-          :" Only known query parts were checked. Placeholder values are for analysis, not execution. Other execution paths remain unverified.";
+      if(variant&&queryByLocation.get(variant)?.query.runtimeFieldCoverage){
+        if(finding.field!=="(Runtime-dependent additional fields)")finding.reason += " Additional runtime fields unverified.";
+      }else if(coverage==="KNOWN_CALLER_CONTEXT")
+        finding.reason += " Other callers unverified.";
+      else if(coverage==="CONDITIONAL_FRAMEWORK_CONTEXT")
+        finding.reason += " Actual job state unverified.";
+      else if(coverage==="PROVEN_PARTIAL_STRUCTURE")
+        finding.reason += " Partial query coverage only.";
     }
     return findings;
   }

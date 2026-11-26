@@ -8,6 +8,7 @@ import { SoqlSecurityFinding } from "../models/SoqlSecurityFinding.js";
 import { SoqlSecurityAnalyzer } from "../analyzer/soqlSecurityAnalyzer.js";
 import { scanApexSoqlWithUnresolved } from "../scanner/apexSoqlScanner.js";
 import type { UnresolvedDynamicSoql } from "../scanner/dynamicSoqlScanner.js";
+import {explainSoqlReview} from "../analyzer/soqlReviewExplanation.js";
 import type { ApexMetadataProvider } from "../core/metadata/ApexMetadataProvider.js";
 import { writeSoqlReport, writeAllPersonasHighPriorityReport, type PersonaHighPriorityReportSection } from "../reporter/soqlReportWriter.js";
 import { recordSoqlCount, timeSoqlPhase, withSoqlPerformance } from "./SoqlPerformanceMetrics.js";
@@ -63,7 +64,7 @@ function unresolvedDynamicFindings(sites: readonly UnresolvedDynamicSoql[]): Soq
     declaredMode: "UNSPECIFIED",
     effectiveMode: "UNKNOWN",
     runtimeImpact: site.securityModeConflict ? "Undetermined" : "Not assessed",
-    reason: site.securityModeConflict ? site.reason + (site.knownVariants || site.partialStructureVariants || site.conditionalFrameworkVariants ? " OLS/FLS checks cover only other verified query versions." : " OLS/FLS analysis was not performed for this query site.") : site.aggregatedPermissionInventories ? `Known query references recovered (${site.aggregatedPermissionInventories} permission inventory/inventories). ${site.reason} OLS/FLS checks cover known objects and fields only, not the full runtime query.` : site.knownVariants || site.partialStructureVariants || site.conditionalFrameworkVariants ? `Only part of the dynamic SOQL could be resolved. ${site.reason} OLS/FLS checks cover known query versions and references only. Other execution paths were not checked.` : `${site.reason} OLS/FLS analysis was not performed for this query.`,
+    reason: site.reportReason ?? explainSoqlReview({...site,...(site.securityModeConflict?{conflict:"Security-mode conflict; effective enforcement and conflicting query permissions not verified."}:{})}),
   }));
 }
 

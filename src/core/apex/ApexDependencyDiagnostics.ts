@@ -104,5 +104,14 @@ export function collectApexDependencyBlockers(){
     return selected.map(i=>blockerGroups[i].label+": "+describe(groups.get(i)!)+".").join(" ")+
       (specific.length>selected.length?" Other unresolved dependencies also remain.":"");
   };
-  return {observe,summarize};
+  const summarizeCompact=():string|undefined=>{
+    const ids=[...groups.keys()].sort((a,b)=>a-b);
+    const id=ids[0];if(id===undefined)return undefined;
+    const event=groups.get(id)![0];
+    // One actionable source location; keep all other events in the trace.
+    const loc=(event.symbol?event.symbol+" ":"")+"("+event.file+":"+event.line+")";
+    const caller=callerDetail(event);
+    return blockerGroups[id].label+": "+loc+(caller?" — "+caller:"")+".";
+  };
+  return {observe,summarize,summarizeCompact};
 }

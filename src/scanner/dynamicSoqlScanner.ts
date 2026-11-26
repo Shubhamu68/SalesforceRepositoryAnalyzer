@@ -17,6 +17,7 @@ import { parseNestedSoql } from "../analyzer/nestedSoqlScopes.js";
 import type { SoqlQuery } from "../models/SoqlQuery.js";
 import {collectSoqlTrace,newSoqlTraceReport,type SoqlTraceReport} from "../analyzer/soqlTraceDiagnostics.js";
 import {collectApexDependencyBlockers,type ApexDependencyObserver} from "../core/apex/ApexDependencyDiagnostics.js";
+import {explainSoqlReview} from "../analyzer/soqlReviewExplanation.js";
 
 /** Failure category, independent of wording shown to users. */
 export type DynamicSoqlFailureKind = "QUERY_DEPENDENCY" | "NO_CAPTURE" | "ENGINE_FAILURE" | "OTHER";
@@ -26,6 +27,8 @@ export interface UnresolvedDynamicSoql {
   /** Immutable call-site identity, even if two sites share a source line. */
   siteId?: string;
   reason: string;
+  /** Concise final evidence summary for report/UI consumers; reason retains diagnostics. */
+  reportReason?:string;
   failureKind?:DynamicSoqlFailureKind;
   /** Compact source evidence retained independently of opt-in trace logging. */
   backwardExplanation?:string;
@@ -173,6 +176,8 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
       // Aggregate only additional permission evidence. Existing variants
       // keep their IDs, occurrence counts and coverage classifications.
       let aggregatedPermissionInventories=0,runtimeFieldCoverage=false;
+      let compactBlocker:string|undefined,bounded=false;
+      const recoveredClauses=new Set<string>();
       if(trace){trace.priorVariants=variants.size;trace.fallback=mode===null?"SKIP_UNKNOWN_ACCESS_MODE":"NOT_ATTEMPTED";}
       if(mode!==null){
         const methods=repositoryIndex?.indexedMethods(filePath,source);
@@ -196,6 +201,8 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
         };
         const traced=variants.size===0&&!local.length&&!callers.length
           ?backtrackSoqlPermissionShapes(source,filePath,site,repositoryIndex,resolveExternal,reportObserver):undefined;
+        compactBlocker=blockers.summarizeCompact();
+        bounded=!!traced?.bounded;
         if(traced&&!traced.queries.length){
           const details=blockers.summarize();
           const structure=structuralCodes.has("SOQL_CONDITIONAL_MERGE_REJECTED")
@@ -248,6 +255,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
           if(!parsed){note("FINAL_ROOT_PARSE_FAILED");continue;}
           const declared=shape.mode;
           variants.add(text);partialStructureVariants++;aggregatedPermissionInventories++;
+          for(const field of shape.fields)recoveredClauses.add(field.context.replace("_"," "));
           if(runtimeOnly)runtimeFieldCoverage=true;
           queries.push({filePath,lineNumber:site.line,query:text,object:parsed.fromName,
             fields:parsed.fields,subqueries:parsed.subqueries,securityMode:declared,
@@ -270,7 +278,11 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
           ". Make both declarations use the intended mode. Actual permission enforcement is unclear; the conflicting query was excluded from OLS/FLS checks. "+
           explanation;
       }
-      unresolved.push({filePath,lineNumber:site.line,siteId,reason:explanation,failureKind,...(backwardExplanation?{backwardExplanation}:{}),...(conflicts.size?{securityModeConflict:true}:{}),...(knownVariants?{knownVariants}:{}),
+      const reportReason=explainSoqlReview({reason,blocker:compactBlocker,knownVariants,partialStructureVariants,
+        conditionalFrameworkVariants,aggregatedPermissionInventories,runtimeFieldCoverage,bounded,
+        recoveredClauses:[...recoveredClauses],
+        ...(conflicts.size&&mode?{conflict:"Security-mode conflict: WITH "+[...conflicts].sort().join(" / WITH ")+" disagrees with AccessLevel."+mode+". Conflicting query permissions not verified."}:{})});
+      unresolved.push({filePath,lineNumber:site.line,siteId,reason:explanation,reportReason,failureKind,...(backwardExplanation?{backwardExplanation}:{}),...(conflicts.size?{securityModeConflict:true}:{}),...(knownVariants?{knownVariants}:{}),
         ...(partialStructureVariants?{partialStructureVariants}:{}),...(conditionalFrameworkVariants?{conditionalFrameworkVariants}:{}),...(aggregatedPermissionInventories?{aggregatedPermissionInventories}:{}),...(runtimeFieldCoverage?{runtimeFieldCoverage:true}:{}),...(trace?{trace}:{})});
     };
     const failure=flow.failures.get(site.offset);
