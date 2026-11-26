@@ -83,6 +83,16 @@ function abstractSoqlExpression(context:ApexDependencyExpressionContext):ApexVal
         return runtimeParameter(date[1],"date","Typed date parser slot");
   return undefined;
 }
+/** Recover a literal ORDER BY suffix separately from an optional unknown
+ * predicate. Never treat it as executable SOQL or verified enforcement. */
+function provenOrderSuffix(prefix:string,suffix:string,line:number):string|undefined{
+  if(suffix.length>16000)return undefined;
+  const field="[A-Za-z_]\\w*(?:\\.[A-Za-z_]\\w*)*(?:\\s+(?:ASC|DESC))?(?:\\s+NULLS\\s+(?:FIRST|LAST))?";
+  const tail=new RegExp("^\\s+ORDER\\s+BY\\s+("+field+"(?:\\s*,\\s*"+field+")*)(?:\\s+LIMIT\\s+(?:\\d+|:[A-Za-z_]\\w*))?(?:\\s+OFFSET\\s+(?:\\d+|:[A-Za-z_]\\w*))?\\s*$","i").exec(suffix);
+  if(!tail)return undefined;
+  const text=prefix+" ORDER BY "+tail[1],shape=simplePermissionShape(text,line);
+  return shape?.mode==="UNSPECIFIED"&&shape.fields.some(f=>f.context==="ORDER_BY")?text:undefined;
+}
 function mergeSoqlAppends(base:Evidence,additions:readonly ApexDependencyAppend<Use>[]):Evidence{
   // Conditional fragments are analyzed independently, not concatenated
   // blindly. Preserve predicate/SELECT/ORDER usage and object/mode.
@@ -213,8 +223,12 @@ export function backtrackSoqlPermissionShapes(source:string,filePath:string,site
             if(boundary){
               const evidence=(before.text+root[0]).trim(),select=simplePermissionShape(evidence,site.line);
               if(select&&select.mode==="UNSPECIFIED"&&select.fields.every(f=>f.context==="SELECT")&&matches(select,proof.annotations)){
-                queries.add(evidence);partialSelectQueries.add(evidence);
+
+                const suffix=tail.trim()===""&&remainder[1]?.kind==="literal"?remainder[1].text:tail;
+                const retained=provenOrderSuffix(evidence,suffix,site.line)??evidence;
+                queries.add(retained);partialSelectQueries.add(retained);
                 note("SOQL_PARTIAL_EFFECT_PREFIX_VALIDATED",select.fields.length);
+                if(retained!==evidence)note("SOQL_ORDER_BY_EVIDENCE_VALIDATED");
               }
             }
           }
@@ -226,9 +240,11 @@ export function backtrackSoqlPermissionShapes(source:string,filePath:string,site
         if(prefix.kind==="literal"&&/^\s*SELECT\s+[\w\s.,()]+\s+FROM\s+[A-Za-z_]\w*\s*$/i.test(prefix.text)&&hole.kind==="hole"&&hole.symbol?.type===optionalWhereType&&suffix.kind==="literal"&&/^ ORDER BY /i.test(suffix.text)){
           const select=simplePermissionShape(prefix.text.trim(),site.line);
           if(select&&select.mode==="UNSPECIFIED"&&select.fields.every(f=>f.context==="SELECT")&&matches(select,proof.annotations)){
-            const evidence=prefix.text.trim();
-            queries.add(evidence);partialSelectQueries.add(evidence);
+
+            const evidence=prefix.text.trim(),retained=provenOrderSuffix(evidence,suffix.text,site.line)??evidence;
+            queries.add(retained);partialSelectQueries.add(retained);
             note("SOQL_SELECT_PREFIX_VALIDATED",select.fields.length);
+            if(retained!==evidence)note("SOQL_ORDER_BY_EVIDENCE_VALIDATED");
           }
         }
       }

@@ -123,7 +123,7 @@ export class SoqlSecurityAnalyzer {
     const modeResults = await timeSoqlPhase("execution.modes", () => Promise.all(queries.map((query) =>
       this.executionModeResolver.resolve(query.query, query.filePath).then((mode):SoqlExecutionMode =>
         query.selectPrefixOnly
-          ? {...mode, declaredMode:query.dynamicAccessLevel??"UNSPECIFIED", effectiveMode:"UNKNOWN" as const, enforcement:"UNKNOWN" as const, description:"SELECT and FROM are proven; runtime query text and effective enforcement remain unverified."}
+          ? {...mode, declaredMode:query.dynamicAccessLevel??"UNSPECIFIED", effectiveMode:"UNKNOWN" as const, enforcement:"UNKNOWN" as const, description:"Known query references only; runtime query text and effective enforcement remain unverified."}
           : query.dynamicAccessLevel && mode.declaredMode === "UNSPECIFIED"
             ? resolveSoqlExecutionMode(query.dynamicAccessLevel, mode.apiVersion)
             : mode)

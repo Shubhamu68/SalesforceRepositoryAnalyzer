@@ -427,8 +427,8 @@ test("source-backed report pipeline retains independently proven SELECT fields w
    const events:Array<{code:string;line:number}>=[];
    const result=await engine.analyze(filePath,ctx=>backtrackSoqlPermissionShapes(source,filePath,site,index,ctx.resolveExternal,e=>events.push({code:e.code,line:e.line})));
    assert.equal(result.partialSelectQueries?.length,2,JSON.stringify({result,events}));
-   assert.deepEqual(fields(result.queries.filter(q=>q.includes("FROM Account"))),new Set(["SELECT:Id","SELECT:Name","SELECT:CreatedDate","SELECT:ParentId","SELECT:Parent.Name","SELECT:Parent.Id","SELECT:Industry","SELECT:Phone","SELECT:Type"]));
-   assert.deepEqual(fields(result.queries.filter(q=>q.includes("FROM Contact"))),new Set(["SELECT:Id","SELECT:LastName","SELECT:CreatedDate","SELECT:AccountId","SELECT:Account.Name","SELECT:Account.Id","SELECT:Email","SELECT:Title"]));
+   assert.deepEqual(fields(result.queries.filter(q=>q.includes("FROM Account"))),new Set(["SELECT:Id","SELECT:Name","SELECT:CreatedDate","SELECT:ParentId","SELECT:Parent.Name","SELECT:Parent.Id","SELECT:Industry","SELECT:Phone","SELECT:Type","ORDER_BY:Name","ORDER_BY:Id"]));
+   assert.deepEqual(fields(result.queries.filter(q=>q.includes("FROM Contact"))),new Set(["SELECT:Id","SELECT:LastName","SELECT:CreatedDate","SELECT:AccountId","SELECT:Account.Name","SELECT:Account.Id","SELECT:Email","SELECT:Title","ORDER_BY:LastName","ORDER_BY:Id"]));
    assert.ok(events.some(e=>e.code==="INDEXED_LOOP_ITERABLE_RESOLVED"));
    assert.ok(events.some(e=>e.code==="EXACT_SCALAR_ASSIGNMENT_RESOLVED"));
    assert.equal(result.bounded,false);
@@ -510,8 +510,8 @@ test("three metadata configurations recover SELECT fields with reference target 
      const result=await engine.analyze(filePath,ctx=>backtrackSoqlPermissionShapes(source,filePath,site,index,ctx.resolveExternal,e=>events.push(e)));
      const detail=JSON.stringify({scenario,result,events});
      assert.equal(result.partialSelectQueries?.length,3,detail);
-     assert.deepEqual(fields(result.queries.filter(q=>q.includes("FROM Account"))),new Set(["SELECT:Id","SELECT:Name","SELECT:CreatedDate","SELECT:ParentId","SELECT:Parent.Name","SELECT:Parent.Id","SELECT:Phone"]),detail);
-     const expected=["SELECT:Id",...rootFields.Case.map(f=>"SELECT:"+f),...(scenario==="consensus"?["SELECT:Owner.Name"]:[])];
+     assert.deepEqual(fields(result.queries.filter(q=>q.includes("FROM Account"))),new Set(["SELECT:Id","SELECT:Name","SELECT:CreatedDate","SELECT:ParentId","SELECT:Parent.Name","SELECT:Parent.Id","SELECT:Phone","ORDER_BY:Id"]),detail);
+     const expected=["SELECT:Id",...rootFields.Case.map(f=>"SELECT:"+f),...(scenario==="consensus"?["SELECT:Owner.Name"]:[]),"ORDER_BY:Id"];
      assert.deepEqual(fields(result.queries.filter(q=>q.includes("FROM Case"))),new Set(expected),detail);
      assert.equal(result.bounded,false,detail);
      assert.ok(events.some(e=>e.code===(scenario==="consensus"?"HELPER_SCHEMA_EFFECT_CONSENSUS":"HELPER_SCHEMA_EFFECT_PARTIAL")),detail);
@@ -578,10 +578,10 @@ test("offline replay of mixed DTO properties retains 17 proven SELECT references
      const detail=JSON.stringify({result,events});
      assert.equal(result.partialSelectQueries?.length,3,detail);
      const selected=result.queries.filter(q=>q.includes("FROM Line__c"));
-     assert.deepEqual(fields(selected),new Set(["SELECT:Id",...rootFields.Line__c.map(f=>"SELECT:"+f),"SELECT:Header__r.Id","SELECT:Requested__c","SELECT:Gross__c","SELECT:Net__c"]),detail);
+     assert.deepEqual(fields(selected),new Set(["SELECT:Id",...rootFields.Line__c.map(f=>"SELECT:"+f),"SELECT:Header__r.Id","SELECT:Requested__c","SELECT:Gross__c","SELECT:Net__c","ORDER_BY:Header__c","ORDER_BY:Header__r.CreatedDate","ORDER_BY:Id"]),detail);
      assert.ok(selected.some(q=>q.includes("FORMAT(Header__r.CreatedDate)")&&q.includes("FORMAT(Header__r.ShipDate__c)")&&q.includes("FORMAT(Header__r.DueDate__c)")),detail);
-     assert.equal(fields(result.queries.filter(q=>q.includes("FROM Bin__c"))).size,7,detail);
-     assert.equal(fields(result.queries.filter(q=>q.includes("FROM Allocation__c"))).size,9,detail);
+     assert.equal(fields(result.queries.filter(q=>q.includes("FROM Bin__c"))).size,8,detail);
+     assert.equal(fields(result.queries.filter(q=>q.includes("FROM Allocation__c"))).size,10,detail);
      assert.ok(events.some(e=>e.code==="HELPER_SET_UNKNOWN_ADDITION"&&e.schemaPath==="Line__c.Header__r.CreatedById"),detail);
      assert.equal(result.bounded,false,detail);
    }
@@ -597,4 +597,18 @@ test("offline replay of mixed DTO properties retains 17 proven SELECT references
  await run(replay.provider);
  assert.equal(replay.stats.missing,1);
  assert.deepEqual(replay.missingRequests,[{kind:"schema",name:"User"}]);
+});
+
+
+test("literal sort fields survive an unknown WHERE; a raw sort hole remains unverified",()=>{
+ const source="public class Q {public static void run(String w){String q='SELECT Id FROM Account'+(String.isNotBlank(w)?(' WHERE '+w):'')+' ORDER BY Name DESC, Id ASC';Database.queryWithBinds(q,new Map<String,Object>(),AccessLevel.USER_MODE);}}";
+ const result=evidence([{filePath:"Q.cls",source}]);
+ assert.deepEqual(fields(result.queries),new Set(["SELECT:Id","ORDER_BY:Name","ORDER_BY:Id"]));
+ assert.equal(result.partialSelectQueries?.length,1);
+ const scan=extractDynamicSoqlQueries(source,"Q.cls",undefined,new ApexRepositoryMethodIndex([{filePath:"Q.cls",source}]));
+ assert.equal(scan.unresolved.length,1);
+ assert.ok(scan.queries.every(q=>q.selectPrefixOnly));
+ const conflict=source.replace("Name DESC, Id ASC","Name WITH SYSTEM_MODE");
+ const unsafe=evidence([{filePath:"Q.cls",source:conflict}]);
+ assert.ok(![...fields(unsafe.queries)].some(f=>f.startsWith("ORDER_BY:")));
 });
