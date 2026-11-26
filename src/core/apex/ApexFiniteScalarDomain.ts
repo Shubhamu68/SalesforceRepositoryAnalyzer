@@ -1,6 +1,8 @@
 import {maskApexSource,matchingPair,splitApexTopLevel,stripApexComments,type IndexedApexMethod,type SourceNode} from "./ApexSourceModel.js";
 import {addApexValues,evaluateApexExpression,textValue,type ApexValue} from "./ApexValueEvaluator.js";
 import {canonicalApexType} from "./ApexTypeSystem.js";
+import {apexSymbols} from "./ApexSymbolTable.js";
+import {apexPrefixBefore} from "./ApexSourceContract.js";
 
 const clean=(s:string)=>stripApexComments(s).trim();
 const lit=/^'(?:\\.|[^'\\])*'$/s;
@@ -94,4 +96,50 @@ export function proveConditionalStringAssignmentDomain(node:SourceNode,target:st
     values.push(last);break;
   }
   return [...new Map(values.map(v=>[JSON.stringify(v),v])).values()];
+}
+
+
+/** Stronger, sink-local completeness certificate. Reuse the finite domain
+ * primitives, but admit only a complete lexical construction from a fresh
+ * local declaration to the use. No inference from candidate counts, traces
+ * or partial caller samples. Empty/null values excluded by a proven exit
+ * guard are not reaching values. */
+export function proveFiniteStringUseDomain(source:string,methods:readonly IndexedApexMethod[],method:IndexedApexMethod,target:string,offset:number):ApexValue[]|undefined{
+  if(!ident.test(target)||/\bclass\s+String\b/i.test(maskApexSource(source)))return undefined;
+  const prefix=apexPrefixBefore(method.body,offset);
+  if(!prefix||prefix.length<2||prefix.length>8)return undefined;
+  const symbols=apexSymbols(source,methods);
+  if(symbols.lookup(method,target,offset)!=="string"||symbols.lookup(method,"String",offset)||symbols.hasLocalBinding(method,"String",offset))return undefined;
+  const declaration=new RegExp("^String\\s+"+target+"\\s*=\\s*([\\s\\S]+);$","i");
+  const first=prefix[0].kind==="statement"?declaration.exec(clean(prefix[0].text??"")):null;
+  if(!first)return undefined;
+  // First pattern: a complete private helper switch with a terminating
+  // blank-value guard. Do not require a concrete runtime selector.
+  const call=/^([A-Za-z_]\w*)\s*\(\s*([A-Za-z_]\w*|this\.[A-Za-z_]\w*)\s*\)$/i.exec(clean(first[1]));
+  if(call&&prefix.length===2){
+    const candidates=methods.filter(m=>symbols.sameOwner(method,m)&&m.name.toLowerCase()===call[1].toLowerCase());
+    if(candidates.length!==1||!candidates[0].isStatic&&method.isStatic||
+      symbols.expressionType(method,call[2],prefix[0].start)!=="integer")return undefined;
+    const arms=proveScalarSwitchReturnDomain(source,candidates[0]);
+    const guard=prefix[1];
+    const pattern=new RegExp("^String\\s*\\.\\s*isBlank\\s*\\(\\s*"+target+"\\s*\\)(?:\\s*\\|\\|\\s*(?:this\\.)?[A-Za-z_]\\w*\\s*==\\s*null)?$","i");
+    if(!arms||guard.kind!=="if"||!pattern.test(clean(guard.condition??""))||guard.otherwise?.length||
+      guard.body?.length!==1||guard.body[0].kind!=="statement"||!/^return\b/i.test(clean(guard.body[0].text??"")))return undefined;
+    return arms.map(a=>a.value).filter(v=>{const t=one(v);return t!==undefined&&!!t.trim();});
+  }
+  // Second pattern: fresh literal, one exhaustive assignment chain,
+  // followed by literal appends only. Retain the no-match alternative.
+  if(prefix[1].kind!=="if")return undefined;
+  const seed=literalConcat(first[1],new Map());
+  if(!seed)return undefined;
+  let values=proveConditionalStringAssignmentDomain(prefix[1],target,method,seed);
+  if(!values)return undefined;
+  const append=new RegExp("^"+target+"\\s*\\+=\\s*([\\s\\S]+);$","i");
+  for(const n of prefix.slice(2)){
+    const m=n.kind==="statement"?append.exec(clean(n.text??"")):null;
+    const suffix=m?literalConcat(m[1],new Map()):undefined;
+    if(!suffix)return undefined;
+    values=values.map(v=>addApexValues(v,suffix));
+  }
+  return values.every(v=>one(v)!==undefined)?values:undefined;
 }

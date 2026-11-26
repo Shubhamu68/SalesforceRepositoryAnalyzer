@@ -16,6 +16,7 @@ if(!snapshotFile||!repositoryPath){
     const include=(file:string)=>!filter||path.basename(file).toLowerCase()===filter.toLowerCase();
     console.log(JSON.stringify({mode:"OFFLINE_METADATA_REPLAY",metadata:replay.stats,missingRequests:replay.missingRequests,
       queries:result.queries.length,unresolved:result.unresolvedDynamic.length,
+      referenceCoverage:Object.fromEntries([...new Set(result.unresolvedDynamic.map(s=>s.referenceCoverage??"UNRESOLVED"))].map(k=>[k,result.unresolvedDynamic.filter(s=>(s.referenceCoverage??"UNRESOLVED")===k).length])),
       selectedQueries:result.queries.filter(q=>include(q.filePath)),
       selectedUnresolved:result.unresolvedDynamic.filter(q=>include(q.filePath))},null,2));
     if(replay.stats.missing)process.exitCode=2;

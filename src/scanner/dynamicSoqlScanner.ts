@@ -18,6 +18,7 @@ import type { SoqlQuery } from "../models/SoqlQuery.js";
 import {collectSoqlTrace,newSoqlTraceReport,type SoqlTraceReport} from "../analyzer/soqlTraceDiagnostics.js";
 import {collectApexDependencyBlockers,type ApexDependencyObserver} from "../core/apex/ApexDependencyDiagnostics.js";
 import {explainSoqlReview} from "../analyzer/soqlReviewExplanation.js";
+import {verifyFinitePermissionCoverage,type SoqlReferenceCoverage,type FinitePermissionCoverage} from "../analyzer/soqlReferenceCoverage.js";
 
 /** Failure category, independent of wording shown to users. */
 export type DynamicSoqlFailureKind = "QUERY_DEPENDENCY" | "NO_CAPTURE" | "ENGINE_FAILURE" | "OTHER";
@@ -29,6 +30,9 @@ export interface UnresolvedDynamicSoql {
   reason: string;
   /** Concise final evidence summary for report/UI consumers; reason retains diagnostics. */
   reportReason?:string;
+  /** Independent of actual persona grants and runtime execution success. */
+  referenceCoverage?:SoqlReferenceCoverage;
+  finiteCoverage?:FinitePermissionCoverage;
   failureKind?:DynamicSoqlFailureKind;
   /** Compact source evidence retained independently of opt-in trace logging. */
   backwardExplanation?:string;
@@ -177,6 +181,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
       // keep their IDs, occurrence counts and coverage classifications.
       let aggregatedPermissionInventories=0,runtimeFieldCoverage=false;
       let compactBlocker:string|undefined,bounded=false,unknownWhere=false,unknownOrder=false,incompleteSelect=false;
+      let runtimeInput=false,metadataOrHelper=false;
       const recoveredClauses=new Set<string>();
       if(trace){trace.priorVariants=variants.size;trace.fallback=mode===null?"SKIP_UNKNOWN_ACCESS_MODE":"NOT_ATTEMPTED";}
       if(mode!==null){
@@ -196,6 +201,8 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
         const structuralCodes=new Set<string>();
         const reportObserver:ApexDependencyObserver=event=>{
           blockers.observe(event);observe?.(event);
+          if(event.code==="NO_PROVEN_CALLER")runtimeInput=true;
+          if(["LABEL_UNAVAILABLE","METADATA_ROWS_UNAVAILABLE","METADATA_RESULT_UNAVAILABLE","SCHEMA_READ_UNPROVEN","DESCRIBE_UNAVAILABLE","SHARED_HELPER_UNPROVEN"].includes(event.code))metadataOrHelper=true;
           if(event.code==="SOQL_OPTIONAL_WHERE_UNVERIFIED")unknownWhere=true;
           if(event.code==="SOQL_ORDER_BY_EVIDENCE_UNVERIFIED")unknownOrder=true;
           if(event.code==="SOQL_PARTIAL_EFFECT_PREFIX_VALIDATED")incompleteSelect=true;
@@ -286,11 +293,17 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
           ". Make both declarations use the intended mode. Actual permission enforcement is unclear; the conflicting query was excluded from OLS/FLS checks. "+
           explanation;
       }
-      const reportReason=explainSoqlReview({reason,blocker:compactBlocker,knownVariants,partialStructureVariants,
+      const finiteCoverage=!bounded&&!conflicts.size&&aggregatedPermissionInventories&&
+        !repositoryIndex?.hasSourceClass("String")&&!repositoryIndex?.hasSourceClass("Database")
+        ?verifyFinitePermissionCoverage(source,site,queries.filter(q=>q.querySiteId===siteId),mode,repositoryIndex?.indexedMethods(filePath,source)):undefined;
+      const referenceCoverage:SoqlReferenceCoverage=conflicts.size?"SECURITY_MODE_CONFLICT":finiteCoverage?"COMPLETE_FINITE_DOMAIN":
+        knownVariants||partialStructureVariants||conditionalFrameworkVariants?"PARTIAL_REFERENCES":
+        bounded?"ANALYSIS_LIMIT":runtimeInput?"RUNTIME_DEPENDENT":metadataOrHelper?"METADATA_OR_HELPER_UNAVAILABLE":"UNRESOLVED";
+      const reportReason=explainSoqlReview({reason,blocker:compactBlocker,referenceCoverage,finiteCoverage,knownVariants,partialStructureVariants,
         conditionalFrameworkVariants,aggregatedPermissionInventories,runtimeFieldCoverage,bounded,
         recoveredClauses:[...recoveredClauses],unknownWhere,unknownOrder,incompleteSelect,
         ...(conflicts.size&&mode?{conflict:"Security-mode conflict: WITH "+[...conflicts].sort().join(" / WITH ")+" disagrees with AccessLevel."+mode+". Conflicting query permissions not verified."}:{})});
-      unresolved.push({filePath,lineNumber:site.line,siteId,reason:explanation,reportReason,failureKind,...(backwardExplanation?{backwardExplanation}:{}),...(conflicts.size?{securityModeConflict:true}:{}),...(knownVariants?{knownVariants}:{}),
+      unresolved.push({filePath,lineNumber:site.line,siteId,reason:explanation,reportReason,referenceCoverage,...(finiteCoverage?{finiteCoverage}:{}),failureKind,...(backwardExplanation?{backwardExplanation}:{}),...(conflicts.size?{securityModeConflict:true}:{}),...(knownVariants?{knownVariants}:{}),
         ...(partialStructureVariants?{partialStructureVariants}:{}),...(conditionalFrameworkVariants?{conditionalFrameworkVariants}:{}),...(aggregatedPermissionInventories?{aggregatedPermissionInventories}:{}),...(runtimeFieldCoverage?{runtimeFieldCoverage:true}:{}),...(trace?{trace}:{})});
     };
     const failure=flow.failures.get(site.offset);

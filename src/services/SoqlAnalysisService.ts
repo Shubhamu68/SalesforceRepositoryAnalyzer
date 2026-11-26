@@ -9,6 +9,7 @@ import { SoqlSecurityAnalyzer } from "../analyzer/soqlSecurityAnalyzer.js";
 import { scanApexSoqlWithUnresolved } from "../scanner/apexSoqlScanner.js";
 import type { UnresolvedDynamicSoql } from "../scanner/dynamicSoqlScanner.js";
 import {explainSoqlReview} from "../analyzer/soqlReviewExplanation.js";
+import {needsDynamicCoverageReview} from "../analyzer/soqlReferenceCoverage.js";
 import type { ApexMetadataProvider } from "../core/metadata/ApexMetadataProvider.js";
 import { writeSoqlReport, writeAllPersonasHighPriorityReport, type PersonaHighPriorityReportSection } from "../reporter/soqlReportWriter.js";
 import { recordSoqlCount, timeSoqlPhase, withSoqlPerformance } from "./SoqlPerformanceMetrics.js";
@@ -108,7 +109,10 @@ export class SoqlAnalysisService {
     // Coverage advisories for accepted runtime-field inventories are emitted
     // by the security analyzer using its already resolved API-version mode.
     const runtimeSites=new Set(queries.filter(q=>q.runtimeFieldCoverage).map(q=>q.querySiteId));
-    findings.push(...unresolvedDynamicFindings(scanned.unresolvedDynamic.filter(site=>!site.runtimeFieldCoverage||!runtimeSites.has(site.siteId))));
+    const reviewSites=scanned.unresolvedDynamic.filter(site=>needsDynamicCoverageReview(site,queries));
+    recordSoqlCount("coverage.complete_finite_sites",scanned.unresolvedDynamic.length-reviewSites.length);
+    recordSoqlCount("coverage.dynamic_review_sites",reviewSites.length);
+    findings.push(...unresolvedDynamicFindings(reviewSites.filter(site=>!site.runtimeFieldCoverage||!runtimeSites.has(site.siteId))));
     recordSoqlCount("findings", findings.length);
 
     const outputDirectory = typeof this.outputDirectory === "function"
