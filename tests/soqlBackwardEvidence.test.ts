@@ -736,3 +736,13 @@ test("phase 4.1: metadata row-specific user and default field domains stay corre
  assert.deepEqual(fields(result.queries.filter(q=>q.includes("FROM Account"))),new Set(["SELECT:Id","WHERE:Name","WHERE:Industry","WHERE:Type"]),JSON.stringify(result));
  assert.deepEqual(fields(result.queries.filter(q=>q.includes("FROM Contact"))),new Set(["SELECT:Id","WHERE:Email","WHERE:Title"]),JSON.stringify(result));
 });
+
+
+test("phase 4.1: scoped bind names are valid in separate switch branches but not outside their declaration",()=>{
+ const source=configuredPredicateFixture.replace("String b='b'+idx;clauses.add(f+' = :'+b);binds.put(b,item.value);",
+   "switch on k {when 'text' {String b='b'+idx+'a';clauses.add(f+' LIKE :'+b);binds.put(b,item.value);}when else {String b='b'+idx+'b';clauses.add(f+' = :'+b);binds.put(b,item.value);}}");
+ assert.deepEqual(fields(evidence([{filePath:"ConfigFixture.cls",source}],configuredSchema).queries),
+   new Set(["SELECT:Id","WHERE:Name","WHERE:Industry","WHERE:Type","WHERE:AnnualRevenue"]));
+ const escaped=configuredPredicateFixture.replace("String b='b'+idx;clauses.add(f+' = :'+b);","if(k=='text'){String b='b'+idx;}clauses.add(f+' = :'+b);");
+ assert.equal(evidence([{filePath:"ConfigFixture.cls",source:escaped}],configuredSchema).queries.length,0);
+});

@@ -141,27 +141,41 @@ function boundWriter(c:Context,name:string,input:string):boolean{
       !identifier.test(p[8]??"")||p[9]!==")"||p[10]!==";")return false;
     bindNames.add(p[8]);adds++;i+=10;
   }
-  const visible=maskApexSource(body(c,m));
-  const bindUses=[...visible.matchAll(new RegExp("\\b"+target+"\\s*\\.\\s*add\\s*\\(\\s*"+field+"\\s*\\+[\\s\\S]*?\\+\\s*([A-Za-z_]\\w*)\\s*\\)\\s*;","gi"))];
-  if(bindUses.length!==adds||bindUses.some(hit=>!apexSymbols(c.source,c.methods).hasLocalBinding(m,hit[1],m.start+hit.index!)||
-    apexSymbols(c.source,c.methods).lookup(m,hit[1],m.start+hit.index!)!=="string"))return false;
-  for(const bind of bindNames){
-    if(m.parameters.some(p=>same(p,bind)))return false;
-    let declarations=0;
-    for(let i=0;i<parts.length;i++){
-      if(parts[i]!==bind)continue;
-      if(parts[i-1]==="string"&&parts[i+1]==="="){
-        const end=parts.indexOf(";",i+2),expr=parts.slice(i+2,end);
-        if(end<0||!(expr.length===3||expr.length===5)||!/^'[A-Za-z_]\w*'$/.test(expr[0])||expr[1]!=="+"||expr[2]!==idx||
-          expr.length===5&&(expr[3]!=="+"||!/^'[A-Za-z_]\w*'$/.test(expr[4])))return false;
-        declarations++;
-      }else if(parts[i-1]==="."||["=","++","--"].includes(parts[i+1])||["++","--"].includes(parts[i-1])||
-        ["+","-","*","/"].includes(parts[i+1])&&parts[i+2]==="=")return false;
+  if(!adds||[...bindNames].some(b=>reserved.has(b)||m.parameters.some(p=>same(p,b))))return false;
+  // The generic statement parser deliberately treats switch as opaque.
+  // This narrow token proof checks only lexically scoped bind-name
+  // declarations and their uses, without interpreting branch execution.
+  const scopes:Array<Set<string>>=[new Set()];
+  const bindMap=m.parameters[6].toLowerCase();
+  const visible=(name:string)=>scopes.some(scope=>scope.has(name));
+  let parens=0,verified=0;
+  for(let i=0;i<parts.length;i++){
+    const p=parts[i];
+    if(p==="{"){scopes.push(new Set());continue;}
+    if(p==="}"){if(scopes.length===1)return false;scopes.pop();continue;}
+    if(p==="("){parens++;continue;}
+    if(p===")"){if(--parens<0)return false;continue;}
+    if(p==="string"&&bindNames.has(parts[i+1])&&parts[i+2]==="="){
+      const name=parts[i+1],end=parts.indexOf(";",i+3),expr=parts.slice(i+3,end);
+      if(parens!==0||i>0&&!["{","}",";"].includes(parts[i-1])||visible(name)||end<0||
+        !(expr.length===3||expr.length===5)||!/^'[A-Za-z_]\w*'$/.test(expr[0])||expr[1]!=="+"||expr[2]!==idx||
+        expr.length===5&&(expr[3]!=="+"||!/^'[A-Za-z_]\w*'$/.test(expr[4])))return false;
+      scopes.at(-1)!.add(name);i=end;continue;
     }
-    if(!declarations)return false;
+    if(p===target){
+      if(!visible(parts[i+8]))return false;
+      verified++;i+=10;continue;
+    }
+    if(p===idx||p===field)return false;
+    if(bindNames.has(p)){
+      // Only the first argument of the bind map's put() may read a
+      // generated name outside the proven WHERE append itself.
+      if(!visible(p)||parts[i-4]!==bindMap||parts[i-3]!=="."||parts[i-2]!=="put"||parts[i-1]!=="("||parts[i+1]!==",")return false;
+    }
   }
-  return adds>0;
+  return verified===adds&&scopes.length===1&&parens===0;
 }
+
 function rawClassifier(c:Context,name:string):boolean{
   const m=helper(c,name,["string"],"boolean");
   return !!m&&!!match(body(c,m),
