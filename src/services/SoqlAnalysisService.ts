@@ -10,7 +10,7 @@ import { scanApexSoqlWithUnresolved } from "../scanner/apexSoqlScanner.js";
 import type { UnresolvedDynamicSoql } from "../scanner/dynamicSoqlScanner.js";
 import {explainSoqlReview} from "../analyzer/soqlReviewExplanation.js";
 import {needsDynamicCoverageReview} from "../analyzer/soqlReferenceCoverage.js";
-import {applyExistingVariantReporting} from "../analyzer/soqlExistingVariantReporting.js";
+import {applyLimitedCoverageReporting} from "../analyzer/soqlExistingVariantReporting.js";
 import type { ApexMetadataProvider } from "../core/metadata/ApexMetadataProvider.js";
 import { writeSoqlReport, writeAllPersonasHighPriorityReport, type PersonaHighPriorityReportSection } from "../reporter/soqlReportWriter.js";
 import { recordSoqlCount, timeSoqlPhase, withSoqlPerformance } from "./SoqlPerformanceMetrics.js";
@@ -109,12 +109,13 @@ export class SoqlAnalysisService {
     });
     // Coverage advisories for accepted runtime-field inventories are emitted
     // by the security analyzer using its already resolved API-version mode.
-    const {findings,handledSiteIds}=applyExistingVariantReporting(scanned.unresolvedDynamic,queries,evaluatedFindings);
+    const {findings,handledSiteIds,existingSiteIds,partialSiteIds}=applyLimitedCoverageReporting(scanned.unresolvedDynamic,queries,evaluatedFindings);
     const runtimeSites=new Set(queries.filter(q=>q.runtimeFieldCoverage).map(q=>q.querySiteId));
     const incompleteSites=scanned.unresolvedDynamic.filter(site=>needsDynamicCoverageReview(site,queries));
     const reviewSites=incompleteSites.filter(site=>!site.siteId||!handledSiteIds.has(site.siteId));
     recordSoqlCount("coverage.complete_finite_sites",scanned.unresolvedDynamic.length-incompleteSites.length);
-    recordSoqlCount("coverage.existing_variant_sites",handledSiteIds.size);
+    recordSoqlCount("coverage.existing_variant_sites",existingSiteIds.size);
+    recordSoqlCount("coverage.partial_reference_sites",partialSiteIds.size);
     recordSoqlCount("coverage.dynamic_review_sites",reviewSites.length);
     findings.push(...unresolvedDynamicFindings(reviewSites.filter(site=>!site.runtimeFieldCoverage||!runtimeSites.has(site.siteId))));
     recordSoqlCount("findings", findings.length);
@@ -220,7 +221,7 @@ export class SoqlAnalysisService {
           // Apply the same persona-specific reporting policy as the normal
           // report. Only confirmed denials in the scoped variant domain can
           // change priority; unknown verification results remain reviews.
-          const {findings}=applyExistingVariantReporting(scanned.unresolvedDynamic,queries,evaluated);
+          const {findings}=applyLimitedCoverageReporting(scanned.unresolvedDynamic,queries,evaluated);
           const high = findings.filter((finding) => finding.criticality === "High");
           recordSoqlCount("findings.high", high.length);
           sections[index] = { personaName: persona.name, queryCount: queries.length, findings: high };

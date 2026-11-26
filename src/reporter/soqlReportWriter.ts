@@ -2,7 +2,7 @@ import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import ExcelJS from "exceljs";
 import { timeSoqlPhase, timeSoqlSync } from "../services/SoqlPerformanceMetrics.js";
-import { EXISTING_VARIANT_LIMITATION } from "../analyzer/soqlExistingVariantReporting.js";
+import { EXISTING_VARIANT_LIMITATION, PARTIAL_REFERENCE_LIMITATION } from "../analyzer/soqlExistingVariantReporting.js";
 
 import {
   SoqlSecurityFinding,
@@ -190,6 +190,7 @@ interface ConciseFinding {
     criticality: string;
     explanation: string;
     limitedVariantCoverage?:boolean;
+    limitedPartialCoverage?:boolean;
   }>;
 }
 
@@ -260,6 +261,7 @@ function buildConciseFindings(
         criticality: finding.criticality ?? (finding.severity === "ERROR" ? "High" : "Unable to verify"),
         explanation: finding.reason,
         ...(finding.limitedVariantCoverage?{limitedVariantCoverage:true}:{}),
+        ...(finding.limitedPartialCoverage?{limitedPartialCoverage:true}:{}),
         ...(finding.relationshipPath ? { relationshipPath: finding.relationshipPath } : {}),
         ...(finding.queryLevel ? { queryLevel: finding.queryLevel } : {}),
         ...(finding.apiVersion !== undefined ? { apiVersion: finding.apiVersion } : {}),
@@ -278,7 +280,9 @@ function buildConciseFindings(
     const isMixed = entry.references.some(ref => ref.criticality !== highest.criticality);
     const coverageNote=entry.references.some(ref=>ref.limitedVariantCoverage)&&!highest.limitedVariantCoverage
       ? " Some occurrences have limited query-variant coverage. "+EXISTING_VARIANT_LIMITATION : "";
-    entry.explanation = highest.explanation + coverageNote + (isMixed
+    const partialNote=entry.references.some(ref=>ref.limitedPartialCoverage)&&!highest.limitedPartialCoverage
+      ? " Some occurrences have partial reference coverage. "+PARTIAL_REFERENCE_LIMITATION : "";
+    entry.explanation = highest.explanation + coverageNote + partialNote + (isMixed
       ? " Severity differs across SOQL queries. The highest severity is shown; see Apex Classes for locations."
       : "");
   }
@@ -371,7 +375,7 @@ async function writeSummaryWorkbook(
 
   summarySheet.addRow([]);
   summarySheet.mergeCells("A5:H5");
-  summarySheet.getCell("A5").value = "High = confirmed missing Read with enforced SOQL access; Unable to verify = REVIEW, manual assessment required (also red); Low = advisory or org-verified Read. Mixed findings show the highest severity. Dynamic SOQL uses repository initializer snapshots; detected static writes and direct collection aliases invalidate those snapshots. Indirect effects may remain unresolved; reconstructed queries are repository-based, not runtime traces.";
+  summarySheet.getCell("A5").value = "High = confirmed missing Read with enforced SOQL access or in recovered dynamic-query evidence; Unable to verify = unresolved permission or analysis review; Low = advisory or org-verified Read. High does not always mean a runtime access failure. Mixed findings show the highest severity. Dynamic SOQL uses repository initializer snapshots; detected static writes and direct collection aliases invalidate those snapshots. Indirect effects may remain unresolved; reconstructed queries are repository-based, not runtime traces.";
   summarySheet.getCell("A5").font = { italic: true, color: { argb: "FF60748D" }, size: 10 };
   summarySheet.getCell("A5").alignment = { wrapText: true, vertical: "middle" };
   summarySheet.getRow(5).height = 32;

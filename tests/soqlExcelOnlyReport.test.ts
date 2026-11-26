@@ -182,3 +182,34 @@ test("existing variants: actual Excel high for confirmed denial, low for known g
    assert.equal(rows.filter(r=>r.getCell(5).value==="Unable to verify").length,2);
  }finally{await rm(root,{recursive:true,force:true});}
 });
+
+
+test("partial reference reporting reaches Excel without changing genuine runtime or permission reviews",async()=>{
+ const root=await mkdtemp(path.join(os.tmpdir(),"sf-partial-references-excel-"));
+ try{
+  const source=[
+    "public class Q {",
+    " public static void run(String w){String q='SELECT Id,Name FROM Account WHERE Id=:rid';if(String.isNotBlank(w)){q+=' AND '+w;}Database.queryWithBinds(q,new Map<String,Object>(),AccessLevel.USER_MODE);}",
+    " public static void other(String obj){Database.query('SELECT Id FROM '+obj);}",
+    "}"
+  ].join("\n");
+  await writeFile(path.join(root,"Q.cls"),source);
+  const analyzer={analyze:async(_persona:Persona,queries:import("../src/models/SoqlQuery.js").SoqlQuery[])=>{
+    const q=queries.find(q=>q.permissionEvidence==="AGGREGATED_STRUCTURE")!;
+    assert.ok(q&&q.selectPrefixOnly,JSON.stringify(queries));
+    return [{...example,filePath:q.filePath,lineNumber:q.lineNumber,queryVariantId:q.queryVariantId,object:q.object,field:"Name",query:q.query,
+      findingType:"FIELD_READ",severity:"INFO",criticality:"Low",effectiveMode:"UNKNOWN",runtimeImpact:"Undetermined",reason:"Salesforce confirmed missing Read."}];
+  }} as unknown as SoqlSecurityAnalyzer;
+  const result=await new SoqlAnalysisService(root,analyzer,path.join(root,"out")).analyze({name:"Test"} as Persona);
+  assert.equal(result.findings.length,2,JSON.stringify(result.findings));
+  assert.equal(result.findings.find(f=>f.field==="Name")?.criticality,"High");
+  assert.equal(result.findings.filter(f=>f.criticality==="Unable to verify").length,1);
+  const workbook=new ExcelJS.Workbook();await workbook.xlsx.readFile(result.reports.summaryReportPath);
+  const sheet=workbook.getWorksheet("Summary")!;
+  assert.equal(sheet.getCell("E7").value,"High");
+  assert.match(String(sheet.getCell("F7").value),/Additional runtime-dependent references may exist/);
+  assert.match(String(sheet.getCell("F7").value),/effective query mode is not verified/);
+  assert.equal(sheet.getCell("E8").value,"Unable to verify");
+  assert.match(String(sheet.getCell("A5").value),/High does not always mean a runtime access failure/);
+ }finally{await rm(root,{recursive:true,force:true});}
+});

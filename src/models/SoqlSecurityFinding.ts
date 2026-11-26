@@ -19,6 +19,8 @@ export interface SoqlSecurityFinding {
   queryVariantId?: string;
   /** Reporting-only caveat for a source-proven sample, not complete coverage. */
   limitedVariantCoverage?: boolean;
+  /** Recovered permission references, not necessarily an executable query or complete coverage. */
+  limitedPartialCoverage?: boolean;
   object: string;
   field: string;
   query: string;

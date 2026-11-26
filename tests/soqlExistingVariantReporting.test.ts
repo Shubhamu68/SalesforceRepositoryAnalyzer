@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import {test} from "node:test";
-import {applyExistingVariantReporting,EXISTING_VARIANT_LIMITATION} from "../src/analyzer/soqlExistingVariantReporting.js";
+import {applyExistingVariantReporting,applyLimitedCoverageReporting,EXISTING_VARIANT_LIMITATION,PARTIAL_REFERENCE_LIMITATION,PARTIAL_MODE_LIMITATION} from "../src/analyzer/soqlExistingVariantReporting.js";
 import type {SoqlQuery} from "../src/models/SoqlQuery.js";
 import type {SoqlSecurityFinding} from "../src/models/SoqlSecurityFinding.js";
 import type {UnresolvedDynamicSoql} from "../src/scanner/dynamicSoqlScanner.js";
@@ -82,4 +82,33 @@ test("all-personas high priority output applies the same reporting policy indepe
   const sheet=workbook.getWorksheet("High Priority Summary")!;
   assert.ok(sheet.getColumn(6).values.some(v=>String(v??"").includes(EXISTING_VARIANT_LIMITATION)));
  }finally{await rm(root,{recursive:true,force:true});}
+});
+
+
+test("partial inventory reporting grades grants independently of mode and preserves genuinely unresolved decisions",()=>{
+ const partial={...site,existingQueryVariants:undefined,aggregatedPermissionInventories:2};
+ const inventories:SoqlQuery[]=variants.map(q=>({...q,coverage:"PROVEN_PARTIAL_STRUCTURE",permissionEvidence:"AGGREGATED_STRUCTURE",selectPrefixOnly:true}));
+ const clean=applyLimitedCoverageReporting([partial],inventories,[]);
+ assert.equal(clean.partialSiteIds.size,1);assert.equal(clean.existingSiteIds.size,0);
+ assert.equal(clean.findings.length,1);
+ assert.equal(clean.findings[0].criticality,"Low");
+ assert.equal(clean.findings[0].effectiveMode,"UNKNOWN");
+ assert.match(clean.findings[0].field,/Recovered partial references/);
+ assert.ok(clean.findings[0].reason.includes(PARTIAL_REFERENCE_LIMITATION));
+ assert.ok(clean.findings[0].reason.includes(PARTIAL_MODE_LIMITATION));
+ const denied={...missing(inventories[0]),effectiveMode:"UNKNOWN" as const,runtimeImpact:"Undetermined" as const};
+ const unknown:SoqlSecurityFinding={...missing(inventories[1]),severity:"REVIEW",criticality:"Unable to verify",verificationSource:"UNVERIFIED"};
+ const result=applyLimitedCoverageReporting([partial],inventories,[denied,unknown]);
+ assert.equal(result.findings.length,2);
+ assert.equal(result.findings[0].criticality,"High");
+ assert.equal(result.findings[0].effectiveMode,"UNKNOWN");
+ assert.equal(result.findings[0].runtimeImpact,"Undetermined");
+ assert.equal(result.findings[1].criticality,"Unable to verify");
+ assert.ok(result.findings.every(f=>f.limitedPartialCoverage&&f.reason.includes(PARTIAL_REFERENCE_LIMITATION)));
+ assert.equal(applyLimitedCoverageReporting([partial],inventories.slice(0,1),[]).handledSiteIds.size,0);
+ assert.equal(applyLimitedCoverageReporting([partial],variants,[]).handledSiteIds.size,0);
+ for(const candidate of [{...partial,securityModeConflict:true},{...partial,runtimeFieldCoverage:true},
+  {...partial,referenceCoverage:"RUNTIME_DEPENDENT" as const},{...partial,referenceCoverage:"COMPLETE_FINITE_DOMAIN" as const}]){
+   assert.equal(applyLimitedCoverageReporting([candidate],inventories,[]).handledSiteIds.size,0);
+ }
 });
