@@ -717,3 +717,22 @@ test("phase 4.1: COUNT uses the same proven WHERE field inventory",()=>{
  const result=evidence([{filePath:"ConfigFixture.cls",source}],configuredSchema);
  assert.deepEqual(fields(result.queries),new Set(["WHERE:Name","WHERE:Industry","WHERE:Type","WHERE:AnnualRevenue"]),JSON.stringify(result));
 });
+
+
+test("phase 4.1: metadata row-specific user and default field domains stay correlated",()=>{
+ const source=configuredPredicateFixture
+  .replace("run(String json,Set<String> overrides){String obj='Account';","run(String report,String json,Set<String> overrides){Config__mdt cfg=Config__mdt.getInstance(report);String obj=cfg.Object__c;")
+  .replace("parse('*Name:Email,Phone;Industry;Description')","parse(cfg.User__c)")
+  .replace("'Type=customer;AnnualRevenue > 0',overrides","cfg.Default__c,overrides");
+ const result=evidence([{filePath:"ConfigFixture.cls",source}],(name,args)=>{
+   if(name==="Apex.metadataRows")return {kind:"records",items:[
+    [["DeveloperName",textValue("A")],["Object__c",textValue("Account")],["User__c",textValue("*Name:Phone;Industry")],["Default__c",textValue("Type=customer")]],
+    [["DeveloperName",textValue("B")],["Object__c",textValue("Contact")],["User__c",textValue("Email")],["Default__c",textValue("Title != null")]]
+   ]};
+   if(name==="Schema.fieldMap"&&args[0]?.kind==="text"&&args[0].values[0]==="Contact")
+    return {kind:"map",keyType:"schemaField",entries:["Id","Email","Title"].map(field=>[field.toLowerCase(),{kind:"schema",schemaType:"fieldToken",objectApiName:"Contact",field:{name:field,type:"string",relationshipName:null,referenceTo:[]}}])};
+   return configuredSchema(name,args);
+ });
+ assert.deepEqual(fields(result.queries.filter(q=>q.includes("FROM Account"))),new Set(["SELECT:Id","WHERE:Name","WHERE:Industry","WHERE:Type"]),JSON.stringify(result));
+ assert.deepEqual(fields(result.queries.filter(q=>q.includes("FROM Contact"))),new Set(["SELECT:Id","WHERE:Email","WHERE:Title"]),JSON.stringify(result));
+});

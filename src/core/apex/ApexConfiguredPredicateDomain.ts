@@ -32,7 +32,7 @@ function match(source:string,template:string,initial:Record<string,string>={}):M
   const actual=tokens(source),expected=tokens(template);
   if(!actual||!expected||actual.length!==expected.length)return undefined;
   const bindings=new Map(Object.entries(initial).map(([k,v])=>[k,v.toLowerCase()]));
-  if(new Set(bindings.values()).size!==bindings.size)return undefined;
+  if(new Set(bindings.values()).size!==bindings.size||[...bindings.values()].some(v=>!identifier.test(v)||reserved.has(v)))return undefined;
   for(let i=0;i<expected.length;i++){
     const want=expected[i],got=actual[i];
     if(!want.startsWith("$")){if(want!==got)return undefined;continue;}
@@ -141,6 +141,10 @@ function boundWriter(c:Context,name:string,input:string):boolean{
       !identifier.test(p[8]??"")||p[9]!==")"||p[10]!==";")return false;
     bindNames.add(p[8]);adds++;i+=10;
   }
+  const visible=maskApexSource(body(c,m));
+  const bindUses=[...visible.matchAll(new RegExp("\\b"+target+"\\s*\\.\\s*add\\s*\\(\\s*"+field+"\\s*\\+[\\s\\S]*?\\+\\s*([A-Za-z_]\\w*)\\s*\\)\\s*;","gi"))];
+  if(bindUses.length!==adds||bindUses.some(hit=>!apexSymbols(c.source,c.methods).hasLocalBinding(m,hit[1],m.start+hit.index!)||
+    apexSymbols(c.source,c.methods).lookup(m,hit[1],m.start+hit.index!)!=="string"))return false;
   for(const bind of bindNames){
     if(m.parameters.some(p=>same(p,bind)))return false;
     let declarations=0;
@@ -213,7 +217,14 @@ export function proveConfiguredPredicateDomain(c:Context,target:string,resolve:(
         const valid=validField(c,m.get("$describe")!,obj,f,resolveExternal);
         if(valid)fields.add(f);else if(valid===undefined)complete=false;
       }
-    }else if(defaults&&signature.every((t,i)=>canonicalApexType(t)===canonicalApexType(defaults.parameterTypes?.[i]))){
+    }else if(defaults&&signature.every((t,i)=>{
+      if(canonicalApexType(t)===canonicalApexType(defaults.parameterTypes?.[i]))return true;
+      // The lexical symbol table does not model Custom Metadata member
+      // types. Admit only a direct member of a source-typed metadata record;
+      // its selected-row value must subsequently be exact String/null.
+      const member=i===1&&!t?/^([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/.exec(clean(invocation.args[i])):null;
+      return !!member&&!!symbols.lookup(c.method,member[1],at)?.endsWith("__mdt");
+    })){
       const p=defaults.parameters;
       const m=match(body(c,defaults),
         "if(String.isBlank($config)){return;}Integer $index=$number;for(String $segment:$config.split(';')){String $seg=$segment.trim();"+
