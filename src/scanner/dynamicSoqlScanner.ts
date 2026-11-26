@@ -8,7 +8,7 @@ import {proveLocalSoqlPermissionShape} from "../analyzer/soqlSourceStructuralEvi
 import {proveCallerPermissionShapes,proveLiteralHelperPermissionShapes} from "../analyzer/soqlCallerStructuralEvidence.js";
 import {proveLabelBackedPermissionShapes} from "../analyzer/soqlLabelStructuralEvidence.js";
 import {backtrackSoqlPermissionShapes} from "../analyzer/soqlBackwardEvidence.js";
-import {aggregatePermissionShapes,simplePermissionShape,type SoqlPermissionShape} from "../analyzer/soqlPermissionAggregation.js";
+import {aggregatePermissionShapes,simplePermissionShape,scopedPermissionShape,type SoqlPermissionShape} from "../analyzer/soqlPermissionAggregation.js";
 import {describePartialApexText,type ApexValue} from "../core/apex/ApexValueEvaluator.js";
 import {describeMalformedSoql} from "../analyzer/soqlReconstructionDiagnostics.js";
 import { classifySoqlMode, type DeclaredSoqlMode } from "../analyzer/soqlExecutionMode.js";
@@ -225,7 +225,9 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
         if(traced?.queries.length)explanation+=" Query details recovered from "+traced.callerEdges+" source caller(s) and "+traced.metadataRows+" possible metadata record(s). Placeholder filter values are for analysis only; SOQL injection safety was not checked.";
         if(traced?.bounded)explanation+=" Backward analysis reached its processing limit.";
         const prefixTexts=new Set(traced?.partialSelectQueries??[]);
+        const scopedTexts=new Set(traced?.nestedQueries??[]);
         const shapeEntries=[...local,...callers,...(traced?.queries??[])].flatMap(text=>{
+          if(scopedTexts.has(text))return [];
           const shape=simplePermissionShape(text,site.line,trace?(code)=>note(code):undefined);
           return shape&&!hasModeConflict(shape.mode)?[{shape,prefixOnly:prefixTexts.has(text)}]:[];
         });
@@ -244,16 +246,18 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
         }
         const aggregates=[
           ...aggregatePermissionShapes(shapeEntries.filter(e=>!e.prefixOnly).map(e=>e.shape),trace?(code)=>note(code):undefined).map(text=>({text,selectPrefixOnly:false})),
-          ...aggregatePermissionShapes(shapeEntries.filter(e=>e.prefixOnly).map(e=>e.shape),trace?(code)=>note(code):undefined).map(text=>({text,selectPrefixOnly:true}))
+          ...aggregatePermissionShapes(shapeEntries.filter(e=>e.prefixOnly).map(e=>e.shape),trace?(code)=>note(code):undefined).map(text=>({text,selectPrefixOnly:true})),
+          ...[...scopedTexts].map(text=>({text,selectPrefixOnly:prefixTexts.has(text)}))
         ];
         const runtimeOnly=!!traced?.runtimeFieldQueries?.length&&!traced.bounded&&!local.length&&!callers.length&&shapes.length===traced.queries.length&&aggregates.length===1&&!conflicts.size;
-        if(trace){trace.compatibleShapes=shapes.length;trace.aggregateCandidates=aggregates.length;}
+        if(trace){trace.compatibleShapes=shapes.length+scopedTexts.size;trace.aggregateCandidates=aggregates.length;}
         for(const {text,selectPrefixOnly} of aggregates){
           if(variants.size>=MAX_VARIANTS||variants.has(text)){note(variants.size>=MAX_VARIANTS?"VARIANT_LIMIT":"DUPLICATE_VARIANT");continue;}
-          const shape=simplePermissionShape(text,site.line,trace?(code)=>note(code):undefined);
-          if(!shape)continue;
+          const scoped=scopedTexts.has(text);
+          const shape=scoped?scopedPermissionShape(text,site.line):simplePermissionShape(text,site.line,trace?(code)=>note(code):undefined);
+          if(!shape||hasModeConflict(shape.mode))continue;
           const existing=covered.get(groupKey(shape));
-          if(existing&&shape.fields.every(f=>existing.has(fieldKey(f)))){note("REFERENCES_ALREADY_COVERED");continue;}
+          if(!scoped&&existing&&shape.fields.every(f=>existing.has(fieldKey(f)))){note("REFERENCES_ALREADY_COVERED");continue;}
           const parsed=parseNestedSoql(text,site.line);
           if(!parsed){note("FINAL_ROOT_PARSE_FAILED");continue;}
           const declared=shape.mode;
@@ -268,7 +272,8 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
         }
         if(trace)trace.added=aggregatedPermissionInventories;
         if(aggregatedPermissionInventories)explanation+=" Permission inventory aggregated from known object and field references. The reconstructed query is for analysis only, not execution.";
-        if(traced?.partialSelectQueries?.length)explanation+=" Independently proven SELECT fields were checked for grants. An explicit Database AccessLevel is present, but effective enforcement, runtime WHERE and ORDER BY clauses, and possible text-mode conflicts remain unverified.";
+        if(traced?.intendedValueQueries?.length)explanation+=" Intended literal object and field references are checked for grants. Raw runtime String values may alter query text; effective enforcement and injection safety remain unverified.";
+        else if(traced?.partialSelectQueries?.length)explanation+=" Independently proven SELECT fields were checked for grants. An explicit Database AccessLevel is present, but effective enforcement, runtime WHERE and ORDER BY clauses, and possible text-mode conflicts remain unverified.";
       }
       if(backwardExplanation)explanation=backwardExplanation+" Initial analysis: "+explanation;
       if(runtimeFieldCoverage)explanation+=" Known fields are checked for permissions; additional runtime-dependent fields are outside verified coverage.";

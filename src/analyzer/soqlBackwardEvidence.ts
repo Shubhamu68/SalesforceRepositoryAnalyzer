@@ -13,7 +13,7 @@ import {parseApexAccessLevel} from "../core/apex/ApexDatabaseAccessMode.js";
 import {reportApexDependency,type ApexDependencyObserver} from "../core/apex/ApexDependencyDiagnostics.js";
 import {provePartialSoql} from "./soqlPartialStructure.js";
 import {maskSoqlStringsAndComments} from "./soqlExecutionMode.js";
-import {aggregatePermissionShapes,simplePermissionShape,permissionSelectFieldPath,permissionAggregateSelectFieldPath,type SoqlPermissionShape} from "./soqlPermissionAggregation.js";
+import {aggregatePermissionShapes,simplePermissionShape,scopedPermissionShape,permissionSelectFieldPath,permissionAggregateSelectFieldPath,type SoqlPermissionShape} from "./soqlPermissionAggregation.js";
 const one=(v:ApexValue)=>v.kind==="text"&&v.values.length===1&&!v.scalarType?v.values[0]:undefined;
 const stop=(reason:string)=>unknown("SOQL backward evidence: "+reason);
 const path=/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/;
@@ -26,7 +26,7 @@ type Use=SoqlPermissionShape["fields"][number]&{predicateRoot?:string};
 type Evidence=ApexDependencyEvidence<Use>;
 const ev=(value:ApexValue,annotations:readonly Use[]=[]):Evidence=>({value,annotations});
 const matches=(shape:SoqlPermissionShape,required:readonly Use[],checkRoot=true)=>required.every(f=>(!checkRoot||!f.predicateRoot||f.predicateRoot.toLowerCase()===shape.object.toLowerCase())&&shape.fields.some(x=>x.context===f.context&&x.fieldPath.toLowerCase()===f.fieldPath.toLowerCase()));
-function parseText(value:ApexValue):string|undefined{
+function parseText(value:ApexValue,allowIntendedMemberValues=false):string|undefined{
   const exact=one(value);if(exact!==undefined)return exact;
   if(value.kind!=="unknown"||!value.fragments)return undefined;
   // A String.escapeSingleQuotes call is evidence of *intended* quoted
@@ -51,7 +51,7 @@ function parseText(value:ApexValue):string|undefined{
     fragments.push({kind:"literal",text:"sample"});prefix+="sample";
   }
   if(fragments.every(f=>f.kind==="literal"))return fragments.map(f=>f.kind==="literal"?f.text:"").join("");
-  return provePartialSoql({...value,fragments})?.text;
+  return provePartialSoql({...value,fragments},allowIntendedMemberValues)?.text;
 }
 function normalizePredicate(value:ApexValue):SoqlPermissionShape|undefined{
   const scaffold=addApexValues(textValue("SELECT Id FROM TraceObject__c WHERE "),value);
@@ -221,8 +221,20 @@ function mergeSoqlAppends(base:Evidence,additions:readonly ApexDependencyAppend<
     const result=aggregatePermissionShapes(shapes);
     return result.length===1?(incompleteWhere?partialWhere(result[0]):ev(textValue(result[0]))):ev(stop("unproven aggregated query"));
   }
+  // A builder often starts from '' and appends its required first
+  // predicate before conditional filters. Establish that prefix before
+  // attempting the existing predicate union. Preserve whitespace because
+  // the caller may concatenate a literal WHERE without a trailing space.
+  if(one(base.value)===""&&additions.length>1&&!additions[0].conditional){
+    let count=0,current=base;
+    while(count<additions.length&&!additions[count].conditional){
+      const next=additions[count++].evidence;
+      current=ev(addApexValues(current.value,next.value),[...current.annotations,...next.annotations]);
+    }
+    if(count<additions.length)return mergeSoqlAppends(current,additions.slice(count));
+  }
   const baseText=fragmentText(base.value);
-  const lead=baseText?.match(/^\s*(?:WHERE|AND)\s+/i)?.[0]??"";
+  const lead=baseText?.match(/^\s*(?:(?:WHERE|AND)\s+)?/i)?.[0]??"";
   const basePredicate=baseText===undefined?undefined:normalizePredicate(textValue(baseText.slice(lead.length)));
   if(basePredicate){
     const fields=basePredicate.fields.filter(f=>f.context==="WHERE");
@@ -258,12 +270,22 @@ function mergeSoqlAppends(base:Evidence,additions:readonly ApexDependencyAppend<
   return ev(stop("conditional fragment is not a proven query, predicate or field list"));
 }
 export function backtrackSoqlPermissionShapes(source:string,filePath:string,site:ApexCallSite,
-  index?:ApexRepositoryMethodIndex,resolveExternal?:ApexCallResolver,observe?:ApexDependencyObserver):{queries:string[];runtimeFieldQueries?:string[];partialSelectQueries?:string[];bounded:boolean;callerEdges:number;metadataRows:number}{
+  index?:ApexRepositoryMethodIndex,resolveExternal?:ApexCallResolver,observe?:ApexDependencyObserver):{queries:string[];runtimeFieldQueries?:string[];partialSelectQueries?:string[];intendedValueQueries?:string[];nestedQueries?:string[];bounded:boolean;callerEdges:number;metadataRows:number}{
   const note=(code:string,count?:number)=>reportApexDependency(observe,code,{filePath,source,depth:0},site.offset,undefined,count);
   if(/\bclass\s+Database\b/i.test(maskApexSource(source))){note("SHADOWED_DATABASE");return {queries:[],bounded:false,callerEdges:0,metadataRows:0};}
   const trace=traceApexDependencies<Use>(source,filePath,{expression:site.argument,offset:site.offset},index,resolveExternal,{
     observe,
-    abstractExpression:abstractSoqlExpression,
+    abstractExpression:context=>{
+      const symbols=apexSymbols(context.source,context.methods);
+      const memberType=symbols.scalarDataMemberType(context.method,context.expression,context.offset);
+      if(memberType)return {kind:"unknown",reason:"Runtime scalar DTO member",symbol:{name:context.expression,type:memberType==="string"?"soql-member-string":"id"}};
+      // Only this platform format yields the intended date-shaped scalar
+      // slot. Do not evaluate now(), arbitrary format strings or locales.
+      if(/^DateTime\s*\.\s*now\s*\(\s*\)\s*\.\s*format\s*\(\s*'yyyy-MM-dd'\s*\)$/i.test(context.expression)&&
+        !index?.hasSourceClass("DateTime")&&!symbols.lookup(context.method,"DateTime",context.offset)&&!symbols.hasLocalBinding(context.method,"DateTime",context.offset))
+        return runtimeParameter("formattedDate","date","Runtime formatted date");
+      return abstractSoqlExpression(context);
+    },
     abstractUseEvidence:(context,resolveAt)=>{
       // The structural contract includes the actual Database sink and
       // generated binds. Keep its candidate set isolated from expression
@@ -289,6 +311,10 @@ export function backtrackSoqlPermissionShapes(source:string,filePath:string,site
     },
     abstractEvidence:(context,resolve,resolveAt)=>{
       const shadowed=["String","List","Set","Map","Schema","JSON"].some(p=>!!index?.hasSourceClass(p));
+      const idJoin=/^String\s*\.\s*join\s*\(\s*([A-Za-z_]\w*)\s*,\s*('(?:\\.|[^'\\])*')\s*\)$/i.exec(context.expression);
+      if(idJoin&&!shadowed&&/^(?:list|set)<id>$/.test(apexSymbols(context.source,context.methods).lookup(context.method,idJoin[1],context.offset)??"")&&idJoin[2]==="'\\',\\''"){
+        return ev({kind:"unknown",reason:"Runtime typed Id collection values",symbol:{name:idJoin[1],type:"soql-id-list"}});
+      }
       const join=/^String\s*\.\s*join\s*\(\s*([A-Za-z_]\w*)\s*,\s*',\s*'\s*\)$/i.exec(context.expression);
       if(join&&!shadowed){
         const domain=proveConfiguredAggregateDomain(context,join[1],(expr,at)=>{
@@ -341,12 +367,14 @@ export function backtrackSoqlPermissionShapes(source:string,filePath:string,site
       return result;
     }
   });
-  const queries=new Set<string>(),runtimeQueries=new Set<string>(),partialSelectQueries=new Set<string>();
+  const queries=new Set<string>(),runtimeQueries=new Set<string>(),partialSelectQueries=new Set<string>(),intendedValueQueries=new Set<string>(),nestedQueries=new Set<string>();
   let allRuntime=trace.candidates.length>0&&!trace.bounded;
   note("BACKWARD_CANDIDATES",trace.candidates.length);
   for(const proof of trace.candidates){
     let runtimeObject:string|undefined;
     let text=parseText(proof.value);
+    const intended=!text&&proof.value.kind==="unknown"&&proof.value.fragments?.some(p=>p.kind==="hole"&&p.symbol?.type==="soql-member-string");
+    if(intended)text=parseText(proof.value,true);
     // Permit omission of optional schema-constrained members ONLY at the
     // complete SELECT list boundary of the same root object. All other
     // fragments must be literal; no unproven predicate or mode is omitted.
@@ -359,6 +387,14 @@ export function backtrackSoqlPermissionShapes(source:string,filePath:string,site
       }
     }
     const shape=text?simplePermissionShape(text,site.line,observe?(code)=>note(code):undefined):undefined;
+    // New scoped admission is limited to parser-validated partial value
+    // reconstructions. Keep children intact; never union them into root.
+    const scoped=!shape&&text&&proof.value.kind==="unknown"?scopedPermissionShape(text,site.line):undefined;
+    if(scoped&&!runtimeObject&&matches(scoped,proof.annotations)){
+      const candidate=text!.trim();queries.add(candidate);nestedQueries.add(candidate);
+      if(intended){partialSelectQueries.add(candidate);intendedValueQueries.add(candidate);}
+      allRuntime=false;note("SOQL_SCOPED_CANDIDATE_VALIDATED",scoped.fields.length);continue;
+    }
     if(runtimeObject&&(!shape||shape.object.toLowerCase()!==runtimeObject.toLowerCase()||!matches(shape,proof.annotations))){
       note("RUNTIME_SELECT_DOMAIN_MISMATCH");allRuntime=false;continue;
     }
@@ -438,11 +474,12 @@ export function backtrackSoqlPermissionShapes(source:string,filePath:string,site
       note(proof.value.kind==="unknown"?(proof.value.fragments?.length?"SOQL_RUNTIME_SLOT_UNPROVEN":"SOQL_VALUE_UNRESOLVED"):"SOQL_NON_TEXT_CANDIDATE");
     }else if(shape&&matches(shape,proof.annotations)){
       queries.add(text!.trim());
+      if(intended){partialSelectQueries.add(text!.trim());intendedValueQueries.add(text!.trim());note("SOQL_INTENDED_VALUE_REFERENCES_VALIDATED");}
       if(runtimeObject){runtimeQueries.add(text!.trim());note("RUNTIME_SELECT_KNOWN_FIELDS_VALIDATED",shape.fields.length);}
       note("SOQL_CANDIDATE_VALIDATED",shape.fields.length);
     }else if(shape)note("SOQL_REQUIRED_REFERENCE_MISMATCH");
   }
   note("BACKWARD_VALIDATED_QUERIES",queries.size-partialSelectQueries.size);
   if(partialSelectQueries.size)note("BACKWARD_VALIDATED_SELECT_PREFIXES",partialSelectQueries.size);
-  return {queries:[...queries],...(allRuntime&&runtimeQueries.size&&runtimeQueries.size===queries.size?{runtimeFieldQueries:[...runtimeQueries]}:{}),...(partialSelectQueries.size?{partialSelectQueries:[...partialSelectQueries]}:{}),bounded:trace.bounded,callerEdges:trace.callerEdges,metadataRows:trace.metadataRows};
+  return {queries:[...queries],...(allRuntime&&runtimeQueries.size&&runtimeQueries.size===queries.size?{runtimeFieldQueries:[...runtimeQueries]}:{}),...(partialSelectQueries.size?{partialSelectQueries:[...partialSelectQueries]}:{}),...(intendedValueQueries.size?{intendedValueQueries:[...intendedValueQueries]}:{}),...(nestedQueries.size?{nestedQueries:[...nestedQueries]}:{}),bounded:trace.bounded,callerEdges:trace.callerEdges,metadataRows:trace.metadataRows};
 }

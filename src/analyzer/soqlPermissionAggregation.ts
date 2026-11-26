@@ -48,6 +48,23 @@ export function simplePermissionShape(text:string,line=1,onReject?:(code:string)
   return {object:root.fromName,mode:classifySoqlMode(text),fields:inventory.fields,...(countOnly?{countOnly:true}:{})};
 }
 
+/** Validate a single scoped candidate without flattening its children.
+ * Only ordinary child SELECT scopes are admitted in this slice. Every
+ * scope must parse and no descendant mode or unsupported expression may
+ * silently be dropped. This is not an aggregatable root-only shape. */
+export function scopedPermissionShape(text:string,line=1):SoqlPermissionShape|undefined{
+  const root=parseNestedSoql(text,line),inventory=extractSoqlExpressionFields(text);
+  if(!root?.subqueries.length||!inventory.parsed||inventory.limitations.length||!inventory.fields.length||
+    inventory.fields.some(f=>!fieldPath.test(f.fieldPath)||!["SELECT","WHERE","ORDER_BY"].includes(f.context)))return undefined;
+  const visible=maskSoqlStringsAndComments(text);
+  if(/\b(?:TYPEOF|GROUP\s+BY|HAVING|WITH)\b/i.test(visible))return undefined;
+  // Child queries must remain independent and valid; this bounded slice
+  // deliberately rejects semi-/anti-joins and nested child descendants.
+  if(root.subqueries.some(c=>c.kind!=="CHILD"||!c.query||!simplePermissionShape(c.query,c.lineNumber??line)))return undefined;
+  if((visible.match(/\bSELECT\b/gi)?.length??0)!==root.subqueries.length+1)return undefined;
+  return {object:root.fromName,mode:"UNSPECIFIED",fields:inventory.fields};
+}
+
 /** One parser-only representative per root object and declared security mode.
  * Preserve clause usage (SECURITY_ENFORCED treats SELECT differently from
  * WHERE); never promote predicates to selected fields. No runtime query. */

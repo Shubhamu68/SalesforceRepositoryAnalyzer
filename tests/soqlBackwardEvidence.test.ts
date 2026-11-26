@@ -896,3 +896,37 @@ test("phase 6: explicit USER_MODE conflict is not silently treated as SYSTEM_MOD
  const scan=extractDynamicSoqlQueries(source,filePath,fallbackMetadata("Label##SELECT MAX(AnnualRevenue) FROM Account WHERE Name = {Input.Name} WITH USER_MODE"),new ApexRepositoryMethodIndex([{filePath,source}]));
  assert.equal(scan.queries.filter(q=>q.dynamicAccessLevel==="SYSTEM_MODE").length,0,JSON.stringify(scan));
 });
+
+
+test("B: empty predicate accumulator retains required and optional bind predicates with leading space",()=>{
+ const files=[{filePath:"Service.cls",source:"public class Service {public static void run(String p,Map<String,Object> binds){String q='SELECT Id FROM Account WHERE'+p+' ORDER BY Name LIMIT :lim OFFSET :off';Database.queryWithBinds(q,binds,AccessLevel.USER_MODE);}}"},
+ {filePath:"Caller.cls",source:"public class Caller {public static void run(Boolean flag,Id customer){Map<String,Object> b=new Map<String,Object>();String p='';p+=' RecordType.Name =: recordTypeName';if(flag){p+=' AND Industry = :industry';}if(customer!=null){p+=' AND ParentId = :customer';}Service.run(p,b);}}"}];
+ const result=evidence(files);
+ assert.deepEqual(fields(result.queries),new Set(["SELECT:Id","WHERE:RecordType.Name","WHERE:Industry","WHERE:ParentId","ORDER_BY:Name"]),JSON.stringify(result));
+});
+test("B: source-declared DTO scalar member slots preserve intended fields but not runtime enforcement",()=>{
+ const files=[{filePath:"Service.cls",source:"public class Service {public static void run(String p){String q='SELECT Id FROM Account '+p;Database.query(q);}}"},
+ {filePath:"Entry.cls",source:"public class Entry {public class Input{@InvocableVariable public String name;}public class Output{@InvocableVariable public Id parent;}public static void run(List<Input> input,Output output){Service.run('WHERE Name = \\''+input[0].name+'\\' AND ParentId = \\''+output.parent+'\\' AND Type != null');}}"}];
+ const result=evidence(files);
+ assert.deepEqual(fields(result.queries),new Set(["SELECT:Id","WHERE:Name","WHERE:ParentId","WHERE:Type"]),JSON.stringify(result));
+ assert.deepEqual(result.intendedValueQueries,result.queries);
+ const scan=extractDynamicSoqlQueries(files[0].source,files[0].filePath,undefined,new ApexRepositoryMethodIndex(files));
+ assert.ok(scan.queries.some(q=>q.selectPrefixOnly&&q.coverage==="PROVEN_PARTIAL_STRUCTURE"),JSON.stringify(scan));
+ for(const source of [
+  files[1].source.replace("WHERE Name = \\'","WHERE ").replace("+'\\' AND ParentId", "+' = null AND ParentId"),
+  files[1].source.replace("public String name;","public Object name;")
+ ])assert.equal(evidence([files[0],{...files[1],source}]).queries.length,0);
+});
+test("B: typed Id list and date value slots preserve child SELECT and ORDER BY independently",()=>{
+ const files=[{filePath:"Service.cls",source:"public class Service {public static void run(String p){String q='SELECT Id,(SELECT Id,Email FROM Contacts ORDER BY LastName) FROM Account '+p;Database.query(q);}}"},
+ {filePath:"Entry.cls",source:"public class Entry {public static void run(Set<Id> ids){String formatted='\\''+String.join(ids,'\\',\\'')+'\\'';String p='WHERE Id IN ('+formatted+') AND CreatedDate <= '+DateTime.now().format('yyyy-MM-dd')+' ORDER BY Name';Service.run(p);}}"}];
+ const result=evidence(files);
+ assert.equal(result.nestedQueries?.length,1,JSON.stringify(result));
+ assert.deepEqual(fields(result.queries),new Set(["SELECT:Id","WHERE:Id","WHERE:CreatedDate","ORDER_BY:Name"]));
+ const scan=extractDynamicSoqlQueries(files[0].source,files[0].filePath,undefined,new ApexRepositoryMethodIndex(files));
+ const q=scan.queries.find(q=>q.coverage==="PROVEN_PARTIAL_STRUCTURE");
+ assert.ok(q,JSON.stringify(scan));
+ assert.deepEqual(q.subqueries?.[0]?.fields,["Id","Email"]);
+ assert.match(q.subqueries?.[0]?.query??"",/ORDER BY LastName/);
+ assert.equal(evidence([files[0],{...files[1],source:files[1].source.replace("Set<Id>","Set<String>")}]).queries.length,0);
+});

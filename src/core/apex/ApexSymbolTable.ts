@@ -27,7 +27,7 @@ export class ApexSymbolTable{
         }else if(c==="}"){
           depth--;if(depth===1)start=i+1;
         }else if(c===";"&&depth===1){
-          const declaration=parseApexDeclaration(masked.slice(start,i+1).trim().replace(/^(?:(?:public|private|protected|global|static|final|transient|testvisible)\s+)*/i,""));
+          const declaration=parseApexDeclaration(masked.slice(start,i+1).trim().replace(/^(?:@[A-Za-z_]\w*(?:\s*\([^()]*\))?\s*)+/i,"").replace(/^(?:(?:public|private|protected|global|static|final|transient|testvisible)\s+)*/i,""));
           if(declaration){const key=declaration.name.toLowerCase();scope.fields.set(key,scope.fields.has(key)?undefined:declaration.type);}
           start=i+1;
         }
@@ -104,6 +104,22 @@ export class ApexSymbolTable{
   }
   argumentTypes(method:IndexedApexMethod|undefined,expressions:readonly string[],offset:number):ApexArgumentTypes{
     return expressions.map(expr=>this.expressionType(method,expr,offset));
+  }
+  /** Only source-declared scalar data members of a unique same-owner DTO.
+   * No property getters, arbitrary SObject schema or inferred String types.
+   * This establishes the expression's type, not its runtime value. */
+  scalarDataMemberType(method:IndexedApexMethod,expression:string,offset:number):string|undefined{
+    const match=/^([A-Za-z_]\w*)(?:\s*\[\s*(\d+)\s*\])?\s*\.\s*([A-Za-z_]\w*)$/.exec(expression.trim());
+    if(!match)return undefined;
+    let type=this.lookup(method,match[1],offset);
+    if(match[2]!==undefined)type=/^list<([a-z_]\w*(?:\.[a-z_]\w*)*)>$/.exec(type??"")?.[1];
+    if(!type||!/^[a-z_]\w*(?:\.[a-z_]\w*)*$/.test(type))return undefined;
+    const owner=this.ownerAt(method.start)?.toLowerCase();
+    if(!owner)return undefined;
+    const candidates=this.scopes.filter(s=>s.name.toLowerCase()===owner+"."+type||s.name.toLowerCase()===type);
+    if(candidates.length!==1)return undefined;
+    const value=candidates[0].fields.get(match[3].toLowerCase());
+    return value==="id"||value==="string"?value:undefined;
   }
   expressionType(method:IndexedApexMethod|undefined,expression:string,offset:number,depth=0):string|undefined{
     if(depth>12)return undefined;
