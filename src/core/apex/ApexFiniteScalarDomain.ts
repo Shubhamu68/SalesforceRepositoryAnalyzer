@@ -41,7 +41,7 @@ export function proveScalarSwitchReturnDomain(source:string,method:IndexedApexMe
   const body=clean(source.slice(tail.start,tail.end)),masked=maskApexSource(body);
   const head=/^switch\s+on\s+([A-Za-z_]\w*)\s*\{/i.exec(masked);
   if(!head||head[1].toLowerCase()!==parameter||body.length>64000)return undefined;
-  const open=head[0].lastIndexOf("{"),close=matchingPair(masked,open);
+  const open=head[0].lastIndexOf("{"),close=matchingPair(masked,open,"{","}");
   if(close<0||masked.slice(close+1).trim())return undefined;
   const arms:ScalarSwitchArm[]=[],labels=new Set<number|"else">();
   let cursor=open+1;
@@ -52,7 +52,7 @@ export function proveScalarSwitchReturnDomain(source:string,method:IndexedApexMe
     if(!arm||labels.has("else")||arms.length>=32)return undefined;
     const label=arm[1].toLowerCase()==="else"?"else":Number(arm[1]);
     if(labels.has(label)||typeof label==="number"&&(!Number.isInteger(label)||label< -2147483648||label>2147483647))return undefined;
-    const start=cursor+arm[0].lastIndexOf("{"),end=matchingPair(masked,start);
+    const start=cursor+arm[0].lastIndexOf("{"),end=matchingPair(masked,start,"{","}");
     if(end<0||end>=close)return undefined;
     const ret=/^return\s+([\s\S]+);$/i.exec(clean(body.slice(start+1,end)));
     if(!ret)return undefined;
