@@ -1,3 +1,4 @@
+import {createHash} from "node:crypto";
 import type {ApexCallResolver,ApexArgumentTypes} from "./ApexTypeSystem.js";
 import {countApex,timeApex} from "./ApexPerformance.js";
 import {ApexDataFlowEngine,type ApexFlowOptions} from "./ApexDataFlowEngine.js";
@@ -5,7 +6,8 @@ import type {ApexInvocationSelector} from "./ApexInvocationModel.js";
 import {listValue,textValue,unknown,type ApexValue} from "./ApexValueEvaluator.js";
 import type {ApexRepositoryMethodIndex} from "./ApexRepositoryMethodIndex.js";
 import {planCustomMetadataRequest,planCustomMetadataSelectorCandidates,resolveCustomMetadataRows,type CustomMetadataRequest,type CustomMetadataInventory} from "./ApexCustomMetadataQueries.js";
-import type {ApexMetadataProvider} from "../metadata/ApexMetadataProvider.js";
+import {fieldSetIdentityKey,type ApexMetadataProvider,type FieldSetIdentity,type CustomMetadataRead,type MetadataResult} from "../metadata/ApexMetadataProvider.js";
+import {ScanMetadataBatcher} from "../metadata/ScanMetadataBatcher.js";
 import {resolveSchemaSnapshot,resolveSchemaFieldMap} from "./ApexSchemaModel.js";
 import {exactMetadataStringList} from "./ApexCollectionOperations.js";
 
@@ -27,6 +29,23 @@ function memoRead<T>(cache:Map<string,Promise<T>>,key:string,read:()=>Promise<T>
   let pending=cache.get(key);
   if(!pending){pending=read();cache.set(key,pending);}
   return pending;
+}
+/** Replay only dependency identities actually read by the previous analysis.
+ * The caller must independently establish identical source and repository graph.
+ * Store digests, not mutable metadata values or resolver objects. */
+type Dependency=
+  |{kind:"label"|"describe"|"schema";name:string}
+  |{kind:"fieldSet";object:string;name:string}
+  |{kind:"customMetadata";request:CustomMetadataRead};
+export interface ApexDependencyManifest{
+  readonly providerScope:string;
+  readonly capabilities:string;
+  readonly dependencies:readonly {dependency:Dependency;digest:string}[];
+}
+function dependencyDigest(value:MetadataResult<unknown>):string|undefined{
+  if(value.complete!==true||value.value===undefined)return undefined;
+  try{return createHash("sha256").update(JSON.stringify(value)).digest("hex");}
+  catch{return undefined;}
 }
 export type ApexExternalResolver=ApexCallResolver;
 export type ApexInvocationAnalysis=ReturnType<ApexDataFlowEngine["analyze"]>&{sites:ApexDataFlowEngine["sites"]};
@@ -61,15 +80,74 @@ export class ApexAnalysisEngine {
   private readonly reads:ScanMetadataReads={
     labels:new Map(),fieldSets:new Map(),describes:new Map(),schemas:new Map(),customMetadata:new Map()
   };
+  private readonly labelBatch?:ScanMetadataBatcher<string,string>;
+  private readonly fieldSetBatch?:ScanMetadataBatcher<FieldSetIdentity,string[]>;
+  private readonly customMetadataBatch?:ScanMetadataBatcher<CustomMetadataRead,Array<Record<string,unknown>>>;
   constructor(readonly repositoryIndex?:ApexRepositoryMethodIndex,
-    private readonly metadata?:ApexMetadataProvider){}
+    private readonly metadata?:ApexMetadataProvider){
+    if(metadata)this.customMetadataBatch=new ScanMetadataBatcher(
+      request=>request.key,request=>metadata.getCustomMetadataRecords(request.type,request.selected,request.filters),
+      metadata.getCustomMetadataRecordsBatch?requests=>metadata.getCustomMetadataRecordsBatch!(requests):undefined,
+      16,value=>Array.isArray(value));
+    if(metadata?.getCustomLabelValue)this.labelBatch=new ScanMetadataBatcher(
+      name=>name,name=>metadata.getCustomLabelValue!(name),
+      metadata.getCustomLabelValues?names=>metadata.getCustomLabelValues!(names):undefined,
+      20,value=>typeof value==="string");
+    if(metadata?.getFieldSetFields)this.fieldSetBatch=new ScanMetadataBatcher(
+      fieldSetIdentityKey,identity=>metadata.getFieldSetFields!(identity.objectApiName,identity.fieldSetDeveloperName),
+      metadata.getFieldSetFieldsBatch?identities=>metadata.getFieldSetFieldsBatch!(identities):undefined,
+      10,value=>Array.isArray(value)&&value.length<=200&&value.every(field=>typeof field==="string"&&/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/.test(field)));
+  }
+  private capabilities():string{
+    return JSON.stringify([!!this.metadata?.getCustomLabelValue,!!this.metadata?.getFieldSetFields,!!this.metadata?.getObjectSchema]);
+  }
+  private readLabel(name:string){return memoRead(this.reads.labels,name,()=>this.labelBatch!.read(name));}
+  private readFieldSet(object:string,name:string){
+    return memoRead(this.reads.fieldSets,object+"|"+name,()=>this.fieldSetBatch!.read({objectApiName:object,fieldSetDeveloperName:name}));
+  }
+  private readDescribe(name:string){return memoRead(this.reads.describes,name,()=>this.metadata!.getObjectFieldNames(name));}
+  private readSchema(name:string){return memoRead(this.reads.schemas,name.toLowerCase(),()=>this.metadata!.getObjectSchema!(name));}
+  private readCustomMetadata(request:CustomMetadataRead){
+    return memoRead(this.reads.customMetadata,request.key,()=>this.customMetadataBatch!.read(request));
+  }
+  /** Fresh scan-local reads are required before cached analysis is eligible.
+   * Incomplete results are never reusable. This is not a permission cache. */
+  async canReuse(manifest:ApexDependencyManifest):Promise<boolean>{
+    if(!this.metadata||manifest.providerScope!==this.metadata.scopeKey||manifest.capabilities!==this.capabilities())return false;
+    const checks=await Promise.all(manifest.dependencies.map(async ({dependency:d,digest})=>{
+      try{
+        const value=d.kind==="label"?await this.readLabel(d.name):
+          d.kind==="fieldSet"?await this.readFieldSet(d.object,d.name):
+          d.kind==="describe"?await this.readDescribe(d.name):
+          d.kind==="schema"?await this.readSchema(d.name):
+          d.kind==="customMetadata"?await this.readCustomMetadata(d.request):undefined;
+        countApex("metadata.reuse_dependency_checks");
+        return !!value&&dependencyDigest(value)===digest;
+      }catch{return false;}
+    }));
+    return checks.every(Boolean);
+  }
+  async analyzeWithDependencies<T>(filePath:string,consumer:(context:ApexAnalysisContext)=>T):
+    Promise<{analysis:T;manifest?:ApexDependencyManifest}>{
+    const dependencies:Array<{dependency:Dependency;digest:string}>=[];let eligible=!!this.metadata;
+    const analysis=await this.analyze(filePath,consumer,(dependency,value)=>{
+      const digest=dependencyDigest(value);
+      if(!digest){eligible=false;return;}
+      dependencies.push({dependency:structuredClone(dependency),digest});
+    });
+    return {analysis,...(eligible?{manifest:{providerScope:this.metadata!.scopeKey,capabilities:this.capabilities(),dependencies}}:{})};
+  }
   /** Resolve metadata on demand, then return generic selected call arguments. */
   analyzeInvocations(source:string,filePath:string,select:ApexInvocationSelector):Promise<ApexInvocationAnalysis>{
     return this.analyze(filePath,context=>analyzeApexInvocations(source,filePath,select,
       context.resolveExternal,context.repositoryIndex));
   }
-  async analyze<T>(filePath:string,consumer:(context:ApexAnalysisContext)=>T):Promise<T>{
-  const {repositoryIndex,metadata,reads}=this;
+  async analyze<T>(filePath:string,consumer:(context:ApexAnalysisContext)=>T,
+    observed?:(dependency:Dependency,value:MetadataResult<unknown>)=>void):Promise<T>{
+  const {repositoryIndex,metadata}=this;
+  const observe=async<V extends MetadataResult<unknown>>(dependency:Dependency,work:Promise<V>):Promise<V>=>{
+    const value=await work;observed?.(dependency,value);return value;
+  };
   // Discover the actual metadata dependencies while interpreting a query and
   // its helpers. Unlike source-local regex preloading, a caller can reach a
   // label (or known Field Set) in any indexed helper/member declaration.
@@ -233,15 +311,15 @@ export class ApexAnalysisEngine {
       return analysis;
     await Promise.all([
       ...(canReadLabels?labels.map(async name=>labelResults.set(name,
-        await memoRead(reads.labels,name,()=>metadata.getCustomLabelValue!(name)))):[]),
+        await observe({kind:"label",name},this.readLabel(name)))):[]),
       ...(canReadSets?sets.map(async ([key,[object,name]])=>fieldSetValues.set(key,
-        await memoRead(reads.fieldSets,key,()=>metadata.getFieldSetFields!(object,name)))):[]),
+        await observe({kind:"fieldSet",object,name},this.readFieldSet(object,name)))):[]),
       ...(canReadObjects?objects.map(async object=>describeSnapshots.set(object,
-        await memoRead(reads.describes,object,()=>metadata.getObjectFieldNames(object)))):[]),
+        await observe({kind:"describe",name:object},this.readDescribe(object)))):[]),
       ...(canReadSchemas?schemas.map(async ([key,object])=>schemaSnapshots.set(key,
-        await memoRead(reads.schemas,key,()=>metadata.getObjectSchema!(object)))):[]),
+        await observe({kind:"schema",name:object},this.readSchema(object)))):[]),
       ...(canReadMetadata?mdts.map(async request=>metadataInventories.set(request.key,
-        await memoRead(reads.customMetadata,request.key,()=>metadata.getCustomMetadataRecords(request.type,request.selected,request.filters)))):[]),
+        await observe({kind:"customMetadata",request:{key:request.key,type:request.type,selected:request.selected,filters:request.filters}},this.readCustomMetadata(request)))):[]),
     ]);
   }
 }

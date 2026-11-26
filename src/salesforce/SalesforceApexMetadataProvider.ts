@@ -1,4 +1,4 @@
-import type { ApexMetadataProvider, MetadataResult, CustomMetadataFilter, CustomMetadataResult, ApexObjectSchema } from "../core/metadata/ApexMetadataProvider.js";
+import { fieldSetIdentityKey,type FieldSetIdentity,type CustomMetadataRead,type ApexMetadataProvider,type MetadataResult,type CustomMetadataFilter,type CustomMetadataResult,type ApexObjectSchema } from "../core/metadata/ApexMetadataProvider.js";
 import type { SalesforceOrgConnection } from "./SalesforceOrgConnection.js";
 import {recordSoqlCount,timeSoqlPhase} from "../services/SoqlPerformanceMetrics.js";
 
@@ -84,6 +84,60 @@ export class SalesforceApexMetadataProvider implements ApexMetadataProvider {
     }
   }
 
+  /** Batch only proven label names. Preserve the exact single lookup's
+   * identity/ambiguity semantics, including namespace collisions. */
+  async getCustomLabelValues(names:readonly string[]):Promise<ReadonlyMap<string,MetadataResult<string>>>{
+    const result=new Map<string,MetadataResult<string>>();
+    if(names.length<2||names.length>20||new Set(names).size!==names.length||names.some(name=>!VALID_NAME.test(name)))return result;
+    const query="SELECT Id, Name, Value, NamespacePrefix FROM ExternalString WHERE Name IN ("+
+      names.map(name=>"'"+name+"'").join(",")+")";
+    recordSoqlCount("org.custom_label.batch_calls");
+    try{
+      // No LIMIT that could truncate a namespace collision; queryAll fails
+      // closed above the record ceiling. Out-of-scope names reject the batch.
+      const rows=await this.connection.queryAll<Record<string,unknown>>(query,"tooling",names.length*10);
+      const requested=new Set(names.map(name=>name.toLowerCase()));
+      if(rows.some(row=>!row||typeof row.Name!=="string"||!requested.has(row.Name.toLowerCase())))return result;
+      for(const name of names){
+        // Match exact spelling like the single lookup. If more than one
+        // case-insensitive name is returned, retry exact lookup instead.
+        const matching=rows.filter(row=>(row.Name as string).toLowerCase()===name.toLowerCase());
+        if(matching.length===1&&matching[0].Name===name&&typeof matching[0].Value==="string"){
+          result.set(name,{complete:true,source:"LIVE_ORG",value:matching[0].Value});
+        }
+      }
+      recordSoqlCount("org.custom_label.batch_resolved",result.size);
+    }catch{recordSoqlCount("org.custom_label.batch_failures");}
+    return result;
+  }
+
+  /** Same SOAP transport/identity checks as the individual path. Only
+   * accepted records are published; individual fallback stays in the engine. */
+  async getFieldSetFieldsBatch(identities:readonly FieldSetIdentity[]):Promise<ReadonlyMap<string,MetadataResult<string[]>>>{
+    const result=new Map<string,MetadataResult<string[]>>();
+    if(typeof this.connection.readFieldSetMetadataBatch!=="function"||
+      identities.length<2||identities.length>10||identities.some(i=>!VALID_NAME.test(i.objectApiName)||!VALID_NAME.test(i.fieldSetDeveloperName)))return result;
+    const names=identities.map(fieldSetIdentityKey);
+    if(new Set(names).size!==names.length)return result;
+    recordSoqlCount("org.field_set.soap.calls");
+    recordSoqlCount("org.field_set.soap.batch_calls");
+    try{
+      const fields=await timeSoqlPhase("org.field_set.soap.cumulative_ms",()=>this.connection.readFieldSetMetadataBatch(names));
+      if([...fields.keys()].some(key=>!names.includes(key)))return result;
+      for(const name of names){
+        const value=fields.get(name);
+        if(Array.isArray(value)&&value.length<=200&&value.every(field=>typeof field==="string"&&/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/.test(field)))
+          result.set(name,{complete:true,source:"LIVE_ORG",value});
+      }
+      recordSoqlCount("org.field_set.soap.successes");
+      recordSoqlCount("org.field_set.soap.batch_resolved",result.size);
+    }catch{
+      recordSoqlCount("org.field_set.soap.failures");
+      recordSoqlCount("org.field_set.soap.batch_failures");
+    }
+    return result;
+  }
+
   /** Resolve ordered Field Set members from read-only, org-backed metadata. */
   async getFieldSetFields(objectApiName:string,fieldSetDeveloperName:string):
     Promise<MetadataResult<string[]>> {
@@ -160,6 +214,58 @@ export class SalesforceApexMetadataProvider implements ApexMetadataProvider {
     recordSoqlCount("org.field_set.unresolved");
     return {complete:false,source:"LIVE_ORG",
       reason:"Metadata API: "+metadataIssue+" Tooling API fallback: "+toolingIssue};
+  }
+
+  /** Coalesce only same-type, identical typed equality filters. Never
+   * combine different WHERE contexts using OR or an unfiltered inventory:
+   * Salesforce remains the authority on matching rows. */
+  async getCustomMetadataRecordsBatch(requests:readonly CustomMetadataRead[]):Promise<ReadonlyMap<string,CustomMetadataResult>>{
+    const result=new Map<string,CustomMetadataResult>();
+    const groups=new Map<string,CustomMetadataRead[]>();
+    if(requests.length>16||new Set(requests.map(r=>r.key)).size!==requests.length)return result;
+    for(const request of requests){
+      if(!VALID_NAME.test(request.type)||!/__mdt$/i.test(request.type)||
+        !request.selected.length||request.selected.some(f=>!VALID_NAME.test(f))||
+        request.filters.length>20||request.filters.some(f=>!VALID_NAME.test(f.field)||
+          (typeof f.value!=="string"&&typeof f.value!=="boolean"&&!(typeof f.value==="number"&&Number.isFinite(f.value)))))continue;
+      const key=JSON.stringify([request.type,request.filters.map(f=>[f.field,typeof f.value,f.value])
+        .sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b)))]);
+      const group=groups.get(key)??[];group.push(request);groups.set(key,group);
+    }
+    await Promise.all([...groups.values()].filter(group=>group.length>1).map(async group=>{
+      const first=group[0],fields=[...new Set(group.flatMap(r=>[...r.selected]))];
+      if(fields.length>100)return;
+      recordSoqlCount("org.custom_metadata.projection_batch_calls");
+      const combined=await this.getCustomMetadataRecords(first.type,fields,first.filters);
+      if(!combined.complete||combined.filterEvidence!=="SERVER_FILTERED"||!combined.value){
+        recordSoqlCount("org.custom_metadata.projection_batch_failures");return;
+      }
+      for(const request of group){
+        // Recreate the exact standalone projection, including DeveloperName
+        // and filter fields, preserving original requested casing.
+        const selected=new Map<string,string>();
+        for(const name of ["DeveloperName",...request.selected,...request.filters.map(f=>f.field)])
+          selected.set(name.toLowerCase(),name);
+        const projected:Array<Record<string,unknown>>=[];
+        let valid=true;
+        for(const raw of combined.value){
+          const keys=new Map(Object.keys(raw).map(k=>[k.toLowerCase(),k]));
+          const row:Record<string,unknown>={};
+          for(const field of [...selected.values()].sort()){
+            const key=keys.get(field.toLowerCase());
+            if(key===undefined){valid=false;break;}
+            row[field]=raw[key];
+          }
+          if(!valid)break;
+          projected.push(row);
+        }
+        if(valid){
+          result.set(request.key,{complete:true,source:"LIVE_ORG",value:projected,filterEvidence:"SERVER_FILTERED"});
+          recordSoqlCount("org.custom_metadata.projection_batch_resolved");
+        }
+      }
+    }));
+    return result;
   }
 
   async getCustomMetadataRecords(objectApiName:string,fields:readonly string[],filters:readonly CustomMetadataFilter[]=[]):

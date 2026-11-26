@@ -6,8 +6,10 @@ import {withApexPerformance} from "../core/apex/ApexPerformance.js";
  * Opt-in, request-scoped SOQL diagnostics. Never print SOQL text, metadata
  * names, repository paths, usernames, org IDs, URLs, tokens, or query results.
  *
- * Enable with SALESFORCE_SOQL_PERF=1 on the backend. All counters are
- * isolated per analysis even when different personas run concurrently.
+ * Normal builds keep diagnostics disabled. Maintainers can temporarily
+ * enable them in source for a diagnostic build; tests can explicitly request
+ * a diagnostic scope. No environment or user setting enables these logs.
+ * All counters are isolated per analysis, including concurrent personas.
  */
 type SoqlPerfScope = {
   timings: Map<string, number>;
@@ -15,7 +17,7 @@ type SoqlPerfScope = {
   errors: number;
 };
 const scope = new AsyncLocalStorage<SoqlPerfScope>();
-const enabled = () => process.env.SALESFORCE_SOQL_PERF === "1";
+const SOQL_PERFORMANCE_DIAGNOSTICS: boolean = false;
 const elapsedMs = (started: number) => Math.max(0, Math.round(performance.now() - started));
 
 function addTime(context: SoqlPerfScope, phase: string, ms: number): void {
@@ -105,10 +107,12 @@ export async function timeSoqlOrgQuery<T>(soql: string, work: () => Promise<T>):
   }
 }
 
-export async function withSoqlPerformance<T>(work: () => Promise<T>): Promise<T> {
+export async function withSoqlPerformance<T>(
+  work: () => Promise<T>, diagnostics: boolean = SOQL_PERFORMANCE_DIAGNOSTICS,
+): Promise<T> {
   // Join an existing API-level scope rather than generating two reports for
   // the same request (one for preflight and another for analysis).
-  if (!enabled() || scope.getStore()) return work();
+  if (scope.getStore() || !diagnostics) return work();
   const context: SoqlPerfScope = { timings: new Map(), counts: new Map(), errors: 0 };
   return scope.run(context, async () => {
     const started = performance.now();

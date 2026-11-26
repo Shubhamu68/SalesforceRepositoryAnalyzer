@@ -106,13 +106,15 @@ test("runtime configuration dependency is propagated to the actual Excel Explana
     assert.equal(result.findings[0].criticality,"Unable to verify");
     const workbook=new ExcelJS.Workbook();await workbook.xlsx.readFile(result.reports.summaryReportPath);
     const sheet=workbook.getWorksheet("Summary")!;
-    const explanation=String(sheet.getCell("F7").value);
+    const explanation=String(sheet.getCell("F8").value);
     // The user-facing explanation is concise; source-level blockers remain in diagnostics.
     assert.equal(explanation,"OLS/FLS could not be fully verified because the dynamic query’s object or field references depend on runtime inputs.");
     assert.ok(explanation.length<=200,explanation);
     assert.doesNotMatch(explanation,/Why the query could not be fully resolved|Object_API_Name__c|getFieldListFromFieldSet|OLS\/FLS analysis was not performed/);
-    assert.equal(sheet.getCell("E7").value,"Unable to verify");
-    assert.equal(sheet.getCell("E7").font.color?.argb,"FFB42332");
+    assert.equal(sheet.getCell("E8").value,"Unable to verify");
+    assert.equal(sheet.getCell("A5").value,"User used for verification from org");
+    assert.match(String(sheet.getCell("B5").value),/No Salesforce user verified/);
+    assert.equal(sheet.getCell("E8").font.color?.argb,"FFB42332");
   }finally{await rm(root,{recursive:true,force:true});}
 });
 
@@ -135,7 +137,7 @@ test("Excel finalization removes only complete finite site review, preserving ge
    assert.equal(result.findings.filter(f=>f.criticality==="High").length,1);
    assert.equal(result.findings.filter(f=>f.criticality==="Unable to verify").length,2);
    const workbook=new ExcelJS.Workbook();await workbook.xlsx.readFile(result.reports.summaryReportPath);
-   const rows=workbook.getWorksheet("Summary")!.getRows(7,3)!;
+   const rows=workbook.getWorksheet("Summary")!.getRows(8,3)!;
    assert.equal(rows.filter(r=>r.getCell(1).value==="Dynamic SOQL").length,1);
    assert.equal(rows.filter(r=>r.getCell(5).value==="Unable to verify").length,2);
  }finally{await rm(root,{recursive:true,force:true});}
@@ -176,7 +178,7 @@ test("existing variants: actual Excel high for confirmed denial, low for known g
    assert.equal(result.findings.find(f=>f.field==="Company")?.criticality,"Unable to verify");
    assert.equal(result.findings.filter(f=>f.object==="Dynamic SOQL").length,1);
    const workbook=new ExcelJS.Workbook();await workbook.xlsx.readFile(result.reports.summaryReportPath);
-   const rows=workbook.getWorksheet("Summary")!.getRows(7,4)!;
+   const rows=workbook.getWorksheet("Summary")!.getRows(8,4)!;
    assert.equal(rows.filter(r=>r.getCell(5).value==="High").length,1);
    assert.equal(rows.filter(r=>r.getCell(5).value==="Low").length,1);
    assert.equal(rows.filter(r=>r.getCell(5).value==="Unable to verify").length,2);
@@ -206,10 +208,10 @@ test("partial reference reporting reaches Excel without changing genuine runtime
   assert.equal(result.findings.filter(f=>f.criticality==="Unable to verify").length,1);
   const workbook=new ExcelJS.Workbook();await workbook.xlsx.readFile(result.reports.summaryReportPath);
   const sheet=workbook.getWorksheet("Summary")!;
-  assert.equal(sheet.getCell("E7").value,"High");
-  assert.match(String(sheet.getCell("F7").value),/Additional runtime-dependent references may exist/);
-  assert.match(String(sheet.getCell("F7").value),/effective query mode is not verified/);
-  assert.equal(sheet.getCell("E8").value,"Unable to verify");
-  assert.match(String(sheet.getCell("A5").value),/High does not always mean a runtime access failure/);
+  assert.equal(sheet.getCell("E8").value,"High");
+  assert.match(String(sheet.getCell("F8").value),/Additional runtime-dependent references may exist/);
+  assert.match(String(sheet.getCell("F8").value),/effective query mode is not verified/);
+  assert.equal(sheet.getCell("E9").value,"Unable to verify");
+  assert.match(String(sheet.getCell("A6").value),/High does not always mean a runtime access failure/);
  }finally{await rm(root,{recursive:true,force:true});}
 });

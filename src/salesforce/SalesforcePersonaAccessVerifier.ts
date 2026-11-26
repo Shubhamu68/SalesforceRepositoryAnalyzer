@@ -128,12 +128,13 @@ export class SalesforcePersonaAccessVerifier {
   }
 
   private async loadInventory(): Promise<Inventory> {
-    const profiles = await this.connection.queryAll<SfProfile>(
-      "SELECT Id, Name FROM Profile", "data", 1500);
-    const groups = await this.connection.queryAll<SfGroup>(
-      "SELECT Id, DeveloperName FROM PermissionSetGroup", "data", 5000);
-    const users = await this.connection.queryAll<SfUser>(
-      "SELECT Id, Name, Username, ProfileId, LastLoginDate FROM User WHERE IsActive = true", "data", 20000);
+    // Independent reads: share the existing bounded HTTP gateway, and
+    // await all three before building the same persona matching inventory.
+    const [profiles,groups,users]=await Promise.all([
+      this.connection.queryAll<SfProfile>("SELECT Id, Name FROM Profile", "data", 1500),
+      this.connection.queryAll<SfGroup>("SELECT Id, DeveloperName FROM PermissionSetGroup", "data", 5000),
+      this.connection.queryAll<SfUser>("SELECT Id, Name, Username, ProfileId, LastLoginDate FROM User WHERE IsActive = true", "data", 20000),
+    ]);
     if (profiles.some((p) => !p.Id || !p.Name) || users.some((u) => !u.Id || !u.ProfileId)) {
       throw new Error("Incomplete Salesforce Profile/User metadata; persona matching is inconclusive.");
     }
