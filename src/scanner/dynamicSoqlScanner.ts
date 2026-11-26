@@ -214,10 +214,12 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
         }
         if(traced?.queries.length)explanation+=" Query details recovered from "+traced.callerEdges+" source caller(s) and "+traced.metadataRows+" possible metadata record(s). Placeholder filter values are for analysis only; SOQL injection safety was not checked.";
         if(traced?.bounded)explanation+=" Backward analysis reached its processing limit.";
-        const shapes=[...local,...callers,...(traced?.queries??[])].flatMap(text=>{
+        const prefixTexts=new Set(traced?.partialSelectQueries??[]);
+        const shapeEntries=[...local,...callers,...(traced?.queries??[])].flatMap(text=>{
           const shape=simplePermissionShape(text,site.line,trace?(code)=>note(code):undefined);
-          return shape&&!hasModeConflict(shape.mode)?[shape]:[];
+          return shape&&!hasModeConflict(shape.mode)?[{shape,prefixOnly:prefixTexts.has(text)}]:[];
         });
+        const shapes=shapeEntries.map(entry=>entry.shape);
         // A whole validated group is kept if it introduces a new reference.
         // Avoid stripping SELECT scaffolding or changing clause usage.
         const covered=new Map<string,Set<string>>();
@@ -230,10 +232,13 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
           for(const field of shape.fields)fields.add(fieldKey(field));
           covered.set(key,fields);
         }
-        const aggregates=aggregatePermissionShapes(shapes,trace?(code)=>note(code):undefined);
+        const aggregates=[
+          ...aggregatePermissionShapes(shapeEntries.filter(e=>!e.prefixOnly).map(e=>e.shape),trace?(code)=>note(code):undefined).map(text=>({text,selectPrefixOnly:false})),
+          ...aggregatePermissionShapes(shapeEntries.filter(e=>e.prefixOnly).map(e=>e.shape),trace?(code)=>note(code):undefined).map(text=>({text,selectPrefixOnly:true}))
+        ];
         const runtimeOnly=!!traced?.runtimeFieldQueries?.length&&!traced.bounded&&!local.length&&!callers.length&&shapes.length===traced.queries.length&&aggregates.length===1&&!conflicts.size;
         if(trace){trace.compatibleShapes=shapes.length;trace.aggregateCandidates=aggregates.length;}
-        for(const text of aggregates){
+        for(const {text,selectPrefixOnly} of aggregates){
           if(variants.size>=MAX_VARIANTS||variants.has(text)){note(variants.size>=MAX_VARIANTS?"VARIANT_LIMIT":"DUPLICATE_VARIANT");continue;}
           const shape=simplePermissionShape(text,site.line,trace?(code)=>note(code):undefined);
           if(!shape)continue;
@@ -248,11 +253,11 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
             fields:parsed.fields,subqueries:parsed.subqueries,securityMode:declared,
             withUserMode:declared==="USER_MODE"||mode==="USER_MODE",dynamicOrigin:true,
             querySiteId:siteId,queryVariantId:siteId+"#partial-"+(partialStructureVariants-1),
-            coverage:"PROVEN_PARTIAL_STRUCTURE",permissionEvidence:"AGGREGATED_STRUCTURE",...(runtimeOnly?{runtimeFieldCoverage:true}:{}),...(mode?{dynamicAccessLevel:mode}:{})});
+            coverage:"PROVEN_PARTIAL_STRUCTURE",permissionEvidence:"AGGREGATED_STRUCTURE",...(selectPrefixOnly?{selectPrefixOnly:true}:{}),...(runtimeOnly?{runtimeFieldCoverage:true}:{}),...(mode?{dynamicAccessLevel:mode}:{})});
         }
         if(trace)trace.added=aggregatedPermissionInventories;
         if(aggregatedPermissionInventories)explanation+=" Permission inventory aggregated from known object and field references. The reconstructed query is for analysis only, not execution.";
-        if(traced?.partialSelectQueries?.length)explanation+=" Independently proven SELECT fields were checked using the explicit Database AccessLevel. Runtime WHERE and ORDER BY clauses and possible mode conflicts remain unverified.";
+        if(traced?.partialSelectQueries?.length)explanation+=" Independently proven SELECT fields were checked for grants. An explicit Database AccessLevel is present, but effective enforcement, runtime WHERE and ORDER BY clauses, and possible text-mode conflicts remain unverified.";
       }
       if(backwardExplanation)explanation=backwardExplanation+" Initial analysis: "+explanation;
       if(runtimeFieldCoverage)explanation+=" Known fields are checked for permissions; additional runtime-dependent fields are outside verified coverage.";

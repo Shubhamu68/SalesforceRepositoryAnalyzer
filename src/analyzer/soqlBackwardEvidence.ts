@@ -194,7 +194,7 @@ export function backtrackSoqlPermissionShapes(source:string,filePath:string,site
       const fragments=proof.value.kind==="unknown"?proof.value.fragments:undefined;
       if((mode==="USER_MODE"||mode==="SYSTEM_MODE")&&!index?.hasSourceClass("String")&&fragments&&fragments.length>=3){
         const [prefix,hole,suffix]=fragments;
-        if(prefix.kind==="literal"&&hole.kind==="hole"&&hole.symbol?.type===optionalWhereType&&suffix.kind==="literal"&&/^ ORDER BY /i.test(suffix.text)){
+        if(prefix.kind==="literal"&&/^\s*SELECT\s+[\w\s.,()]+\s+FROM\s+[A-Za-z_]\w*\s*$/i.test(prefix.text)&&hole.kind==="hole"&&hole.symbol?.type===optionalWhereType&&suffix.kind==="literal"&&/^ ORDER BY /i.test(suffix.text)){
           const select=simplePermissionShape(prefix.text.trim(),site.line);
           if(select&&select.mode==="UNSPECIFIED"&&select.fields.every(f=>f.context==="SELECT")&&matches(select,proof.annotations)){
             const evidence=prefix.text.trim();

@@ -429,7 +429,7 @@ test("source-backed report pipeline retains independently proven SELECT fields w
    assert.equal(result.bounded,false);
  }
  const scan=await engine.analyze(filePath,ctx=>extractDynamicSoqlQueries(source,filePath,ctx.resolveExternal,index));
- assert.ok(scan.queries.some(q=>q.permissionEvidence==="AGGREGATED_STRUCTURE"&&q.coverage==="PROVEN_PARTIAL_STRUCTURE"),JSON.stringify(scan));
+ assert.ok(scan.queries.some(q=>q.permissionEvidence==="AGGREGATED_STRUCTURE"&&q.coverage==="PROVEN_PARTIAL_STRUCTURE"&&q.selectPrefixOnly===true),JSON.stringify(scan));
  assert.ok(scan.unresolved.length>=2);
 });
 test("unknown optional WHERE cannot establish arbitrary FROM or implicit mode",()=>{

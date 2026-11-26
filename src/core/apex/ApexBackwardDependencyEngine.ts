@@ -683,7 +683,7 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
                 try{
                   for(const [i,item] of values.value.items.entries()){
                     const nested=new Map(bindings);
-                    nested.set(indexed.index.toLowerCase(),ev({kind:"number",value:i}));
+                    nested.set(indexed.index.toLowerCase(),ev(exact(values)?{kind:"number",value:i}:stop("Candidate list positions are not proven")));
                     nested.set(indexed.item.toLowerCase(),ev(textValue(item)));
                     if(!visit((n.body??[]).slice(1),conditional,nested))return false;
                   }

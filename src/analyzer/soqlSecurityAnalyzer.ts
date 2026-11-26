@@ -122,9 +122,11 @@ export class SoqlSecurityAnalyzer {
     // hundreds of metadata reads. The same resolver serves Stack Trace analysis.
     const modeResults = await timeSoqlPhase("execution.modes", () => Promise.all(queries.map((query) =>
       this.executionModeResolver.resolve(query.query, query.filePath).then(mode =>
-        query.dynamicAccessLevel && mode.declaredMode === "UNSPECIFIED"
-          ? resolveSoqlExecutionMode(query.dynamicAccessLevel, mode.apiVersion)
-          : mode)
+        query.selectPrefixOnly
+          ? {...mode, declaredMode:query.dynamicAccessLevel??"UNSPECIFIED", effectiveMode:"UNKNOWN" as const, enforcement:"UNKNOWN" as const, description:"SELECT and FROM are proven; runtime query text and effective enforcement remain unverified."}
+          : query.dynamicAccessLevel && mode.declaredMode === "UNSPECIFIED"
+            ? resolveSoqlExecutionMode(query.dynamicAccessLevel, mode.apiVersion)
+            : mode)
     )));
     return { queries, inventory, unresolvedFields, parserLimitations, modeResults };
   }
