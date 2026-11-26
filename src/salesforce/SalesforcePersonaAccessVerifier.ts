@@ -101,9 +101,10 @@ const quoteId = (id: string) => `'${id}'`; // IDs are validated before interpola
 export class SalesforcePersonaAccessVerifier {
   private inventoryCache: { key: string; until: number; value: Inventory } | null = null;
   private inventoryInflight: {key:string;work:Promise<Inventory>} | null = null;
-  // Only actual user/object evidence may be shared across personas; matching
-  // and persona-specific verdicts/provenance remain independent.
-  private readonly userObjectReads=new VerificationReadCache<boolean|null>(60_000,2000,"org.user_object_gateway");
+  // Coalesce only simultaneous actual user/object reads across personas.
+  // Do not add a second completed OLS cache that could extend the effective
+  // freshness of the existing persona evidence cache.
+  private readonly userObjectReads=new VerificationReadCache<boolean|null>(0,2000,"org.user_object_gateway");
   // Deduplicate concurrent user selection across many OLS/FLS checks. The
   // inventory WeakMap isolates results across orgs and metadata refreshes.
   private readonly matchingCache = new WeakMap<Inventory, Map<string, Promise<MatchedUsers>>>();

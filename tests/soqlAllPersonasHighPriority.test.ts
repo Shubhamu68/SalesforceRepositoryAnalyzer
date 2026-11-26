@@ -230,3 +230,30 @@ test("repository-only high-priority report explicitly warns that zero confirmed 
     assert.equal(sheet.getColumn(5).values.filter(value => value === "High").length, 0);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+
+test("opt-in all-personas workers are bounded independently and keep configured report order",async()=>{
+  const old=process.env.SALESFORCE_ALL_PERSONAS_CONCURRENCY;
+  const root=await mkdtemp(path.join(os.tmpdir(),"sf-persona-scheduling-"));
+  try{
+    process.env.SALESFORCE_ALL_PERSONAS_CONCURRENCY="4";
+    await writeFile(path.join(root,"Simple.cls"),"public class Simple { [SELECT Id FROM Account WITH USER_MODE]; }");
+    let active=0,peak=0;
+    const analyzer={
+      prepare:async()=>({}),
+      analyzePrepared:async(persona:Persona)=>{
+        active++;peak=Math.max(peak,active);
+        await new Promise<void>(resolve=>setTimeout(resolve,persona.name==="P1"?20:5));
+        active--;return [];
+      }
+    } as unknown as SoqlSecurityAnalyzer;
+    const selected=["P1","P2","P3","P4","P5","P6"].map(makePersona);
+    const result=await new SoqlAnalysisService(root,analyzer,path.join(root,"out")).analyzeAllHighPriority(selected);
+    assert.equal(peak,4);
+    assert.deepEqual(result.personas.map(p=>p.personaName),selected.map(p=>p.name));
+  }finally{
+    if(old===undefined)delete process.env.SALESFORCE_ALL_PERSONAS_CONCURRENCY;
+    else process.env.SALESFORCE_ALL_PERSONAS_CONCURRENCY=old;
+    await rm(root,{recursive:true,force:true});
+  }
+});
