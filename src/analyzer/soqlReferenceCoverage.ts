@@ -59,5 +59,5 @@ export function verifyFinitePermissionCoverage(source:string,site:ApexCallSite,q
 export function needsDynamicCoverageReview(site:{referenceCoverage?:SoqlReferenceCoverage;siteId?:string;finiteCoverage?:FinitePermissionCoverage;securityModeConflict?:boolean},queries:readonly SoqlQuery[]):boolean{
   if(site.securityModeConflict||site.referenceCoverage!=="COMPLETE_FINITE_DOMAIN"||!site.siteId||!site.finiteCoverage)return true;
   const accepted=queries.filter(q=>q.querySiteId===site.siteId);
-  return accepted.length!==site.finiteCoverage.inventories||accepted.some(q=>q.selectPrefixOnly||q.runtimeFieldCoverage);
+  return accepted.length!==site.finiteCoverage.inventories||accepted.some(q=>q.referenceCoverage!=="COMPLETE_FINITE_DOMAIN"||q.selectPrefixOnly||q.runtimeFieldCoverage);
 }

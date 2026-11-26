@@ -107,13 +107,36 @@ test("runtime configuration dependency is propagated to the actual Excel Explana
     const workbook=new ExcelJS.Workbook();await workbook.xlsx.readFile(result.reports.summaryReportPath);
     const sheet=workbook.getWorksheet("Summary")!;
     const explanation=String(sheet.getCell("F7").value);
-    // Preserve the actionable root blocker, not the chain of downstream
-    // symptoms or repeated coverage disclaimers.
-    assert.match(explanation,/Could not determine input values: reportName \(Report\.cls:3\).*no source caller could be verified/);
-    assert.match(explanation,/Permissions not verified/);
+    // The user-facing explanation is concise; source-level blockers remain in diagnostics.
+    assert.equal(explanation,"OLS/FLS could not be fully verified because the dynamic query’s object or field references depend on runtime inputs.");
     assert.ok(explanation.length<=200,explanation);
     assert.doesNotMatch(explanation,/Why the query could not be fully resolved|Object_API_Name__c|getFieldListFromFieldSet|OLS\/FLS analysis was not performed/);
     assert.equal(sheet.getCell("E7").value,"Unable to verify");
     assert.equal(sheet.getCell("E7").font.color?.argb,"FFB42332");
   }finally{await rm(root,{recursive:true,force:true});}
+});
+
+
+test("Excel finalization removes only complete finite site review, preserving genuine access findings and runtime reviews",async()=>{
+ const root=await mkdtemp(path.join(os.tmpdir(),"sf-excel-coverage-"));
+ try{
+   const source="public class Q {public static void run(String kind){try{String q='';if(kind=='A'){q='SELECT Id,Name FROM Account WHERE Id=:rid';}else if(kind=='C'){q='SELECT Id,Email FROM Contact WHERE Id=:rid';}q+=' WITH SECURITY_ENFORCED';Database.query(q);}catch(Exception e){System.debug(e);}}public static void runtime(String objectName){Database.query('SELECT Id FROM '+objectName);}}";
+   await writeFile(path.join(root,"Q.cls"),source);
+   const analyzer={analyze:async(_persona:Persona,queries:import("../src/models/SoqlQuery.js").SoqlQuery[])=>{
+     const accepted=queries.filter(q=>q.referenceCoverage==="COMPLETE_FINITE_DOMAIN");
+     assert.equal(accepted.length,2);
+     const q=accepted.find(q=>q.object==="Account")!;
+     return [{...example,filePath:q.filePath,lineNumber:q.lineNumber,queryVariantId:q.queryVariantId,object:q.object,field:"Name",query:q.query},
+       {...example,severity:"REVIEW",criticality:"Unable to verify",verificationSource:"UNVERIFIED",object:"Contact",field:"Email",reason:"Org permission evidence unavailable"}] as SoqlSecurityFinding[];
+   }} as unknown as SoqlSecurityAnalyzer;
+   const result=await new SoqlAnalysisService(root,analyzer,path.join(root,"reports")).analyze({name:"Test"} as Persona);
+   assert.equal(result.findings.length,3);
+   assert.equal(result.findings.filter(f=>f.object==="Dynamic SOQL").length,1);
+   assert.equal(result.findings.filter(f=>f.criticality==="High").length,1);
+   assert.equal(result.findings.filter(f=>f.criticality==="Unable to verify").length,2);
+   const workbook=new ExcelJS.Workbook();await workbook.xlsx.readFile(result.reports.summaryReportPath);
+   const rows=workbook.getWorksheet("Summary")!.getRows(7,3)!;
+   assert.equal(rows.filter(r=>r.getCell(1).value==="Dynamic SOQL").length,1);
+   assert.equal(rows.filter(r=>r.getCell(5).value==="Unable to verify").length,2);
+ }finally{await rm(root,{recursive:true,force:true});}
 });

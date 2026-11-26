@@ -296,6 +296,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
       const finiteCoverage=!bounded&&!conflicts.size&&aggregatedPermissionInventories&&
         !repositoryIndex?.hasSourceClass("String")&&!repositoryIndex?.hasSourceClass("Database")
         ?verifyFinitePermissionCoverage(source,site,queries.filter(q=>q.querySiteId===siteId),mode,repositoryIndex?.indexedMethods(filePath,source)):undefined;
+      if(finiteCoverage)for(const q of queries)if(q.querySiteId===siteId)q.referenceCoverage="COMPLETE_FINITE_DOMAIN";
       const referenceCoverage:SoqlReferenceCoverage=conflicts.size?"SECURITY_MODE_CONFLICT":finiteCoverage?"COMPLETE_FINITE_DOMAIN":
         knownVariants||partialStructureVariants||conditionalFrameworkVariants?"PARTIAL_REFERENCES":
         bounded?"ANALYSIS_LIMIT":runtimeInput?"RUNTIME_DEPENDENT":metadataOrHelper?"METADATA_OR_HELPER_UNAVAILABLE":"UNRESOLVED";

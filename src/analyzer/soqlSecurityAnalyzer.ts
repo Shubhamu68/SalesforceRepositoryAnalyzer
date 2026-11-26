@@ -380,7 +380,9 @@ export class SoqlSecurityAnalyzer {
       const coverage=variant?queryByLocation.get(variant)?.query.coverage:undefined;
       if(variant&&queryByLocation.get(variant)?.query.runtimeFieldCoverage){
         if(finding.field!=="(Runtime-dependent additional fields)")finding.reason += " Additional runtime fields unverified.";
-      }else if(coverage==="KNOWN_CALLER_CONTEXT")
+      }else if(variant&&queryByLocation.get(variant)?.query.referenceCoverage==="COMPLETE_FINITE_DOMAIN")
+        finding.reason += " All source-defined permission references are included; the runtime query may vary.";
+      else if(coverage==="KNOWN_CALLER_CONTEXT")
         finding.reason += " Other callers unverified.";
       else if(coverage==="CONDITIONAL_FRAMEWORK_CONTEXT")
         finding.reason += " Actual job state unverified.";
