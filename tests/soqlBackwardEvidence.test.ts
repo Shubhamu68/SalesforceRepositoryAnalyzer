@@ -612,3 +612,16 @@ test("literal sort fields survive an unknown WHERE; a raw sort hole remains unve
  const unsafe=evidence([{filePath:"Q.cls",source:conflict}]);
  assert.ok(![...fields(unsafe.queries)].some(f=>f.startsWith("ORDER_BY:")));
 });
+
+
+test("COUNT root survives one unknown conditional WHERE from a private caller but retains review",()=>{
+ const source="public class CountRunner { public class Result {public Integer total;} public static void run(String filter){Result result=new Result();String obj='Account';result.total=count(obj,filter);} private static Integer count(String obj,String filter){String q='SELECT COUNT() FROM '+String.escapeSingleQuotes(obj);if(String.isNotBlank(filter)){q+=' WHERE '+filter;}return Database.countQueryWithBinds(q,new Map<String,Object>(),AccessLevel.USER_MODE);} }";
+ const index=new ApexRepositoryMethodIndex([{filePath:"CountRunner.cls",source}]);
+ const site=discoverApexInvocations(source,dynamicDatabaseQuerySelector)[0];
+ const result=backtrackSoqlPermissionShapes(source,"CountRunner.cls",site,index);
+ assert.deepEqual(result.queries,["SELECT COUNT() FROM Account"],JSON.stringify(result));
+ assert.deepEqual(result.partialSelectQueries,result.queries);
+ const scan=extractDynamicSoqlQueries(source,"CountRunner.cls",undefined,index);
+ assert.equal(scan.unresolved.length,1);
+ assert.ok(scan.queries.some(q=>q.object==="Account"&&q.selectPrefixOnly&&q.fields.length===0),JSON.stringify(scan));
+});

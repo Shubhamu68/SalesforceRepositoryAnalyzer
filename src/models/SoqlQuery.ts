@@ -72,7 +72,7 @@ export interface SoqlQuery {
   /** Parser-only inventory, distinct from complete query execution coverage.
    * Does not imply exhaustive caller coverage or runtime execution. */
   permissionEvidence?: "AGGREGATED_STRUCTURE";
-  /** Historical name: known SELECT/FROM and independently proven clauses; remaining query text and enforcement unverified. */
+  /** Historical name: known SELECT/FROM (or COUNT root) and independently proven clauses; remaining query text and enforcement unverified. */
   selectPrefixOnly?: boolean;
   /** Only additional schema-filtered SELECT fields are runtime-dependent. */
   runtimeFieldCoverage?: boolean;

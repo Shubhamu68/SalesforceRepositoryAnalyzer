@@ -24,3 +24,8 @@ test("normal scanner creates concise final report reason without opt-in trace",(
  assert.ok((result.unresolved[0].reportReason??"").length<240);
  assert.equal(result.unresolved[0].trace,undefined);
 });
+
+
+test("clause-specific report distinguishes known sort and unknown predicates",()=>{
+ assert.equal(explainSoqlReview({reason:"old",aggregatedPermissionInventories:3,recoveredClauses:["SELECT","ORDER BY"],unknownWhere:true}),"Known SELECT / ORDER BY references recovered (3 inventories). Runtime WHERE and effective enforcement remain unverified.");
+});

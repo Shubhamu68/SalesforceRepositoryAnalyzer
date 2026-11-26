@@ -176,7 +176,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
       // Aggregate only additional permission evidence. Existing variants
       // keep their IDs, occurrence counts and coverage classifications.
       let aggregatedPermissionInventories=0,runtimeFieldCoverage=false;
-      let compactBlocker:string|undefined,bounded=false;
+      let compactBlocker:string|undefined,bounded=false,unknownWhere=false,incompleteSelect=false;
       const recoveredClauses=new Set<string>();
       if(trace){trace.priorVariants=variants.size;trace.fallback=mode===null?"SKIP_UNKNOWN_ACCESS_MODE":"NOT_ATTEMPTED";}
       if(mode!==null){
@@ -196,6 +196,8 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
         const structuralCodes=new Set<string>();
         const reportObserver:ApexDependencyObserver=event=>{
           blockers.observe(event);observe?.(event);
+          if(event.code==="SOQL_OPTIONAL_WHERE_UNVERIFIED")unknownWhere=true;
+          if(event.code==="SOQL_PARTIAL_EFFECT_PREFIX_VALIDATED")incompleteSelect=true;
           if(["SOQL_CONDITIONAL_MERGE_REJECTED","SOQL_RUNTIME_SLOT_UNPROVEN","SOQL_REQUIRED_REFERENCE_MISMATCH","SOQL_VALUE_UNRESOLVED","RUNTIME_SELECT_DOMAIN_MISMATCH"].includes(event.code))
             structuralCodes.add(event.code);
         };
@@ -280,7 +282,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
       }
       const reportReason=explainSoqlReview({reason,blocker:compactBlocker,knownVariants,partialStructureVariants,
         conditionalFrameworkVariants,aggregatedPermissionInventories,runtimeFieldCoverage,bounded,
-        recoveredClauses:[...recoveredClauses],
+        recoveredClauses:[...recoveredClauses],unknownWhere,incompleteSelect,
         ...(conflicts.size&&mode?{conflict:"Security-mode conflict: WITH "+[...conflicts].sort().join(" / WITH ")+" disagrees with AccessLevel."+mode+". Conflicting query permissions not verified."}:{})});
       unresolved.push({filePath,lineNumber:site.line,siteId,reason:explanation,reportReason,failureKind,...(backwardExplanation?{backwardExplanation}:{}),...(conflicts.size?{securityModeConflict:true}:{}),...(knownVariants?{knownVariants}:{}),
         ...(partialStructureVariants?{partialStructureVariants}:{}),...(conditionalFrameworkVariants?{conditionalFrameworkVariants}:{}),...(aggregatedPermissionInventories?{aggregatedPermissionInventories}:{}),...(runtimeFieldCoverage?{runtimeFieldCoverage:true}:{}),...(trace?{trace}:{})});

@@ -101,14 +101,25 @@ function mergeSoqlAppends(base:Evidence,additions:readonly ApexDependencyAppend<
   if(full&&matches(full,base.annotations)){
     const shapes=[full];
     const anchor=full.fields.find(f=>f.context==="SELECT")?.fieldPath;
-    if(!anchor)return ev(stop("no SELECT anchor"));
+    if(!anchor&&!full.countOnly)return ev(stop("no SELECT anchor"));
+    // COUNT() with an exact root and one conditional unknown WHERE suffix
+    // retains object evidence without claiming the predicate is resolved.
+    if(full.countOnly&&full.fields.length===0&&full.mode==="UNSPECIFIED"&&original&&
+      additions.length===1&&additions[0].conditional){
+      const addition=additions[0].evidence;
+      const parts=addition.value.kind==="unknown"?addition.value.fragments:undefined;
+      if(!addition.annotations.length&&parts?.[0]?.kind==="literal"&&/^ WHERE $/i.test(parts[0].text)&&
+        parts.length>1&&parts.slice(1).every(p=>p.kind==="hole"))
+        return ev({kind:"unknown",reason:"Conditional COUNT predicate unverified",fragments:[
+          {kind:"literal",text:original},{kind:"hole",symbol:{name:"predicate",type:optionalWhereType}}]});
+    }
     for(const a of additions){
       const text=fragmentText(a.evidence.value)?.trim();
       if(text===undefined)return ev(stop("unknown appended fragment"));
       if(!text)continue;
       const order=/^ORDER\s+BY\s+/i.test(text);
       const predicate=text.replace(/^(?:WHERE|AND|OR)\s+/i,"");
-      const proof=simplePermissionShape("SELECT "+anchor+" FROM "+full.object+(order?" "+text:" WHERE "+predicate));
+      const proof=simplePermissionShape("SELECT "+(anchor??"COUNT()")+" FROM "+full.object+(order?" "+text:" WHERE "+predicate));
       if(!proof||proof.mode!=="UNSPECIFIED"||!matches(proof,a.evidence.annotations)||
         !proof.fields.some(f=>f.context===(order?"ORDER_BY":"WHERE"))||
         proof.fields.some(f=>f.context!=="SELECT"&&f.context!==(order?"ORDER_BY":"WHERE")))return ev(stop("unsupported conditional clause"));
@@ -228,6 +239,7 @@ export function backtrackSoqlPermissionShapes(source:string,filePath:string,site
                 const retained=provenOrderSuffix(evidence,suffix,site.line)??evidence;
                 queries.add(retained);partialSelectQueries.add(retained);
                 note("SOQL_PARTIAL_EFFECT_PREFIX_VALIDATED",select.fields.length);
+                if(remainder[0]?.kind==="hole"&&remainder[0].symbol?.type===optionalWhereType)note("SOQL_OPTIONAL_WHERE_UNVERIFIED");
                 if(retained!==evidence)note("SOQL_ORDER_BY_EVIDENCE_VALIDATED");
               }
             }
@@ -244,8 +256,18 @@ export function backtrackSoqlPermissionShapes(source:string,filePath:string,site
             const evidence=prefix.text.trim(),retained=provenOrderSuffix(evidence,suffix.text,site.line)??evidence;
             queries.add(retained);partialSelectQueries.add(retained);
             note("SOQL_SELECT_PREFIX_VALIDATED",select.fields.length);
+            note("SOQL_OPTIONAL_WHERE_UNVERIFIED");
             if(retained!==evidence)note("SOQL_ORDER_BY_EVIDENCE_VALIDATED");
           }
+        }
+      }
+      if((mode==="USER_MODE"||mode==="SYSTEM_MODE")&&fragments?.length===2&&
+        fragments[0].kind==="literal"&&fragments[1].kind==="hole"&&fragments[1].symbol?.type===optionalWhereType&&
+        /^\s*SELECT\s+COUNT\s*\(\s*\)\s+FROM\s+[A-Za-z_]\w*\s*$/i.test(fragments[0].text)){
+        const evidence=fragments[0].text.trim(),count=simplePermissionShape(evidence,site.line);
+        if(count?.countOnly&&!count.fields.length&&count.mode==="UNSPECIFIED"&&!proof.annotations.length){
+          queries.add(evidence);partialSelectQueries.add(evidence);note("SOQL_COUNT_ROOT_VALIDATED");
+          note("SOQL_OPTIONAL_WHERE_UNVERIFIED");
         }
       }
       note(proof.value.kind==="unknown"?(proof.value.fragments?.length?"SOQL_RUNTIME_SLOT_UNPROVEN":"SOQL_VALUE_UNRESOLVED"):"SOQL_NON_TEXT_CANDIDATE");

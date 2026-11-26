@@ -6,6 +6,8 @@ export interface SoqlPermissionShape {
   object:string;
   mode:DeclaredSoqlMode;
   fields:SoqlExpressionField[];
+  /** COUNT() requires object access, with no SELECT field. */
+  countOnly?:boolean;
 }
 const fieldPath=/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/;
 /** FORMAT affects presentation, not the underlying field permission. This
@@ -25,28 +27,30 @@ export function simplePermissionShape(text:string,line=1,onReject?:(code:string)
   if(root.subqueries.length)return reject("NESTED_SCOPE_UNSUPPORTED");
   if(!inventory.parsed)return reject("SOQL_PARSE_FAILED");
   if(inventory.limitations.length)return reject("FIELD_INVENTORY_LIMITATION");
-  if(!inventory.fields.length)return reject("FIELD_INVENTORY_EMPTY");
+  const countOnly=/^\s*SELECT\s+COUNT\s*\(\s*\)\s+FROM\b/i.test(text);
+  if(!inventory.fields.length&&!countOnly)return reject("FIELD_INVENTORY_EMPTY");
   if(inventory.fields.some(f=>(f.functionName&&!(f.context==="SELECT"&&f.functionName.toUpperCase()==="FORMAT"))||!fieldPath.test(f.fieldPath)||
       !["SELECT","WHERE","ORDER_BY"].includes(f.context)))return reject("FIELD_CONTEXT_UNSUPPORTED");
   const visible=maskSoqlStringsAndComments(text);
   // Restrict to ordinary bare SELECT paths and a single unaliased root.
   const match=/^\s*SELECT\s+([\w\s.,()]+?)\s+FROM\s+([A-Za-z_]\w*)\b/i.exec(visible);
   if(!match||match[2].toLowerCase()!==root.fromName.toLowerCase()||
-    match[1].split(",").some(f=>!permissionSelectFieldPath(f)))return reject("SELECT_ROOT_SHAPE_UNSUPPORTED");
+    (!countOnly&&match[1].split(",").some(f=>!permissionSelectFieldPath(f))))return reject("SELECT_ROOT_SHAPE_UNSUPPORTED");
   const tail=visible.slice(match[0].length).trim();
   if(tail&&!/^(?:WHERE\b|WITH\b|ORDER\s+BY\b|LIMIT\b|OFFSET\b|FOR\b)/i.test(tail))return reject("ROOT_TAIL_UNSUPPORTED");
   if(/\b(?:GROUP\s+BY|HAVING|TYPEOF)\b/i.test(visible))return reject("GROUPED_SHAPE_UNSUPPORTED");
-  return {object:root.fromName,mode:classifySoqlMode(text),fields:inventory.fields};
+  return {object:root.fromName,mode:classifySoqlMode(text),fields:inventory.fields,...(countOnly?{countOnly:true}:{})};
 }
 
 /** One parser-only representative per root object and declared security mode.
  * Preserve clause usage (SECURITY_ENFORCED treats SELECT differently from
  * WHERE); never promote predicates to selected fields. No runtime query. */
 export function aggregatePermissionShapes(shapes:readonly SoqlPermissionShape[],onReject?:(code:string)=>void):string[]{
-  const groups=new Map<string,{object:string;mode:DeclaredSoqlMode;fields:Map<string,SoqlExpressionField>}>();
+  const groups=new Map<string,{object:string;mode:DeclaredSoqlMode;fields:Map<string,SoqlExpressionField>;countOnly?:boolean}>();
   for(const shape of shapes){
     const key=shape.object.toLowerCase()+"|"+shape.mode;
-    const group=groups.get(key)??{object:shape.object,mode:shape.mode,fields:new Map()};
+    const group=groups.get(key)??{object:shape.object,mode:shape.mode,fields:new Map<string,SoqlExpressionField>(),countOnly:false};
+    if(shape.countOnly)group.countOnly=true;
     for(const field of shape.fields){
       const k=field.context+"|"+field.fieldPath.toLowerCase();
       if(!group.fields.has(k))group.fields.set(k,field);
@@ -59,8 +63,8 @@ export function aggregatePermissionShapes(shapes:readonly SoqlPermissionShape[],
     const select=fields.filter(f=>f.context==="SELECT").map(f=>f.fieldPath);
     const where=fields.filter(f=>f.context==="WHERE").map(f=>f.fieldPath+" != null");
     const order=fields.filter(f=>f.context==="ORDER_BY").map(f=>f.fieldPath);
-    if(!select.length){onReject?.("AGGREGATE_NO_SELECT");continue;}
-    const text="SELECT "+select.join(", ")+" FROM "+group.object+
+    if(!select.length&&!group.countOnly){onReject?.("AGGREGATE_NO_SELECT");continue;}
+    const text="SELECT "+(select.length?select.join(", "):"COUNT()")+" FROM "+group.object+
       (where.length?" WHERE "+where.join(" AND "):"")+
       (group.mode==="UNSPECIFIED"?"":" WITH "+group.mode)+
       (order.length?" ORDER BY "+order.join(", "):"");

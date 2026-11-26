@@ -10,6 +10,8 @@ export interface SoqlReviewEvidence {
   conditionalFrameworkVariants?:number;
   aggregatedPermissionInventories?:number;
   recoveredClauses?:readonly string[];
+  unknownWhere?:boolean;
+  incompleteSelect?:boolean;
   runtimeFieldCoverage?:boolean;
   bounded?:boolean;
 }
@@ -25,7 +27,8 @@ export function explainSoqlReview(e:SoqlReviewEvidence):string{
   if(e.aggregatedPermissionInventories){
     const n=e.aggregatedPermissionInventories;
     const known=e.recoveredClauses?.length?"Known "+e.recoveredClauses.join(" / ")+" references recovered":"Known query references recovered";
-    return known+" ("+n+" "+(n===1?"inventory":"inventories")+"). Full runtime query and effective enforcement remain unverified."+limited;
+    const remaining=e.unknownWhere?(e.incompleteSelect?"Additional SELECT fields, runtime WHERE and effective enforcement remain unverified.":"Runtime WHERE and effective enforcement remain unverified."):"Full runtime query and effective enforcement remain unverified.";
+    return known+" ("+n+" "+(n===1?"inventory":"inventories")+"). "+remaining+limited;
   }
   if(e.knownVariants||e.partialStructureVariants||e.conditionalFrameworkVariants)
     return "Known query versions or references checked. Other runtime paths remain unverified."+limited;

@@ -160,3 +160,14 @@ test("read-only label-backed cache is resolved independently of batch static lif
     assert.deepEqual(proveLabelBackedPermissionShapes(changed,discoverApexInvocations(changed,dynamicDatabaseQuerySelector)[0],resolver),[],changed);
   }
 });
+
+
+test("aggregate COUNT() object evidence does not invent SELECT Id or drop WHERE fields",()=>{
+ const count=simplePermissionShape("SELECT COUNT() FROM Account");
+ assert.ok(count?.countOnly);
+ assert.deepEqual(count.fields,[]);
+ assert.deepEqual(aggregatePermissionShapes([count]),["SELECT COUNT() FROM Account"]);
+ const filtered=simplePermissionShape("SELECT COUNT() FROM Account WHERE Name != null");
+ assert.ok(filtered?.countOnly);
+ assert.deepEqual(aggregatePermissionShapes([count,filtered]),["SELECT COUNT() FROM Account WHERE Name != null"]);
+});
