@@ -641,3 +641,40 @@ test("metadata candidate caller roots propagate into COUNT without synthetic fie
  assert.equal(scan.unresolved[0].aggregatedPermissionInventories,3);
  assert.match(scan.unresolved[0].reportReason??"",/Runtime WHERE and effective enforcement remain unverified/);
 });
+
+
+test("phase 4: guarded predicate list preserves clause context and ignores bound data",()=>{
+  const source="public class FilterFixture {public static void run(String term,Id owner,Boolean active){List<String> clauses=new List<String>{'Name LIKE :term'};if(active){clauses.add('OwnerId = :owner');}else{clauses.add('Parent.Name != null');}String filter=clauses.isEmpty()?'':String.join(clauses,' AND ');String q='SELECT Id FROM Account'+(String.isNotBlank(filter)?(' WHERE '+filter):'');Database.queryWithBinds(q,new Map<String,Object>(),AccessLevel.USER_MODE);}}";
+  const result=evidence([{filePath:"FilterFixture.cls",source}]);
+  assert.deepEqual(fields(result.queries),new Set(["SELECT:Id","WHERE:Name","WHERE:OwnerId","WHERE:Parent.Name"]),JSON.stringify(result));
+  const scan=extractDynamicSoqlQueries(source,"FilterFixture.cls",undefined,new ApexRepositoryMethodIndex([{filePath:"FilterFixture.cls",source}]));
+  assert.ok(scan.queries.some(q=>q.permissionEvidence==="AGGREGATED_STRUCTURE"&&q.query.includes("Parent.Name")),JSON.stringify(scan));
+  assert.equal(scan.unresolved.length,1);
+});
+test("phase 4: predicates from correlated metadata records remain associated with their root",()=>{
+  const source="public class FilterFixture {public static void run(String name){Config__mdt cfg=Config__mdt.getInstance(name);List<String> clauses=new List<String>();clauses.add(cfg.Filter__c+' = :input');String filter=String.join(clauses,' AND ');String q='SELECT Id FROM '+cfg.Object__c+(String.isNotBlank(filter)?(' WHERE '+filter):'');Database.queryWithBinds(q,new Map<String,Object>(),AccessLevel.USER_MODE);}}";
+  const result=evidence([{filePath:"FilterFixture.cls",source}],(name)=>name==="Apex.metadataRows"?{kind:"records",items:[
+    [["DeveloperName",textValue("A")],["Object__c",textValue("Account")],["Filter__c",textValue("Industry")]],
+    [["DeveloperName",textValue("B")],["Object__c",textValue("Contact")],["Filter__c",textValue("Email")]]
+  ]}:undefined);
+  assert.deepEqual(fields(result.queries.filter(q=>q.includes("FROM Account"))),new Set(["SELECT:Id","WHERE:Industry"]),JSON.stringify(result));
+  assert.deepEqual(fields(result.queries.filter(q=>q.includes("FROM Contact"))),new Set(["SELECT:Id","WHERE:Email"]),JSON.stringify(result));
+});
+test("phase 4: unknown additional WHERE does not erase known permission references",()=>{
+  const source="public class FilterFixture {public static void run(String raw,Boolean flag,Boolean extra){String q='SELECT Id FROM Account WHERE Name != null';if(flag){q+=' AND Industry != null';}if(extra){q+=' AND '+raw;}Database.queryWithBinds(q,new Map<String,Object>(),AccessLevel.USER_MODE);}}";
+  const result=evidence([{filePath:"FilterFixture.cls",source}]);
+  assert.deepEqual(fields(result.queries),new Set(["SELECT:Id","WHERE:Name","WHERE:Industry"]),JSON.stringify(result));
+  assert.deepEqual(result.partialSelectQueries,result.queries);
+  const scan=extractDynamicSoqlQueries(source,"FilterFixture.cls",undefined,new ApexRepositoryMethodIndex([{filePath:"FilterFixture.cls",source}]));
+  assert.ok(scan.queries.some(q=>q.selectPrefixOnly&&q.permissionEvidence==="AGGREGATED_STRUCTURE"),JSON.stringify(scan));
+  assert.equal(scan.unresolved.length,1);
+  assert.match(scan.unresolved[0].reportReason??"",/WHERE.*unverified/i);
+  const implicit=source.replace("Database.queryWithBinds(q,new Map<String,Object>(),AccessLevel.USER_MODE)","Database.query(q)");
+  assert.equal(evidence([{filePath:"FilterFixture.cls",source:implicit}]).partialSelectQueries,undefined);
+});
+test("phase 4: arbitrary predicate inputs and non-predicate collection members are not proven",()=>{
+  for(const fragment of ["raw","'Name != null ORDER BY Name'","'Name != null WITH SYSTEM_MODE'","'Name != null LIMIT 1'","'Name != null AND'"]){
+    const source="public class FilterFixture {public static void run(String raw){List<String> clauses=new List<String>{"+fragment+"};String filter=String.join(clauses,' AND ');Database.query('SELECT Id FROM Account WHERE '+filter);}}";
+    assert.deepEqual(evidence([{filePath:"FilterFixture.cls",source}]).queries,[],source);
+  }
+});

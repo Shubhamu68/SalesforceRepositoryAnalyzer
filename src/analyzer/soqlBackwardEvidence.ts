@@ -8,6 +8,7 @@ import {maskApexSource} from "../core/apex/ApexSourceModel.js";
 import {parseApexAccessLevel} from "../core/apex/ApexDatabaseAccessMode.js";
 import {reportApexDependency,type ApexDependencyObserver} from "../core/apex/ApexDependencyDiagnostics.js";
 import {provePartialSoql} from "./soqlPartialStructure.js";
+import {maskSoqlStringsAndComments} from "./soqlExecutionMode.js";
 import {aggregatePermissionShapes,simplePermissionShape,permissionSelectFieldPath,type SoqlPermissionShape} from "./soqlPermissionAggregation.js";
 const one=(v:ApexValue)=>v.kind==="text"&&v.values.length===1&&!v.scalarType?v.values[0]:undefined;
 const stop=(reason:string)=>unknown("SOQL backward evidence: "+reason);
@@ -15,6 +16,7 @@ const path=/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/;
 const MAX_FIELDS=2000;
 const runtimeSelectPrefix="schema-filtered-select-additions:";
 const optionalWhereType="soql-optional-where-clause";
+const partialWhereType="soql-partial-where-clause";
 const partialEffectType="soql-schema-effect-partial-select";
 type Use=SoqlPermissionShape["fields"][number];
 type Evidence=ApexDependencyEvidence<Use>;
@@ -61,6 +63,66 @@ function fragmentText(value:ApexValue):string|undefined{
   const scaffold="SELECT Id FROM TraceObject__c WHERE ";
   const parsed=parseText(addApexValues(textValue(scaffold),value));
   return parsed?.slice(scaffold.length);
+}
+
+/** Validate a predicate in isolation. The scaffold never contributes an
+ * actual permission field; only WHERE references are transferred. Do not
+ * accept complete clauses, subqueries, or repair malformed predicates. */
+function strictPredicate(text:string):SoqlPermissionShape|undefined{
+  const visible=maskSoqlStringsAndComments(text).trim();
+  if(!visible||/^(?:WHERE|AND|OR)\b/i.test(visible)||/\b(?:AND|OR)\s*$/i.test(visible)||
+    /\b(?:SELECT|FROM|WITH|ORDER\s+BY|GROUP\s+BY|HAVING|LIMIT|OFFSET|FOR|TYPEOF)\b/i.test(visible))return undefined;
+  return normalizePredicate(textValue(text));
+}
+function predicateInventory(fields:readonly Use[]):string{
+  return [...new Map(fields.filter(f=>f.context==="WHERE").map(f=>[f.fieldPath.toLowerCase(),f.fieldPath])).values()]
+    .map(field=>field+" != null").join(" AND ");
+}
+function partialWhere(text:string,annotations:readonly Use[]=[]):Evidence{
+  return ev({kind:"unknown",reason:"Additional runtime WHERE references are not proven",fragments:[
+    {kind:"literal",text},{kind:"hole",symbol:{name:"predicate",type:partialWhereType}}
+  ]},annotations);
+}
+function knownPartialPredicate(value:ApexValue):string|undefined{
+  if(value.kind!=="unknown"||value.fragments?.length!==2)return undefined;
+  const [before,hole]=value.fragments;
+  return before.kind==="literal"&&hole.kind==="hole"&&hole.symbol?.type===partialWhereType?before.text:undefined;
+}
+/** An unproven structural fragment can widen a WHERE inventory, but can
+ * never be substituted with a data value or used as proof of enforcement. */
+function unknownPredicateAppend(value:ApexValue):boolean{
+  if(value.kind!=="unknown"||!value.fragments?.length)return false;
+  const [first,...rest]=value.fragments;
+  return first.kind==="literal"&&/^\s+(?:WHERE|AND|OR)\s+$/i.test(first.text)&&
+    rest.length>0&&rest.some(p=>p.kind==="hole");
+}
+/** Resolve only source-proven optional predicate and guarded join forms.
+ * For a nonempty candidate list, its inventory is independent of whether
+ * a particular runtime execution has zero, one or several predicates. */
+function abstractPredicateEvidence(context:ApexDependencyExpressionContext,resolve:(expression:string)=>Evidence,platformShadowed:boolean):Evidence|undefined{
+  const {source,methods,method,expression,offset}=context;
+  if(platformShadowed||!expression.includes("?"))return undefined;
+  const symbols=apexSymbols(source,methods);
+  if(symbols.hasLocalBinding(method,"String",offset)||/\bclass\s+String\b/i.test(maskApexSource(source)))return undefined;
+  const optional=/^String\s*\.\s*isNotBlank\s*\(\s*([A-Za-z_]\w*)\s*\)\s*\?\s*\(\s*' WHERE '\s*\+\s*([A-Za-z_]\w*)\s*\)\s*:\s*''$/i.exec(expression);
+  if(optional&&optional[1].toLowerCase()===optional[2].toLowerCase()&&symbols.lookup(method,optional[1],offset)==="string"){
+    const input=resolve(optional[1]),partial=knownPartialPredicate(input.value);
+    const text=partial??fragmentText(input.value);
+    if(text===undefined)return undefined;
+    if(!text.trim())return input.annotations.length?undefined:ev(textValue(""));
+    const proof=strictPredicate(text);
+    if(!proof||!matches(proof,input.annotations))return undefined;
+    const references=proof.fields.filter(f=>f.context==="WHERE");
+    const inventory=" WHERE "+predicateInventory(references);
+    return partial!==undefined?partialWhere(inventory,references):ev(textValue(inventory),references);
+  }
+  const guarded=/^([A-Za-z_]\w*)\s*\.\s*isEmpty\s*\(\s*\)\s*\?\s*''\s*:\s*(String\s*\.\s*join\s*\(\s*([A-Za-z_]\w*)\s*,\s*'\s+(?:AND|OR)\s+'\s*\))$/i.exec(expression);
+  if(guarded&&guarded[1].toLowerCase()===guarded[3].toLowerCase()&&symbols.lookup(method,guarded[1],offset)==="list<string>"){
+    // The same typed list is used on both arms, and joining an empty list
+    // yields the empty string. Keep the join policy's proof/unknown result.
+    return resolve(guarded[2]);
+  }
+  return undefined;
 }
 
 function abstractSoqlExpression(context:ApexDependencyExpressionContext):ApexValue|undefined{
@@ -113,9 +175,15 @@ function mergeSoqlAppends(base:Evidence,additions:readonly ApexDependencyAppend<
         return ev({kind:"unknown",reason:"Conditional COUNT predicate unverified",fragments:[
           {kind:"literal",text:original},{kind:"hole",symbol:{name:"predicate",type:optionalWhereType}}]});
     }
+    let incompleteWhere=false;
     for(const a of additions){
       const text=fragmentText(a.evidence.value)?.trim();
-      if(text===undefined)return ev(stop("unknown appended fragment"));
+      if(text===undefined){
+        if(full.mode==="UNSPECIFIED"&&!a.evidence.annotations.length&&unknownPredicateAppend(a.evidence.value)){
+          incompleteWhere=true;continue;
+        }
+        return ev(stop("unknown appended fragment"));
+      }
       if(!text)continue;
       const order=/^ORDER\s+BY\s+/i.test(text);
       const predicate=text.replace(/^(?:WHERE|AND|OR)\s+/i,"");
@@ -126,22 +194,27 @@ function mergeSoqlAppends(base:Evidence,additions:readonly ApexDependencyAppend<
       shapes.push({...proof,mode:full.mode});
     }
     const result=aggregatePermissionShapes(shapes);
-    return result.length===1?ev(textValue(result[0])):ev(stop("unproven aggregated query"));
+    return result.length===1?(incompleteWhere?partialWhere(result[0]):ev(textValue(result[0]))):ev(stop("unproven aggregated query"));
   }
   const baseText=fragmentText(base.value);
   const lead=baseText?.match(/^\s*(?:WHERE|AND)\s+/i)?.[0]??"";
   const basePredicate=baseText===undefined?undefined:normalizePredicate(textValue(baseText.slice(lead.length)));
   if(basePredicate){
     const fields=basePredicate.fields.filter(f=>f.context==="WHERE");
+    let incompleteWhere=false;
     for(const a of additions){
       const text=fragmentText(a.evidence.value);
-      if(text===undefined)return ev(stop("unknown predicate append"));
+      if(text===undefined){
+        if(!a.evidence.annotations.length&&unknownPredicateAppend(a.evidence.value)){incompleteWhere=true;continue;}
+        return ev(stop("unknown predicate append"));
+      }
       const proof=normalizePredicate(textValue(text.replace(/^\s*(?:AND|OR)\s+/i,"")));
       if(!proof||!matches(proof,a.evidence.annotations))return ev(stop("unproven predicate append"));
       fields.push(...proof.fields.filter(f=>f.context==="WHERE"));
     }
     const unique=[...new Map(fields.map(f=>[f.fieldPath.toLowerCase(),f])).values()];
-    return ev(textValue(lead+unique.map(f=>f.fieldPath+" != null").join(" AND ")),unique);
+    const inventory=lead+predicateInventory(unique);
+    return incompleteWhere?partialWhere(inventory,unique):ev(textValue(inventory),unique);
   }
   // Complete comma-delimited field paths, never identifier fragments.
   // Require every resulting field to occur in the final SELECT.
@@ -166,9 +239,17 @@ export function backtrackSoqlPermissionShapes(source:string,filePath:string,site
   const trace=traceApexDependencies<Use>(source,filePath,{expression:site.argument,offset:site.offset},index,resolveExternal,{
     observe,
     abstractExpression:abstractSoqlExpression,
+    abstractEvidence:(context,resolve)=>abstractPredicateEvidence(context,resolve,!!index?.hasSourceClass("String")),
     allowMetadataCandidateRows:true,
     validatePartialSetMember:member=>!!permissionSelectFieldPath(member),
     join:(list,separator)=>{
+      if(list.value.kind==="collection"&&/^\s+(?:AND|OR)\s+$/i.test(separator)&&!list.runtimeMembers&&!list.describeObject&&list.value.items.length<=MAX_FIELDS){
+        const predicates=list.value.items.map(strictPredicate);
+        if(predicates.some(p=>!p))return undefined;
+        const references=predicates.flatMap(p=>p?.fields.filter(f=>f.context==="WHERE")??[]);
+        if(list.annotations.some(f=>!references.some(x=>x.context===f.context&&x.fieldPath.toLowerCase()===f.fieldPath.toLowerCase())))return undefined;
+        return ev(textValue(predicateInventory(references)),references);
+      }
       if(list.value.kind!=="collection"||!/^,\s*$/.test(separator)||list.value.items.length>MAX_FIELDS||list.value.items.some(s=>!permissionSelectFieldPath(s)))return undefined;
       const annotations:Use[]=list.value.items.map(field=>({fieldPath:permissionSelectFieldPath(field)!,context:"SELECT"}));
       if(list.runtimeMembers?.schemaEffectPartial){
@@ -248,6 +329,22 @@ export function backtrackSoqlPermissionShapes(source:string,filePath:string,site
         }
       }
       const fragments=proof.value.kind==="unknown"?proof.value.fragments:undefined;
+      // Keep already proven WHERE/SELECT fields when an additional optional
+      // structural predicate is opaque. Explicit AccessLevel is necessary,
+      // but effective enforcement remains unknown, just as in Phase 3.
+      if((mode==="USER_MODE"||mode==="SYSTEM_MODE")&&fragments&&(fragments.length===2||fragments.length===3)){
+        const [prefix,hole,suffix]=fragments;
+        if(prefix.kind==="literal"&&hole.kind==="hole"&&hole.symbol?.type===partialWhereType){
+          const known=simplePermissionShape(prefix.text.trim(),site.line);
+          const retained=suffix?.kind==="literal"?provenOrderSuffix(prefix.text.trim(),suffix.text,site.line):suffix===undefined?prefix.text.trim():undefined;
+          if(known?.mode==="UNSPECIFIED"&&retained&&matches(known,proof.annotations)){
+            queries.add(retained);partialSelectQueries.add(retained);
+            note("SOQL_OPTIONAL_WHERE_UNVERIFIED");
+            note("SOQL_KNOWN_WHERE_REFERENCES_VALIDATED",known.fields.filter(f=>f.context==="WHERE").length);
+            if(suffix)note("SOQL_ORDER_BY_EVIDENCE_VALIDATED");
+          }
+        }
+      }
       if((mode==="USER_MODE"||mode==="SYSTEM_MODE")&&!index?.hasSourceClass("String")&&fragments&&fragments.length>=3){
         const [prefix,hole,suffix]=fragments;
         if(prefix.kind==="literal"&&/^\s*SELECT\s+[\w\s.,()]+\s+FROM\s+[A-Za-z_]\w*\s*$/i.test(prefix.text)&&hole.kind==="hole"&&hole.symbol?.type===optionalWhereType&&suffix.kind==="literal"&&/^ ORDER BY /i.test(suffix.text)){
