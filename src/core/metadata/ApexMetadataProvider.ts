@@ -39,6 +39,14 @@ export interface FieldSetIdentity {
 export const fieldSetIdentityKey=(identity:FieldSetIdentity):string=>
   identity.objectApiName+"."+identity.fieldSetDeveloperName;
 
+/** Exact typed filter context; a bulk provider may combine projections,
+ * but must not broaden the predicates or locally approximate SOQL semantics. */
+export interface CustomMetadataRead {
+  readonly key:string;
+  readonly type:string;
+  readonly selected:readonly string[];
+  readonly filters:readonly CustomMetadataFilter[];
+}
 export interface ApexMetadataProvider {
   /** Cache scope must include org identity and connection epoch when live. */
   readonly scopeKey: string;
@@ -53,6 +61,8 @@ export interface ApexMetadataProvider {
   /** Ordered SOQL-ready field paths from a uniquely identified Field Set. */
   getFieldSetFields?(objectApiName:string,fieldSetDeveloperName:string):Promise<MetadataResult<string[]>>;
   getFieldSetFieldsBatch?(identities:readonly FieldSetIdentity[]):Promise<ReadonlyMap<string,MetadataResult<string[]>>>;
+  /** Optional bulk read. Return individually complete, exact server-filtered results only. */
+  getCustomMetadataRecordsBatch?(requests:readonly CustomMetadataRead[]):Promise<ReadonlyMap<string,CustomMetadataResult>>;
   /** Complete matching records for proven equality filters; no partial results. */
   getCustomMetadataRecords(
     objectApiName: string, fields: readonly string[], filters?: readonly CustomMetadataFilter[],

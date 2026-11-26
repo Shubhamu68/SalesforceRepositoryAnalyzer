@@ -5,7 +5,7 @@ import type {ApexInvocationSelector} from "./ApexInvocationModel.js";
 import {listValue,textValue,unknown,type ApexValue} from "./ApexValueEvaluator.js";
 import type {ApexRepositoryMethodIndex} from "./ApexRepositoryMethodIndex.js";
 import {planCustomMetadataRequest,planCustomMetadataSelectorCandidates,resolveCustomMetadataRows,type CustomMetadataRequest,type CustomMetadataInventory} from "./ApexCustomMetadataQueries.js";
-import {fieldSetIdentityKey,type ApexMetadataProvider,type FieldSetIdentity} from "../metadata/ApexMetadataProvider.js";
+import {fieldSetIdentityKey,type ApexMetadataProvider,type FieldSetIdentity,type CustomMetadataRead} from "../metadata/ApexMetadataProvider.js";
 import {ScanMetadataBatcher} from "../metadata/ScanMetadataBatcher.js";
 import {resolveSchemaSnapshot,resolveSchemaFieldMap} from "./ApexSchemaModel.js";
 import {exactMetadataStringList} from "./ApexCollectionOperations.js";
@@ -64,8 +64,13 @@ export class ApexAnalysisEngine {
   };
   private readonly labelBatch?:ScanMetadataBatcher<string,string>;
   private readonly fieldSetBatch?:ScanMetadataBatcher<FieldSetIdentity,string[]>;
+  private readonly customMetadataBatch?:ScanMetadataBatcher<CustomMetadataRead,Array<Record<string,unknown>>>;
   constructor(readonly repositoryIndex?:ApexRepositoryMethodIndex,
     private readonly metadata?:ApexMetadataProvider){
+    if(metadata)this.customMetadataBatch=new ScanMetadataBatcher(
+      request=>request.key,request=>metadata.getCustomMetadataRecords(request.type,request.selected,request.filters),
+      metadata.getCustomMetadataRecordsBatch?requests=>metadata.getCustomMetadataRecordsBatch!(requests):undefined,
+      16,value=>Array.isArray(value));
     if(metadata?.getCustomLabelValue)this.labelBatch=new ScanMetadataBatcher(
       name=>name,name=>metadata.getCustomLabelValue!(name),
       metadata.getCustomLabelValues?names=>metadata.getCustomLabelValues!(names):undefined,
@@ -253,7 +258,7 @@ export class ApexAnalysisEngine {
       ...(canReadSchemas?schemas.map(async ([key,object])=>schemaSnapshots.set(key,
         await memoRead(reads.schemas,key,()=>metadata.getObjectSchema!(object)))):[]),
       ...(canReadMetadata?mdts.map(async request=>metadataInventories.set(request.key,
-        await memoRead(reads.customMetadata,request.key,()=>metadata.getCustomMetadataRecords(request.type,request.selected,request.filters)))):[]),
+        await memoRead(reads.customMetadata,request.key,()=>this.customMetadataBatch!.read(request)))):[]),
     ]);
   }
 }

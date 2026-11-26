@@ -1,7 +1,7 @@
 import {randomUUID,createHash} from "node:crypto";
 import {mkdir,open,readFile,rename,rm,stat} from "node:fs/promises";
 import path from "node:path";
-import {fieldSetIdentityKey,type FieldSetIdentity,type ApexMetadataProvider,type MetadataResult,type ApexObjectSchema,type CustomMetadataFilter,type CustomMetadataResult} from "./ApexMetadataProvider.js";
+import {fieldSetIdentityKey,type FieldSetIdentity,type CustomMetadataRead,type ApexMetadataProvider,type MetadataResult,type ApexObjectSchema,type CustomMetadataFilter,type CustomMetadataResult} from "./ApexMetadataProvider.js";
 
 const MAX_ENTRIES=2000,MAX_BYTES=32*1024*1024;
 type Request=
@@ -134,6 +134,16 @@ export class ApexMetadataCapture {
         for(const identity of identities){const k=fieldSetIdentityKey(identity),value=results.get(k);
           if(value?.complete&&Array.isArray(value.value)&&value.value.length<=200&&value.value.every(fieldPath))
             accepted.set(k,await read({kind:"fieldSet",name:identity.objectApiName,fieldSet:identity.fieldSetDeveloperName},async()=>value));
+        }
+        return accepted;
+      }}:{}),
+      ...(delegate.getCustomMetadataRecordsBatch?{getCustomMetadataRecordsBatch:async(requests:readonly CustomMetadataRead[])=>{
+        const results=await delegate.getCustomMetadataRecordsBatch!(requests);
+        const accepted=new Map<string,CustomMetadataResult>();
+        for(const request of requests){
+          const value=results.get(request.key);
+          if(value?.complete&&value.filterEvidence==="SERVER_FILTERED"&&Array.isArray(value.value))
+            accepted.set(request.key,await read({kind:"customMetadata",name:request.type,fields:request.selected,filters:request.filters},async()=>value));
         }
         return accepted;
       }}:{}),
