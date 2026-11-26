@@ -7,7 +7,7 @@
 
 Analyze Salesforce Apex SOQL and metadata by business persona, understand object and field access, investigate stack traces, and export Excel findings. The application runs locally; Salesforce org verification is optional.
 
-> **Project status:** Public source repository; active development. The source package version is **0.1.0**. No official `v0.1.0` GitHub Release has been published yet. The Electron desktop-folder ZIP shared with initial recipients is a **separately distributed build**, not an official GitHub Release. Changes to `main` do not update previously shared ZIPs.
+> **Project status:** Public source repository; active development. The source package version is **0.1.1**. No official `v0.1.0` GitHub Release has been published yet. The Electron desktop-folder ZIP shared with initial recipients is a **separately distributed build**, not an official GitHub Release. Changes to `main` do not update previously shared ZIPs.
 
 ## Getting started — Windows desktop (Electron)
 
@@ -29,10 +29,10 @@ See the [Windows desktop setup and troubleshooting guide](docs/setup/windows-des
 
 | Capability | What it does |
 | --- | --- |
-| **SOQL Security Analysis** | Scans Apex SOQL, handles supported relationship and aggregate queries, evaluates object/field Read access by persona and query mode, and exports an Excel Summary workbook. |
+| **SOQL Security Analysis** | Scans static and supported dynamic Apex SOQL, including caller- and metadata-backed query reconstruction; evaluates object/field Read access by persona and execution mode and exports an Excel Summary workbook with explicit coverage limitations. |
 | **Access Checker** | Shows effective object and field permissions with supporting Profile, Permission Set, Permission Set Group, and optional org-verification evidence. |
 | **Object Access Matrix** | Compares object Read/Create/Edit/Delete and elevated privileges across configured personas. |
-| **Stack Trace Impact Analyzer** | Investigates Apex stack-trace call paths, relevant queries, and potential permission issues. |
+| **Stack Trace Impact Analyzer** | Investigates Apex stack-trace call paths, static SOQL and potential permission issues. Shared dynamic AUE integration is planned for v0.1.2. |
 | **Optional Salesforce Org Verification** | Supplements repository-based conclusions with authorized Salesforce org evidence, distinguishing granted, denied, and inconclusive results. |
 | **Excel Reporting** | Produces local workbooks for review without changing Salesforce permissions or data. |
 
@@ -108,3 +108,9 @@ Open the Vite URL displayed by the frontend. For desktop packaging, tests, or op
 - For bugs and feedback, use [GitHub Issues](https://github.com/Shubhamu68/SalesforceRepositoryAnalyzer/issues/new/choose) without exposing organization-specific data or secrets.
 
 > **Build/version note:** The public `main` branch may contain development changes beyond the separately emailed v0.1.0 ZIP. Verify the exact source commit used for a distributed build before describing it as an official versioned release.
+
+**Packaging distinction:** The browser-portable launcher is not an Electron app; the separate Windows desktop-folder ZIP is an Electron application.
+
+## In-progress v0.1.1 dynamic SOQL analysis
+
+The [dynamic SOQL design and implementation notes](docs/features/dynamic-soql-resolution-v011.md) describe the bounded Apex dependency resolver, query variants, metadata support and limitations. This is a draft feature, not a release of the **Windows Portable** launcher or the Windows desktop package. Unknown runtime fields and incomplete metadata remain Unable to verify.

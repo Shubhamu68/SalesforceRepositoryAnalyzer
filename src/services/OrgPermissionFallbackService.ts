@@ -1,12 +1,12 @@
 import type { Persona } from "../models/Persona.js";
-import { MATRIX_PERMISSION_KEYS, type MatrixAccess, type MatrixPermission } from "../models/ObjectAccessMatrixResult.js";
+import { OBJECT_PERMISSION_KEYS, type ObjectPrivilegeAccess, type ObjectPermissionKey } from "../models/ObjectPrivilegeAccess.js";
 import type { SalesforceEffectivePermissionVerifier, OrgPermissionEvidence } from "../salesforce/SalesforceEffectivePermissionVerifier.js";
 import { isFieldLevelSecurityApplicable } from "../config/fieldSecurityPolicy.js";
 
 export type PermissionEvidence = OrgPermissionEvidence;
 
 /** UI and API use a single interpretation for all seven object privileges. */
-export type ObjectPermissionEvidence = Partial<Record<MatrixPermission, PermissionEvidence>>;
+export type ObjectPermissionEvidence = Partial<Record<ObjectPermissionKey, PermissionEvidence>>;
 export type FieldPermissionEvidence = Partial<Record<"read" | "edit", PermissionEvidence>>;
 
 function unavailable(permission: string): PermissionEvidence {
@@ -19,13 +19,13 @@ function unavailable(permission: string): PermissionEvidence {
 export class OrgPermissionFallbackService {
   constructor(private readonly verifier?: Pick<SalesforceEffectivePermissionVerifier, "verifyObject" | "verifyField">) {}
 
-  async resolveObject(persona: Persona, object: string, repository: MatrixAccess): Promise<{
-    access: MatrixAccess;
+  async resolveObject(persona: Persona, object: string, repository: ObjectPrivilegeAccess): Promise<{
+    access: ObjectPrivilegeAccess;
     evidence: ObjectPermissionEvidence;
   }> {
     const access = { ...repository };
     const evidence: ObjectPermissionEvidence = {};
-    const missing = MATRIX_PERMISSION_KEYS.filter((permission) => !repository[permission]);
+    const missing = OBJECT_PERMISSION_KEYS.filter((permission) => !repository[permission]);
     if (!missing.length) return { access, evidence };
     let org: Awaited<ReturnType<NonNullable<typeof this.verifier>["verifyObject"]>> | undefined;
     let failure: string | undefined;
@@ -43,7 +43,7 @@ export class OrgPermissionFallbackService {
 
   async resolveField(
     persona: Persona, object: string, field: string,
-    objectPermissions: { access: MatrixAccess; evidence: ObjectPermissionEvidence },
+    objectPermissions: { access: ObjectPrivilegeAccess; evidence: ObjectPermissionEvidence },
     repositoryFls: { read: boolean; edit: boolean },
   ): Promise<{ access: { read: boolean; edit: boolean }; evidence: FieldPermissionEvidence }> {
     // Defensively enforce N/A for future callers; no org FLS lookup.

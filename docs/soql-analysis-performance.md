@@ -12,29 +12,22 @@ Related: [Issue #40](https://github.com/Shubhamu68/SalesforceRepositoryAnalyzer/
 
 ## Run locally on Windows
 
-Use the PR branch (save/stash local edits first):
+Production performance settings are compiled into the backend. No shell variables or local .env entries are required. The shared concurrency constants in `src/config/salesforceConcurrency.ts` are HTTP 6, permission verification 5, all-personas workers 2. Dependency-validated Apex reuse is automatic. Existing cache durations and metadata-validation safeguards are unchanged.
+
+For a maintainer-only profiling session, temporarily change the internal `SOQL_PERFORMANCE_DIAGNOSTICS` constant in `src/services/SoqlPerformanceMetrics.ts` to `true` in a local working copy; do not commit that diagnostic change or distribute the diagnostic build. Start normally:
 
 ```powershell
-git fetch origin
-git switch --track origin/perf/soql-analysis-profiling-and-io
-# If already tracked: git switch perf/soql-analysis-profiling-and-io; git pull --ff-only
-```
-
-In the **backend** PowerShell terminal, before starting the API:
-
-```powershell
-$env:SALESFORCE_SOQL_PERF = "1"
 npm run api
 ```
 
-In a separate **frontend** terminal:
+In a separate frontend terminal:
 
 ```powershell
 cd web
 npm run dev
 ```
 
-Connect to the same Salesforce Sandbox, choose the **same persona** and **same local repository**, then run SOQL Security Analysis as normal. Copy only the lines beginning with `[SOQL Perf]`. No credentials, full SOQL text or user names should be included in those lines. To disable: close the backend terminal, restart without the environment variable.
+Use the same org, persona and repository across comparisons. Copy only the fixed-label `[SOQL Perf]` lines. Restore the diagnostics constant to false before release. The previous performance environment variables no longer control the application.
 
 ## Meaning of stages
 
@@ -95,3 +88,25 @@ The original three persona runs on the older build were approximately **32s, 20s
 - On the **first** execution, the Apex index has to be built and Salesforce caches start cold. Improvements here come from faster directory discovery, early rejection of classes without static SOQL, less per-field processing, and avoiding expensive quadratic compound-field preparation.
 - On **subsequent** executions, stat-validated parsed Apex queries are reused. File edits, additions and removals trigger correct invalidation. Salesforce checks have their own independently scoped TTLs.
 - The upcoming all-personas report can use `SoqlSecurityAnalyzer.prepare(queries)` once and `analyzePrepared(persona, prepared)` for each persona. This shares static SOQL/relationship work even during its **first button click**, while each persona still gets independent permission evaluation. This new feature is not implemented in Issue #40.
+
+## Milestone optimization round — first slice
+
+Branch: feature/soql-performance-optimization. Live reference: 90.790 s, 716 inventories, 1,835 fields, 829 raw findings, 312 grouped (7 High, 290 Low, 15 Unable to verify). 307 queryAll calls, 14 Field Set SOAP requests, 193 access calls. Independent Profile/PSG/User inventory reads overlap; no permission rules or metadata freshness windows change.
+
+The initial benchmark used HTTP 6 and verification 5; those values are now fixed in code. The shared gateways serve all analyzers, not only SOQL. The new workbook header records users from consumed verification evidence (including cached evidence); no separate user lookup is performed. If no user-level checks occurred, show that explicitly; if multiple users contributed, disclose all rather than claiming a single representative. No speculative missing-row shortcut or stale metadata caching is introduced.
+
+### Second slice: scan-local metadata batching
+
+Only proven, already-requested dependency identities are grouped by the shared Apex engine, with a one-event-loop-turn coalescing window and the existing per-scan memoization. Field Set SOAP readMetadata accepts at most 10 full names ([Salesforce docs](https://developer.salesforce.com/docs/platform/api-metadata/references/crud-based-calls/meta-readmetadata.html)); Custom Labels use bounded groups of up to 20 ExternalString names. Each result is correlated by exact identity, never order. Missing, duplicate, malformed or failed results fall back to exact reads (including existing Tooling Field Set fallback). Capture stores individual successful dependency responses in the unchanged snapshot schema; offline replay still needs no connection. No mutable metadata reused between runs. New counters: org.field_set.soap.batch_calls, org.field_set.soap.batch_resolved, org.custom_label.batch_calls, org.custom_label.batch_resolved, apex.metadata.batch_groups, apex.metadata.batch_resolved, apex.metadata.batch_exact_fallbacks. Request counts are actual calls; batching effectiveness depends on discovery waves. Keep concurrency configuration identical to the prior experiment for comparison, not another simultaneous tuning change.
+
+### Third slice: Custom Metadata projection consolidation
+
+Only requests for the same CMDT and identical typed equality filters can share a union projection; distinct predicates retain exact Salesforce queries. Returned rows are projected back to the original field/filter shape and keep server-filtered evidence. Empty results remain complete; failed/incomplete union requests fall back to original reads. No local approximation of SOQL filters, no broad inventory scan, no cache across scans. Counters: org.custom_metadata.projection_batch_calls, projection_batch_resolved, projection_batch_failures. Request savings depend on the actual dependency identities and discovery timing.
+
+### Fourth slice: dependency-validated warm Apex reuse
+
+A normal connected scan records only the metadata dependencies actually read for each dynamic class, with SHA-256 digests of complete responses. On a later scan the whole repository graph and all source fingerprints must be unchanged (including the existing recent-edit safety window); each previous dependency is re-read through the new scan's shared provider and compared exactly before reusing query reconstruction results. Missing, incomplete or changed metadata triggers full class re-analysis. No permission decisions are cached by this mechanism. Existing schema/Describe provider freshness semantics remain unchanged. Capture, trace and offline replay deliberately run the full engine; restarting the backend also provides a cold scan for parity measurements. Normal connected scans always use the validated reuse policy. Counters: scanner.dynamic_dependency_reuse_hits, scanner.dynamic_dependency_reuse_misses, scanner.dynamic_evaluated_files, apex.metadata.reuse_dependency_checks. Cold scans still perform full analysis. Scope and capability changes invalidate reuse.
+
+## Release-owned defaults
+
+The restored benchmark commit 650ea1f achieved CORE 71.537 s cold, 19.981 s warm with fresh verification, and 5.799 / 6.162 s with cached verification. All Personas was 163.860 s. Later Composite and scheduling experiments were reverted (903866d); they are not part of the release implementation. The production constants preserve the restored benchmark configuration automatically for CLI/API and packaged desktop backends. No .env template change, settings migration, or UI is needed. Normal diagnostics are off; the diagnostic wrapper can be explicitly enabled in tests or by a temporary source edit for a maintainer build. Performance is affected by org latency, cache freshness and machine load, and is not guaranteed to match benchmark durations.

@@ -25,7 +25,7 @@ Temporary GitHub Actions artifacts have a configured 30-day retention period and
 The current `release-windows.yml` workflow publishes the **browser-based portable** package; it cannot be used to publish the Electron desktop package without further changes.
 
 1. Confirm desired PRs are merged to `main` and testing/UAT is approved.
-2. Update both root `package.json` and `package-lock.json` for a new version (for example, `0.1.1`), update [CHANGELOG](../CHANGELOG.md), and merge through review.
+2. Keep the root, web and Electron `package.json` and matching lockfile root versions aligned for a new version (for example, `0.1.1`), update [CHANGELOG](../CHANGELOG.md), and merge through review.
 3. Pull the approved `main` commit:
 
    ```bash

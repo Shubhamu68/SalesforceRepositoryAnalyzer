@@ -1,0 +1,228 @@
+import assert from "node:assert/strict";
+import {test} from "node:test";
+import {ApexDataFlowEngine} from "../src/core/apex/ApexDataFlowEngine.js";
+import {indexApexMethods,maskApexSource} from "../src/core/apex/ApexSourceModel.js";
+import {apexStateIdentity} from "../src/core/apex/ApexStateIdentity.js";
+import {ApexExecutionBudget} from "../src/core/apex/ApexExecutionBudget.js";
+import {listValue,textValue,unknown,type ApexEnvironment} from "../src/core/apex/ApexValueEvaluator.js";
+import {extractDynamicSoqlQueries} from "../src/scanner/dynamicSoqlScanner.js";
+
+test("dead root-local scalar alternatives collapse before later independent branches",()=>{
+  const code=[
+    "public class Builder {",
+    " public static String build(Boolean first,Boolean second,Boolean third){",
+    "   String one='A'; if(first){one='B';} System.debug(one);",
+    "   String two='C'; if(second){two='D';} System.debug(two);",
+    "   String three='E'; if(third){three='F';} System.debug(three);",
+    "   return 'SELECT Id FROM Account';",
+    " }",
+    "}",
+  ].join("\n");
+  const method=indexApexMethods(code)[0];
+  assert.ok(method);
+  const engine=new ApexDataFlowEngine(code,{maxPaths:2});
+  const result=engine.summarizeMethodReturn(method,[unknown("first"),unknown("second"),unknown("third")]);
+  assert.deepEqual(result,{kind:"text",values:["SELECT Id FROM Account"]});
+});
+
+test("live scalar alternatives that change SELECT remain distinct",()=>{
+  const code=[
+    "public class Builder {",
+    " public static String build(Boolean flag){",
+    "   String field='Name'; if(flag){field='Phone';}",
+    "   System.debug(field);",
+    "   return 'SELECT Id,'+field+' FROM Account';",
+    " }",
+    "}",
+  ].join("\n");
+  const method=indexApexMethods(code)[0];
+  const result=new ApexDataFlowEngine(code,{maxPaths:2}).summarizeMethodReturn(method,[unknown("flag")]);
+  assert.equal(result.kind,"text");
+  if(result.kind==="text")assert.deepEqual(result.values.sort(),["SELECT Id,Name FROM Account","SELECT Id,Phone FROM Account"]);
+});
+
+test("state identity distinguishes equal collection contents from shared references",()=>{
+  const shared=listValue(["Id"]);
+  const aliases:ApexEnvironment=new Map([["left",shared],["right",shared]]);
+  const copies:ApexEnvironment=new Map([["left",listValue(["Id"])],["right",listValue(["Id"])]]);
+  const otherShared=listValue(["Id"]);
+  const equivalent:ApexEnvironment=new Map([["right",otherShared],["left",otherShared]]);
+  assert.notEqual(apexStateIdentity(aliases,false),apexStateIdentity(copies,false));
+  assert.equal(apexStateIdentity(aliases,false),apexStateIdentity(equivalent,false));
+});
+
+test("alias-sensitive branches produce both complete query variants",()=>{
+  const code=[
+    "public class AliasQuery {",
+    " public static void run(Boolean flag){",
+    "   List<String> first=new List<String>{'Id'};",
+    "   List<String> second=new List<String>{'Id'};",
+    "   if(flag){second=first;}",
+    "   first.add('Name');",
+    "   Database.query('SELECT '+String.join(second, ',')+' FROM Account');",
+    " }",
+    "}",
+  ].join("\n");
+  const result=extractDynamicSoqlQueries(code,"AliasQuery.cls");
+  assert.equal(result.unresolved.length,0,JSON.stringify(result.unresolved));
+  assert.deepEqual(result.queries.map(q=>q.query).sort(),["SELECT Id FROM Account","SELECT Id,Name FROM Account"]);
+});
+
+test("known foreach retains outer accumulator and excludes iteration-local bindings",()=>{
+  const code=[
+    "public class LoopQuery {",
+    " public static void run(){",
+    "   String fields='Id';",
+    "   for(String item : new List<String>{'Name','Phone'}){",
+    "     String local=item; fields += ','+local;",
+    "   }",
+    "   Database.query('SELECT '+fields+' FROM Account');",
+    " }",
+    "}",
+  ].join("\n");
+  const result=extractDynamicSoqlQueries(code,"LoopQuery.cls");
+  assert.equal(result.unresolved.length,0,JSON.stringify(result.unresolved));
+  assert.equal(result.queries[0].query,"SELECT Id,Name,Phone FROM Account");
+});
+
+test("shared budget distinguishes paths and operations and resets per analysis",()=>{
+  const budget=new ApexExecutionBudget(2,2);
+  assert.equal(budget.visit(10,"build"),true);
+  assert.equal(budget.checkPaths(3,15,"build"),false);
+  assert.match(budget.reason??"",/path enumeration.*3\/2.*build.*15/);
+  budget.reset();
+  assert.equal(budget.visit(20,"run"),true);
+  assert.equal(budget.visit(21,"run"),true);
+  assert.equal(budget.visit(22,"run"),false);
+  assert.match(budget.reason??"",/operation budget.*3\/2.*run.*22/);
+});
+
+test("malformed SELECT is never repaired; report original punctuation with literals masked",()=>{
+  const code=[
+    "public class InvalidQuery {",
+    " public static void run(){",
+    "   String q='SELECT Id, FROM Account WHERE Name = \\'private value\\'';",
+    "   Database.query(q);",
+    " }",
+    "}",
+  ].join("\n");
+  const result=extractDynamicSoqlQueries(code,"InvalidQuery.cls");
+  assert.equal(result.queries.length,0);
+  assert.equal(result.unresolved.length,1);
+  assert.match(result.unresolved[0].reason,/Reconstructed query structure.*SELECT Id, FROM Account/);
+  assert.doesNotMatch(result.unresolved[0].reason,/private value/);
+});
+
+
+test("terminated paths do not consume the live frontier budget or lose return alternatives",()=>{
+  const code=[
+    "public class Builder {",
+    " public static String build(Boolean a,Boolean b,Boolean c){",
+    "   String name='Account';",
+    "   if(a){name='Contact';return 'SELECT Id FROM Contact';}",
+    "   if(b){name='Case';return 'SELECT Id FROM Contact';}",
+    "   if(c){name='Opportunity';return 'SELECT Id FROM Contact';}",
+    "   return 'SELECT Id FROM '+name;",
+    " }",
+    "}",
+  ].join("\n");
+  const engine=new ApexDataFlowEngine(code,{maxPaths:2});
+  const method=indexApexMethods(code)[0];
+  const result=engine.summarizeMethodReturn(method,[unknown("a"),unknown("b"),unknown("c")]);
+  assert.equal(result.kind,"text");
+  if(result.kind==="text")assert.deepEqual(result.values.sort(),["SELECT Id FROM Account","SELECT Id FROM Contact"]);
+});
+
+
+test("repeated immutable Boolean guards preserve correlated paths without increasing the path budget",()=>{
+  const code="public class Builder { public static String build(Boolean full){ String fields='Id'; String obj='Account'; if(full){fields='Name';} if(full){obj='Contact';} return 'SELECT '+fields+' FROM '+obj; } }";
+  const engine=new ApexDataFlowEngine(code,{maxPaths:2});
+  const method=indexApexMethods(code)[0];
+  const result=engine.summarizeMethodReturn(method,[unknown("runtime")]);
+  assert.equal(result.kind,"text");
+  if(result.kind==="text")assert.deepEqual(result.values.sort(),["SELECT Id FROM Account","SELECT Name FROM Contact"]);
+});
+
+test("guard refinement is not reused when a parameter is reassigned",()=>{
+  const code="public class Builder { public static String build(Boolean full){ String fields='Id'; if(full){fields='Name';} full=false; if(full){fields='Email';} return 'SELECT '+fields+' FROM Account'; } }";
+  const engine=new ApexDataFlowEngine(code,{maxPaths:2});
+  const result=engine.summarizeMethodReturn(indexApexMethods(code)[0],[unknown("runtime")]);
+  assert.equal(result.kind,"text");
+  if(result.kind==="text")assert.deepEqual(result.values.sort(),["SELECT Id FROM Account","SELECT Name FROM Account"]);
+});
+
+
+test("unsupported compound writes cannot retain a stale query-relevant numeric value",()=>{
+  const code="public class Builder { public static void run(){ Integer pageSize=10; pageSize*=2; Database.query('SELECT Id FROM Account LIMIT '+pageSize); } }";
+  const result=extractDynamicSoqlQueries(code,"Builder.cls");
+  assert.equal(result.queries.length,0);
+  assert.equal(result.unresolved.length,1);
+  assert.match(result.unresolved[0].reason,/Unsupported Apex write/);
+});
+
+test("unknown base query followed by security suffix remains an unresolved partial expression",()=>{
+  const code="public class Builder { public static void run(String base){ String q=base; q+=' WITH SECURITY_ENFORCED'; Database.query(q); } }";
+  const result=extractDynamicSoqlQueries(code,"Builder.cls");
+  assert.equal(result.queries.length,0);
+  assert.equal(result.unresolved.length,1);
+  assert.match(result.unresolved[0].reason,/Partial expression evidence/);
+});
+
+test("shared syntax cache reuses immutable exact-source methods and invalidates on source edit",()=>{
+  const source="/*"+"padding ".repeat(100)+"*/ public class Cached { public static String build(){return 'Name';} }";
+  const methods=indexApexMethods(source);
+  assert.equal(indexApexMethods(source),methods);
+  assert.ok(Object.isFrozen(methods));
+  assert.ok(Object.isFrozen(methods[0].body));
+  const changed=source.replace("'Name'","'Phone'");
+  assert.notEqual(indexApexMethods(changed),methods);
+  assert.equal(maskApexSource(source).length,source.length);
+  assert.deepEqual(new ApexDataFlowEngine(source,{sourceMethods:methods}).summarizeMethodReturn(methods[0],[]),textValue("Name"));
+  assert.deepEqual(new ApexDataFlowEngine(changed).summarizeMethodReturn(indexApexMethods(changed)[0],[]),textValue("Phone"));
+});
+
+test("repository-owned method structures are only reused for an exact source match",async()=>{
+  const {ApexRepositoryMethodIndex}=await import("../src/core/apex/ApexRepositoryMethodIndex.js");
+  const source="public class Cached { public static String build(){return 'Name';} }";
+  const repo=new ApexRepositoryMethodIndex([{filePath:"Cached.cls",source}]);
+  assert.equal(repo.indexedMethods("Cached.cls",source),repo.indexedMethods("Cached.cls",source));
+  assert.equal(repo.indexedMethods("Cached.cls",source.replace("Name","Phone")),undefined);
+});
+
+test("bounded caller sampling prioritizes diverse relevant inputs, preserving complete original contexts",async()=>{
+  const {selectApexCallerSeeds}=await import("../src/core/apex/ApexRepositoryMethodIndex.js");
+  const seeds=[
+    ...Array.from({length:12},(_,i)=>[textValue("Account"),unknown("bind provenance "+i)]),
+    [textValue("Contact"),unknown("runtime bind")],
+    [textValue("Case"),unknown("runtime bind")],
+    [unknown("runtime object"),textValue("irrelevant")],
+  ];
+  const selected=selectApexCallerSeeds(seeds,["objectName","recordId"],new Set(["objectname"]),3);
+  assert.deepEqual(selected.map(s=>s[0]),["Account","Contact","Case"].map(textValue));
+  assert.ok(selected.every(seed=>seeds.includes(seed)));
+  assert.equal(selectApexCallerSeeds(seeds,["objectName","recordId"],new Set(["objectname"]),8).length,8);
+});
+
+
+test("dead correlated Boolean parameter alternatives merge before independent later guards",()=>{
+  const source="public class QueryBuilder { public static String build(Boolean a, Boolean b){ String x='Id'; if(a){x='Name';} if(a){x='Id';} String y='Id'; if(b){y='Name';} if(b){y='Id';} return 'SELECT '+y+' FROM Account'; } }";
+  const method=indexApexMethods(source)[0];
+  const engine=new ApexDataFlowEngine(source,{maxPaths:2});
+  assert.deepEqual(engine.summarizeMethodReturn(method,[unknown("a"),unknown("b")]),textValue("SELECT Id FROM Account"));
+});
+
+test("request-scoped shared engine metrics record reuse without exposing source",async()=>{
+  const {withApexPerformance}=await import("../src/core/apex/ApexPerformance.js");
+  const counts=new Map<string,number>();
+  const times:string[]=[];
+  const source="/*"+"profiling fixture ".repeat(80)+"*/ public class MetricFixture { public static void run(){Database.query('SELECT Id FROM Account');} }";
+  withApexPerformance({count:(name,n)=>counts.set(name,(counts.get(name)??0)+n),duration:name=>times.push(name)},()=>{
+    indexApexMethods(source);indexApexMethods(source);
+    new ApexDataFlowEngine(source).analyze();
+  });
+  assert.ok((counts.get("syntax.method_cache_hit")??0)>=1);
+  assert.equal(counts.get("engine.instances"),1);
+  assert.equal(counts.get("invocation.sites"),1);
+  assert.ok(times.includes("syntax.parse_ms"));
+  assert.ok([...counts.keys(),...times].every(key=>!key.includes("MetricFixture")&&!key.includes("SELECT")));
+});

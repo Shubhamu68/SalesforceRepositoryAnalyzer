@@ -1,6 +1,9 @@
+import { SALESFORCE_HTTP_READ_CONCURRENCY } from "../config/salesforceConcurrency.js";
 import { SalesforceCliAuthProvider, SalesforceCliLoginCancelledError, type CliOrg, type CliWebLogin } from "./SalesforceCliAuthProvider.js";
 import { timedAuthStep } from "./SalesforceAuthTiming.js";
-import { recordSoqlCount, timeSoqlOrgQuery, timeSoqlPhase } from "../services/SoqlPerformanceMetrics.js";
+import { SalesforceReadRequestGateway, SalesforceReadTransportError, type SalesforceReadResult } from "./SalesforceReadRequestGateway.js";
+import { XMLParser } from "fast-xml-parser";
+import { recordSoqlCount, timeSoqlOrgQuery, timeSoqlPhase, safeSalesforceErrorCode } from "../services/SoqlPerformanceMetrics.js";
 /**
  * Local Salesforce CLI browser authorization: no Analyzer-owned client secret
  * or integration Run As identity. Tokens stay in backend process memory.
@@ -44,6 +47,8 @@ export type SalesforceSObjectDescribe = {
     permissionable?: boolean | null;
     relationshipName?: string | null;
     referenceTo?: string[];
+    /** True only when REST Describe identifies this as a name field. */
+    nameField?: boolean;
     namePointing?: boolean;
     polymorphicForeignKey?: boolean;
   }>;
@@ -115,6 +120,7 @@ export class SalesforceOrgConnection {
   private epoch = 0;
   private pendingBrowserLogin: { controller: AbortController; work: Promise<void> } | null = null;
   constructor(private readonly cli = new SalesforceCliAuthProvider()) {}
+  private readonly readGateway=new SalesforceReadRequestGateway({concurrency:SALESFORCE_HTTP_READ_CONCURRENCY,timeoutMs:REQUEST_TIMEOUT_MS,maxRetries:2});
   private readonly describeCache = new Map<string, { expires: number; value: SalesforceSObjectDescribe }>();
   private readonly pendingDescribes = new Map<string, Promise<SalesforceSObjectDescribe>>();
 
@@ -370,6 +376,113 @@ export class SalesforceOrgConnection {
     finally { if (this.connecting === work) this.connecting = null; }
   }
 
+  /**
+   * Read-only Metadata SOAP FieldSet retrieval. Tooling API exposes the
+   * FieldSet record but does not reliably expose its displayedFields content.
+   * This fallback uses the already authenticated Salesforce CLI session.
+   * The Metadata API requires the org user's own metadata-read permission;
+   * no privilege escalation or permission writes are attempted.
+   */
+  async readFieldSetMetadata(objectApiName:string,fieldSetName:string):Promise<string[]> {
+    if(!/^[A-Za-z_]\w*$/.test(objectApiName)||
+       !/^[A-Za-z_]\w*$/.test(fieldSetName))
+      throw new SalesforceConnectionError("Invalid Field Set identity.",400);
+    const requested=objectApiName+"."+fieldSetName;
+    const records=await this.readFieldSetRecords([requested]);
+    if(records.length!==1||!records[0])
+      throw new SalesforceConnectionError("Field Set metadata record missing or ambiguous.",502);
+    if(records[0].fullName!==requested)
+      throw new SalesforceConnectionError("Field Set metadata identity did not match the request.",502);
+    return this.parseFieldSetMembers(records[0]);
+  }
+
+  /** Metadata API readMetadata accepts at most 10 full names. Correlate by
+   * exact identity, never by array position; missing/duplicate records are
+   * omitted so the caller can retry the existing single-read path. */
+  async readFieldSetMetadataBatch(fullNames:readonly string[]):Promise<Map<string,string[]>>{
+    if(fullNames.length<1||fullNames.length>10||new Set(fullNames).size!==fullNames.length||
+       fullNames.some(name=>!/^[A-Za-z_]\w*\.[A-Za-z_]\w*$/.test(name)))
+      throw new SalesforceConnectionError("Invalid Field Set batch identities.",400);
+    const records=await this.readFieldSetRecords(fullNames);
+    const expected=new Set(fullNames),grouped=new Map<string,Record<string,unknown>[]>();
+    for(const record of records){
+      if(!record||typeof record.fullName!=="string")continue;
+      if(!expected.has(record.fullName))
+        throw new SalesforceConnectionError("Field Set metadata identity did not match the request.",502);
+      const group=grouped.get(record.fullName)??[];group.push(record);grouped.set(record.fullName,group);
+    }
+    const result=new Map<string,string[]>();
+    for(const [name,group] of grouped){
+      if(group.length!==1)continue;
+      try{result.set(name,this.parseFieldSetMembers(group[0]));}catch{/* exact fallback */}
+    }
+    return result;
+  }
+
+  private async readFieldSetRecords(requested:readonly string[]):Promise<Array<Record<string,unknown>|null>>{
+    await this.connect();
+    const originEpoch=this.epoch;
+    const session=this.connection;
+    if(!session)throw new SalesforceConnectionError("Salesforce connection unavailable.",503);
+    const escape=(s:string)=>s.replace(/&/g,"&amp;").replace(/</g,"&lt;")
+      .replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&apos;");
+    const body='<?xml version="1.0" encoding="UTF-8"?>'+
+      '<env:Envelope xmlns:env="http://schemas.xmlsoap.org/soap/envelope/" '+
+      'xmlns:met="http://soap.sforce.com/2006/04/metadata">'+
+      '<env:Header><met:SessionHeader><met:sessionId>'+
+      escape(session.accessToken)+'</met:sessionId></met:SessionHeader></env:Header>'+
+      '<env:Body><met:readMetadata><met:type>FieldSet</met:type>'+
+      requested.map(name=>'<met:fullNames>'+escape(name)+'</met:fullNames>').join("")+
+      '</met:readMetadata></env:Body></env:Envelope>';
+    const endpoint=new URL("/services/Soap/m/"+getApiVersion().slice(1),session.instanceUrl);
+    const {response,payload:xml}=await this.readThroughGateway(
+      "Salesforce Metadata API Field Set read",originEpoch,async signal=>{
+        const response=await fetch(endpoint,{
+          method:"POST",
+          headers:{"Content-Type":"text/xml; charset=utf-8",
+            SOAPAction:"readMetadata",Accept:"text/xml"},
+          body,signal,
+        });
+        return {response,payload:await response.text()};
+      });
+    if(this.epoch!==originEpoch)
+      throw new SalesforceConnectionError("Salesforce org switched during metadata retrieval.",409);
+    if(xml.length>2_000_000||!response.ok)
+      throw new SalesforceConnectionError("Salesforce Metadata API Field Set read failed or returned an oversized result.",502);
+    let payload:unknown;
+    try{
+      payload=new XMLParser({ignoreAttributes:false,removeNSPrefix:true,
+        parseTagValue:false,parseAttributeValue:false}).parse(xml);
+    }catch{
+      throw new SalesforceConnectionError("Salesforce Metadata API returned invalid XML.",502);
+    }
+    const envelope=payload as {Envelope?:{Body?:Record<string,unknown>}};
+    const bodyNode=envelope?.Envelope?.Body;
+    const result=(bodyNode?.readMetadataResponse as {result?:{records?:unknown}}|undefined)?.result;
+    if(!result||!result.records)
+      throw new SalesforceConnectionError("Field Set metadata record missing or ambiguous.",502);
+    return (Array.isArray(result.records)?result.records:[result.records]).map(
+      record=>record&&typeof record==="object"&&!Array.isArray(record)?record as Record<string,unknown>:null);
+  }
+
+  private parseFieldSetMembers(record:Record<string,unknown>):string[]{
+    const raw=record.displayedFields;
+    if(raw===undefined)
+      throw new SalesforceConnectionError("Field Set displayedFields inventory is unavailable.",502);
+    const members=Array.isArray(raw)?raw:[raw];
+    if(members.length>200)
+      throw new SalesforceConnectionError("Field Set member limit exceeded.",502);
+    const fields:string[]=[];
+    for(const item of members){
+      const field=(item as {field?:unknown}|null)?.field;
+      if(typeof field!=="string"||
+         !/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/.test(field))
+        throw new SalesforceConnectionError("Field Set metadata contains an invalid field path.",502);
+      fields.push(field);
+    }
+    return fields;
+  }
+
   async query(soql: string, api: SalesforceQueryApi): Promise<{
     api: SalesforceQueryApi;
     totalSize: number;
@@ -388,16 +501,14 @@ export class SalesforceOrgConnection {
     }
     await this.connect();
     const originEpoch = this.epoch;
-    let response = await this.sendQuery(trimmed, api);
-    let payload: unknown = await response.json().catch(() => null);
+    let {response,payload}=await this.sendQuery(trimmed,api,originEpoch);
     const errors = Array.isArray(payload) ? payload : [payload];
     const sessionExpired = response.status === 401 || (response.status === 403 && errors.some((error) =>
       error && typeof error === "object" && (error as Record<string, unknown>).errorCode === "INVALID_SESSION_ID"));
     if (sessionExpired) {
       // CLI owns refresh tokens; request a renewed CLI access session.
       await this.connect(true);
-      response = await this.sendQuery(trimmed, api);
-      payload = await response.json().catch(() => null);
+      ({response,payload}=await this.sendQuery(trimmed,api,originEpoch));
     }
     if (this.epoch !== originEpoch) {
       throw new SalesforceConnectionError("Salesforce org changed during this query. Retry analysis.", 409);
@@ -461,19 +572,18 @@ export class SalesforceOrgConnection {
           (nextPath && (url.search || url.hash))) {
         throw new SalesforceConnectionError("Salesforce returned an invalid query locator.", 502);
       }
-      let response: Response;
-      try {
-        response = await fetch(url, {
-          headers: { Authorization: `Bearer ${conn.accessToken}`, Accept: "application/json" },
-          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+      const {response,payload,attempts,elapsedMs}=await this.readJson(
+        this.queryReadLabel(soql,api),url,originEpoch,()=>{
+          const session=this.connection;
+          if(!session)throw new SalesforceConnectionError("Salesforce connection unavailable.",503);
+          return {Authorization:`Bearer ${session.accessToken}`,Accept:"application/json"};
         });
-      } catch {
-        throw new SalesforceConnectionError("Unable to retrieve Salesforce permission data.", 502);
-      }
-      const payload: unknown = await response.json().catch(() => null);
       if (this.epoch !== originEpoch) throw new SalesforceConnectionError(
         "Salesforce org changed during this analysis. Rerun against the selected org.", 409);
-      if (response.status === 401 && !retried) {
+      const invalidSession=response.status===401||response.status===403&&
+        (Array.isArray(payload)?payload:[payload]).some(error=>error&&typeof error==="object"&&
+          (error as Record<string,unknown>).errorCode==="INVALID_SESSION_ID");
+      if (invalidSession && !retried) {
         retried = true;
         all.length = 0;
         nextPath = null;
@@ -482,7 +592,10 @@ export class SalesforceOrgConnection {
       }
       if (!response.ok) {
         const errors = Array.isArray(payload) ? payload : [payload];
-        throw new SalesforceConnectionError(errors.map(apiErrorMessage).join(" | ").slice(0, 500), response.status);
+        throw new SalesforceConnectionError(this.queryReadLabel(soql,api)+
+          " failed (HTTP "+response.status+", "+attempts+" attempt(s), "+elapsedMs+" ms): "+
+          errors.map(apiErrorMessage).join(" | ").slice(0,500),response.status,
+          safeSalesforceErrorCode(errors.find(error=>error&&typeof error==="object"&&typeof (error as Record<string,unknown>).errorCode==="string")?.errorCode));
       }
       const page = payload as QueryResult | null;
       if (!page || !Array.isArray(page.records) || typeof page.done !== "boolean") {
@@ -527,29 +640,22 @@ export class SalesforceOrgConnection {
     const promise = timeSoqlPhase("org.describe.uncached_cumulative_ms", async () => {
       await this.connect();
       const originEpoch = this.epoch;
-      const request = async (): Promise<Response> => {
-        const session = this.connection;
-        if (!session) throw new SalesforceConnectionError("Salesforce connection unavailable.", 503);
-        const url = new URL(`/services/data/${getApiVersion()}/sobjects/${encodeURIComponent(objectName)}/describe`, session.instanceUrl);
-        return fetch(url, {
-          headers: { Authorization: `Bearer ${session.accessToken}`, Accept: "application/json" },
-          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+      const request=async()=>{
+        const session=this.connection;
+        if(!session)throw new SalesforceConnectionError("Salesforce connection unavailable.",503);
+        const url=new URL(`/services/data/${getApiVersion()}/sobjects/${encodeURIComponent(objectName)}/describe`,session.instanceUrl);
+        recordSoqlCount("org.describe.http_requests");
+        return this.readJson("Salesforce Describe "+objectName,url,originEpoch,()=>{
+          const current=this.connection;
+          if(!current)throw new SalesforceConnectionError("Salesforce connection unavailable.",503);
+          return {Authorization:`Bearer ${current.accessToken}`,Accept:"application/json"};
         });
       };
-      let response: Response;
-      try {
-        recordSoqlCount("org.describe.http_requests");
-        response = await request();
-        if (response.status === 401) {
-          await this.connect(true);
-          recordSoqlCount("org.describe.http_requests");
-          response = await request();
-        }
-      } catch (error) {
-        if (error instanceof SalesforceConnectionError) throw error;
-        throw new SalesforceConnectionError("Unable to retrieve Salesforce relationship metadata.", 502);
+      let {response,payload}=await request();
+      if(response.status===401){
+        await this.connect(true);
+        ({response,payload}=await request());
       }
-      const payload: unknown = await response.json().catch(() => null);
       if (this.epoch !== originEpoch) throw new SalesforceConnectionError(
         "Salesforce org changed during Describe. Rerun analysis.", 409);
       if (!response.ok) {
@@ -568,28 +674,62 @@ export class SalesforceOrgConnection {
     finally { this.pendingDescribes.delete(key); }
   }
 
-  private async sendQuery(soql: string, api: SalesforceQueryApi): Promise<Response> {
-    const connection = this.connection;
-    if (!connection) throw new SalesforceConnectionError("No Salesforce connection is available.", 503);
-    const url = new URL(
-      `/services/data/${getApiVersion()}/${api === "tooling" ? "tooling/" : ""}query/`,
-      connection.instanceUrl
-    );
-    url.searchParams.set("q", soql);
-    try {
-      return await fetch(url, {
-        headers: { Authorization: `Bearer ${connection.accessToken}`, Accept: "application/json" },
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
-      });
-    } catch {
-      throw new SalesforceConnectionError("Unable to query Salesforce. Check network/VPN access.", 502);
+  private queryReadLabel(soql:string,api:SalesforceQueryApi):string {
+    // Only the safe object token is diagnostic context, never the SOQL text.
+    const object=/\bFROM\s+([A-Za-z_]\w*)\b/i.exec(soql)?.[1];
+    return "Salesforce "+api+" query"+(object?" ("+object+")":"");
+  }
+
+  private async readThroughGateway<T>(label:string,originEpoch:number,
+    work:(signal:AbortSignal)=>Promise<{response:Response;payload:T}>):
+    Promise<SalesforceReadResult<T>> {
+    try{
+      return await this.readGateway.read(label,()=>{
+        if(this.epoch!==originEpoch)throw new SalesforceConnectionError(
+          "Salesforce org changed during this read. Rerun analysis.",409);
+        if(!this.connection)throw new SalesforceConnectionError("Salesforce connection unavailable.",503);
+      },work);
+    }catch(error){
+      if(error instanceof SalesforceReadTransportError)
+        throw new SalesforceConnectionError(error.message,502);
+      throw error;
     }
+  }
+
+  private async readJson(label:string,url:URL,originEpoch:number,
+    headers:()=>Record<string,string>):Promise<SalesforceReadResult<unknown>>{
+    return this.readThroughGateway(label,originEpoch,async signal=>{
+      const response=await fetch(url,{headers:headers(),signal});
+      let payload:unknown=null;
+      try{payload=await response.json();}
+      catch(error){
+        // Invalid JSON remains a response-format error in the caller.
+        // Network/body timeouts must reach the shared retry boundary.
+        if(!(error instanceof SyntaxError))throw error;
+      }
+      return {response,payload};
+    });
+  }
+
+  private async sendQuery(soql: string, api: SalesforceQueryApi,originEpoch:number):
+    Promise<{response:Response;payload:unknown}> {
+    const connection=this.connection;
+    if(!connection)throw new SalesforceConnectionError("No Salesforce connection is available.",503);
+    const url=new URL(
+      "/services/data/"+getApiVersion()+"/"+(api==="tooling"?"tooling/":"")+"query/",
+      connection.instanceUrl);
+    url.searchParams.set("q",soql);
+    return this.readJson(this.queryReadLabel(soql,api),url,originEpoch,()=>{
+      const current=this.connection;
+      if(!current)throw new SalesforceConnectionError("No Salesforce connection is available.",503);
+      return {Authorization:"Bearer "+current.accessToken,Accept:"application/json"};
+    });
   }
 }
 
 export class SalesforceConnectionError extends Error {
   readonly statusCode: number;
-  constructor(message: string, statusCode: number) {
+  constructor(message: string, statusCode: number, readonly salesforceErrorCode?:string) {
     super(message);
     this.statusCode = statusCode;
   }

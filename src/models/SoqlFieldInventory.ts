@@ -7,6 +7,8 @@ export interface SoqlFieldReference {
   lineNumber: number;
   /** Parent SOQL line for execution-mode lookup. */
   queryLineNumber?: number;
+  /** Internal exact query identity for same-line variants. */
+  queryVariantId?: string;
   relationshipPath?: string;
   /** SELECT versus filter/group/order usage matters for legacy SECURITY_ENFORCED. */
   usageContext?: "SELECT" | "WHERE" | "GROUP_BY" | "HAVING" | "ORDER_BY";

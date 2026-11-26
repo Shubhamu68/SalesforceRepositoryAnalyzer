@@ -9,6 +9,7 @@ import { maskNestedSelects } from "./nestedSoqlScopes.js";
 export interface ScopedFieldReference extends ResolvedQueryField {
   lineNumber: number;
   queryLineNumber: number;
+  queryVariantId?: string;
   relationshipPath: string;
   usageContext?: SoqlFieldContext;
   functionName?: string;
@@ -22,7 +23,7 @@ export interface UnresolvedQueryReference {
   message: string;
 }
 export interface QueryFieldCollection {
-  scopes: Array<{ object: string; lineNumber: number; relationshipPath: string }>;
+  scopes: Array<{ object: string; lineNumber: number; relationshipPath: string; queryVariantId?: string }>;
   fields: ResolvedQueryField[];
   references: ScopedFieldReference[];
   objects: string[];
@@ -203,8 +204,9 @@ export function collectQueryFields(query: SoqlQuery, relationships: Relationship
     if (isIgnoredField(resolved.field, resolved.object)) return;
     const field: ScopedFieldReference = {
       object: resolved.object, field: resolved.field, source,
-      lineNumber: scopeFieldLine(text, lineNumber, candidate, usageContext, masked(text)),
+      lineNumber: query.dynamicOrigin ? query.lineNumber : scopeFieldLine(text, lineNumber, candidate, usageContext, masked(text)),
       queryLineNumber: query.lineNumber, relationshipPath: path,
+      ...(query.queryVariantId ? { queryVariantId: query.queryVariantId } : {}),
       ...(usageContext ? { usageContext } : {}),
       ...(functionName ? { functionName } : {}),
     };
@@ -218,7 +220,8 @@ export function collectQueryFields(query: SoqlQuery, relationships: Relationship
   const scope = (object: string, fields: string[], children: SoqlSubquery[],
     text: string, lineNumber: number, relationshipPath: string, depth: number): void => {
     if (!isDataAccessAnalysisObject(object)) return;
-    scopes.push({ object, lineNumber, relationshipPath });
+    scopes.push({ object, lineNumber, relationshipPath,
+      ...(query.queryVariantId ? { queryVariantId: query.queryVariantId } : {}) });
     if (depth > 20) {
       limitations.push("Nested query traversal limit exceeded at " + relationshipPath);
       return;

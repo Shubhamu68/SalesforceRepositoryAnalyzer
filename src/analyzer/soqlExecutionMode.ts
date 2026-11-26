@@ -1,3 +1,5 @@
+import { defaultApexDatabaseAccessMode } from "../core/apex/ApexDatabaseAccessMode.js";
+
 /**
  * Version-aware execution-mode model shared by SOQL Security Analysis and Stack Trace.
  *
@@ -72,11 +74,11 @@ export function resolveSoqlExecutionMode(declaredMode: DeclaredSoqlMode, apiVers
   const base = { declaredMode, ...(version === undefined ? {} : { apiVersion: version }) };
   if (declaredMode === "USER_MODE") return {
     ...base, effectiveMode: "USER_MODE", enforcement: "FULL",
-    description: "WITH USER_MODE enforces object and field Read access.",
+    description: "WITH USER_MODE checks object and field Read permissions.",
   };
   if (declaredMode === "SYSTEM_MODE") return {
     ...base, effectiveMode: "SYSTEM_MODE", enforcement: "NONE",
-    description: "WITH SYSTEM_MODE does not enforce the running user's object and field Read permissions.",
+    description: "WITH SYSTEM_MODE does not check the running user's object or field Read permissions.",
   };
   if (declaredMode === "SECURITY_ENFORCED") {
     if (version !== undefined && version >= 67) return {
@@ -85,7 +87,7 @@ export function resolveSoqlExecutionMode(declaredMode: DeclaredSoqlMode, apiVers
     };
     if (version === undefined) return {
       ...base, effectiveMode: "UNKNOWN", enforcement: "UNKNOWN",
-      description: "WITH SECURITY_ENFORCED was found but the Apex API version is unavailable.",
+      description: "Cannot confirm WITH SECURITY_ENFORCED behavior without the Apex API version.",
     };
     return {
       ...base, effectiveMode: "SECURITY_ENFORCED", enforcement: "SELECT_ONLY",
@@ -94,9 +96,9 @@ export function resolveSoqlExecutionMode(declaredMode: DeclaredSoqlMode, apiVers
   }
   if (version === undefined) return {
     ...base, effectiveMode: "UNKNOWN", enforcement: "UNKNOWN",
-    description: "No explicit query mode and no Apex API version metadata; runtime enforcement is unknown.",
+    description: "No query mode or Apex API version was found. Permission enforcement is unknown.",
   };
-  return version >= 67 ? {
+  return defaultApexDatabaseAccessMode(version) === "USER_MODE" ? {
     ...base, effectiveMode: "USER_MODE", enforcement: "FULL",
     description: `Apex API ${version.toFixed(1)} defaults database queries to user mode.`,
   } : {

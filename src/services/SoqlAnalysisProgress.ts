@@ -81,6 +81,13 @@ export class SoqlAnalysisProgress {
     this.percent = Math.max(this.percent, weights[stage]);
   }
 
+  /** Actual class completion drives the 2–19% scanning milestone. */
+  reportClasses(completed:number,total:number):void{
+    if(this.state!=="running"||this.stage!=="scanning"||total<=0)return;
+    const ratio=Math.max(0,Math.min(1,completed/total));
+    this.percent=Math.max(this.percent,weights.scanning+Math.floor(ratio*17));
+  }
+
   /** Exact completed-object counts. Used only for single-persona analysis. */
   reportObjects(completed: number, total: number): void {
     if (this.state !== "running" || this.kind !== "single" || this.stage !== "permissions") return;

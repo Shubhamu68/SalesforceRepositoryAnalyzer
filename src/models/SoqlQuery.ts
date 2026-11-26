@@ -63,4 +63,21 @@ export interface SoqlQuery {
   withUserMode: boolean;
 
   securityMode: SoqlSecurityMode;
+  /** Explicit AccessLevel on a dynamic Database method; overrides API default. */
+  dynamicAccessLevel?: "USER_MODE" | "SYSTEM_MODE";
+  /** Stable execution-site and variant IDs; not exposed as new Excel columns. */
+  dynamicOrigin?: boolean;
+  /** Incomplete coverage: explicit caller sample or a typed numeric-slot structure. */
+  coverage?: "KNOWN_CALLER_CONTEXT" | "PROVEN_PARTIAL_STRUCTURE" | "CONDITIONAL_FRAMEWORK_CONTEXT";
+  /** Parser-only inventory, distinct from complete query execution coverage.
+   * Does not imply exhaustive caller coverage or runtime execution. */
+  permissionEvidence?: "AGGREGATED_STRUCTURE";
+  /** All permission-bearing alternatives in a finite source domain are represented; not a grant or runtime execution guarantee. */
+  referenceCoverage?: "COMPLETE_FINITE_DOMAIN";
+  /** Historical name: known SELECT/FROM (or COUNT root) and independently proven clauses; remaining query text and enforcement unverified. */
+  selectPrefixOnly?: boolean;
+  /** Only additional schema-filtered SELECT fields are runtime-dependent. */
+  runtimeFieldCoverage?: boolean;
+  querySiteId?: string;
+  queryVariantId?: string;
 }

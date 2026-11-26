@@ -6,11 +6,11 @@ import type { EffectiveFieldPermission } from "./fieldPermissionAggregator.js";
 import { isFieldLevelSecurityApplicable } from "../config/fieldSecurityPolicy.js";
 import { isSchemaRequiredField } from "./schemaRequiredFields.js";
 import {
-  MATRIX_PERMISSION_KEYS,
-  type MatrixPermission,
-  type MatrixAccess,
-  type MatrixPermissionSources,
-} from "../models/ObjectAccessMatrixResult.js";
+  OBJECT_PERMISSION_KEYS,
+  type ObjectPermissionKey,
+  type ObjectPrivilegeAccess,
+  type ObjectPermissionSources,
+} from "../models/ObjectPrivilegeAccess.js";
 
 const norm = (value: string): string => value.trim().toLowerCase();
 const isTrue = (ps: PermissionSet, permission: string): boolean =>
@@ -19,7 +19,7 @@ const isTrue = (ps: PermissionSet, permission: string): boolean =>
 type SystemPermission = "ViewAllData" | "ModifyAllData";
 type SourceDetails = PermissionSource & { viaSystemPermission?: SystemPermission };
 
-function objectGrants(ps: PermissionSet, objectName: string, key: MatrixPermission): boolean {
+function objectGrants(ps: PermissionSet, objectName: string, key: ObjectPermissionKey): boolean {
   const record = ps.objectPermissions.find((p) => norm(p.object) === norm(objectName));
   if (!record) return false;
   switch (key) {
@@ -34,13 +34,13 @@ function objectGrants(ps: PermissionSet, objectName: string, key: MatrixPermissi
 }
 
 /** The global permissions are object grants, NOT field-level-security overrides. */
-function globalGrants(ps: PermissionSet, key: MatrixPermission): SystemPermission | undefined {
+function globalGrants(ps: PermissionSet, key: ObjectPermissionKey): SystemPermission | undefined {
   if (isTrue(ps, "ModifyAllData") && key !== "viewAllFields") return "ModifyAllData";
   if (isTrue(ps, "ViewAllData") && (key === "read" || key === "viewAllRecords")) return "ViewAllData";
   return undefined;
 }
 
-function hasObjectMute(mute: PermissionSet, objectName: string, key: MatrixPermission): boolean {
+function hasObjectMute(mute: PermissionSet, objectName: string, key: ObjectPermissionKey): boolean {
   // Muting Read suppresses dependent object operations in that PSG only.
   if (objectGrants(mute, objectName, "read")) return true;
   if (key === "modifyAllRecords" && objectGrants(mute, objectName, "delete")) return true;
@@ -51,7 +51,7 @@ function matchingSources(
   source: PermissionSource,
   permissionSet: PermissionSet,
   object: string,
-  key: MatrixPermission
+  key: ObjectPermissionKey
 ): SourceDetails[] {
   const entries: SourceDetails[] = [];
   if (objectGrants(permissionSet, object, key)) entries.push(source);
@@ -61,8 +61,8 @@ function matchingSources(
 }
 
 export interface EvaluatedObjectAccess {
-  access: MatrixAccess;
-  sources: Record<MatrixPermission, MatrixPermissionSources>;
+  access: ObjectPrivilegeAccess;
+  sources: Record<ObjectPermissionKey, ObjectPermissionSources>;
 }
 
 /**
@@ -93,12 +93,12 @@ export function createPersonaAccessEvaluator(
     const keyName = norm(objectName);
     const cached = objectCache.get(keyName);
     if (cached) return cached;
-    const access = {} as MatrixAccess;
-    const sources = {} as Record<MatrixPermission, MatrixPermissionSources>;
+    const access = {} as ObjectPrivilegeAccess;
+    const sources = {} as Record<ObjectPermissionKey, ObjectPermissionSources>;
 
-    for (const key of MATRIX_PERMISSION_KEYS) {
+    for (const key of OBJECT_PERMISSION_KEYS) {
       const grantedBy: SourceDetails[] = [];
-      const mutedBy: MatrixPermissionSources["mutedBy"] = [];
+      const mutedBy: ObjectPermissionSources["mutedBy"] = [];
       for (const grant of grants) {
         const base: PermissionSource = {
           type: grant.type,

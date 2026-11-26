@@ -1,7 +1,10 @@
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import ExcelJS from "exceljs";
+import type {OrgCheckedUser} from "../models/StackTraceImpact.js";
+import {verificationUserLabel} from "../services/SoqlVerificationProvenance.js";
 import { timeSoqlPhase, timeSoqlSync } from "../services/SoqlPerformanceMetrics.js";
+import { EXISTING_VARIANT_LIMITATION, PARTIAL_REFERENCE_LIMITATION } from "../analyzer/soqlExistingVariantReporting.js";
 
 import {
   SoqlSecurityFinding,
@@ -11,7 +14,8 @@ export async function writeSoqlReport(
   outputDirectory: string,
   personaName: string,
   queryCount: number,
-  findings: SoqlSecurityFinding[]
+  findings: SoqlSecurityFinding[],
+  verificationUsers?:readonly OrgCheckedUser[]
 ): Promise<{
   summaryReportPath: string;
 }> {
@@ -48,7 +52,8 @@ export async function writeSoqlReport(
     summaryReportPath,
     personaName,
     queryCount,
-    conciseFindings
+    conciseFindings,
+    verificationUsers
   );
 
   return { summaryReportPath };
@@ -63,6 +68,7 @@ export interface PersonaHighPriorityReportSection {
   personaName: string;
   queryCount: number;
   findings: SoqlSecurityFinding[];
+  verificationUsers?:readonly OrgCheckedUser[];
 }
 
 export interface PersonaHighPriorityReportSummary {
@@ -90,6 +96,7 @@ export async function writeAllPersonasHighPriorityReport(
   const grouped = timeSoqlSync("excel.grouping", () => sections.map(section => ({
     personaName: section.personaName,
     queryCount: section.queryCount,
+    verificationUsers:section.verificationUsers,
     findings: buildConciseFindings(section.findings.filter(
       finding => finding.criticality === "High" && !isMetadataObject(finding.object),
     )),
@@ -121,8 +128,10 @@ export async function writeAllPersonasHighPriorityReport(
   sheet.getCell("E3").value = totalHighPriorityOccurrences;
   sheet.mergeCells("A4:H4");
   sheet.getCell("A4").value =
-    "Only confirmed High-criticality references are included. Low and Unable to verify are excluded; duplicate findings across personas are retained.";
+    "Only confirmed High-criticality references are included. Low and Unable to verify are excluded; duplicate findings across personas are retained. Dynamic SOQL uses repository initializer snapshots; detected static writes and direct collection aliases invalidate those snapshots. Indirect effects may remain unresolved.";
   sheet.getCell("A4").font = { italic: true, size: 10, color: { argb: "FF60748D" } };
+  sheet.getCell("A4").alignment = { wrapText: true, vertical: "middle" };
+  sheet.getRow(4).height = 32;
   sheet.mergeCells("A5:H5");
   sheet.getCell("A5").value = verificationMode === "REPOSITORY_ONLY"
     ? "REPOSITORY-ONLY: Salesforce Read access could not be verified. No confirmed High findings does NOT mean permissions are safe."
@@ -145,6 +154,7 @@ export async function writeAllPersonasHighPriorityReport(
     ]);
     countRow.font = { bold: true, size: 11 };
     countRow.height = 22;
+    if(section.verificationUsers!==undefined)addVerificationUserRow(sheet,section.verificationUsers);
     addSummaryFindingHeader(sheet);
     if (section.findings.length) {
       appendSummaryFindingRows(sheet, section.findings);
@@ -176,6 +186,7 @@ interface ConciseFinding {
   references: Array<{
     filePath: string;
     lineNumber: number;
+    queryVariantId?: string;
     securityMode: string;
     effectiveMode: string;
     runtimeImpact: string;
@@ -185,6 +196,8 @@ interface ConciseFinding {
     /** Severity and explanation are specific to this Apex query, not its group. */
     criticality: string;
     explanation: string;
+    limitedVariantCoverage?:boolean;
+    limitedPartialCoverage?:boolean;
   }>;
 }
 
@@ -238,6 +251,7 @@ function buildConciseFindings(
             finding.filePath &&
           reference.lineNumber ===
             finding.lineNumber &&
+          (reference.queryVariantId ?? "") === (finding.queryVariantId ?? "") &&
           (reference.relationshipPath ?? "") === (finding.relationshipPath ?? "")
       );
 
@@ -247,11 +261,14 @@ function buildConciseFindings(
           finding.filePath,
         lineNumber:
           finding.lineNumber,
+        ...(finding.queryVariantId ? { queryVariantId: finding.queryVariantId } : {}),
         securityMode,
         effectiveMode: finding.effectiveMode ?? "UNKNOWN",
         runtimeImpact: finding.runtimeImpact ?? "Undetermined",
         criticality: finding.criticality ?? (finding.severity === "ERROR" ? "High" : "Unable to verify"),
         explanation: finding.reason,
+        ...(finding.limitedVariantCoverage?{limitedVariantCoverage:true}:{}),
+        ...(finding.limitedPartialCoverage?{limitedPartialCoverage:true}:{}),
         ...(finding.relationshipPath ? { relationshipPath: finding.relationshipPath } : {}),
         ...(finding.queryLevel ? { queryLevel: finding.queryLevel } : {}),
         ...(finding.apiVersion !== undefined ? { apiVersion: finding.apiVersion } : {}),
@@ -268,8 +285,12 @@ function buildConciseFindings(
     if (!highest) continue;
     entry.criticality = highest.criticality;
     const isMixed = entry.references.some(ref => ref.criticality !== highest.criticality);
-    entry.explanation = highest.explanation + (isMixed
-      ? " Severity differs across SOQL queries. Highest severity shown; see the Apex Classes column for affected locations."
+    const coverageNote=entry.references.some(ref=>ref.limitedVariantCoverage)&&!highest.limitedVariantCoverage
+      ? " Some occurrences have limited query-variant coverage. "+EXISTING_VARIANT_LIMITATION : "";
+    const partialNote=entry.references.some(ref=>ref.limitedPartialCoverage)&&!highest.limitedPartialCoverage
+      ? " Some occurrences have partial reference coverage. "+PARTIAL_REFERENCE_LIMITATION : "";
+    entry.explanation = highest.explanation + coverageNote + partialNote + (isMixed
+      ? " Severity differs across SOQL queries. The highest severity is shown; see Apex Classes for locations."
       : "");
   }
 
@@ -295,7 +316,8 @@ async function writeSummaryWorkbook(
   filePath: string,
   personaName: string,
   queryCount: number,
-  findings: ConciseFinding[]
+  findings: ConciseFinding[],
+  verificationUsers?:readonly OrgCheckedUser[]
 ): Promise<void> {
   const workbook =
     new ExcelJS.Workbook();
@@ -359,10 +381,14 @@ async function writeSummaryWorkbook(
   ).value =
     findings.length;
 
+  if(verificationUsers!==undefined)addVerificationUserRow(summarySheet,verificationUsers);
+  const legendRow=verificationUsers===undefined?5:6;
   summarySheet.addRow([]);
-  summarySheet.mergeCells("A5:H5");
-  summarySheet.getCell("A5").value = "High = confirmed missing Read with enforced SOQL access; Low = advisory or org-verified Read. Mixed findings show the highest severity.";
-  summarySheet.getCell("A5").font = { italic: true, color: { argb: "FF60748D" }, size: 10 };
+  summarySheet.mergeCells(`A${legendRow}:H${legendRow}`);
+  summarySheet.getCell(`A${legendRow}`).value = "High = confirmed missing Read with enforced SOQL access or in recovered dynamic-query evidence; Unable to verify = unresolved permission or analysis review; Low = advisory or org-verified Read. High does not always mean a runtime access failure. Mixed findings show the highest severity. Dynamic SOQL uses repository initializer snapshots; detected static writes and direct collection aliases invalidate those snapshots. Indirect effects may remain unresolved; reconstructed queries are repository-based, not runtime traces.";
+  summarySheet.getCell(`A${legendRow}`).font = { italic: true, color: { argb: "FF60748D" }, size: 10 };
+  summarySheet.getCell(`A${legendRow}`).alignment = { wrapText: true, vertical: "middle" };
+  summarySheet.getRow(legendRow).height = 32;
 
   addSummaryFindingHeader(summarySheet);
   appendSummaryFindingRows(summarySheet, findings);
@@ -370,7 +396,7 @@ async function writeSummaryWorkbook(
   summarySheet.views = [
     {
       state: "frozen",
-      ySplit: 6,
+      ySplit: legendRow+1,
     },
   ];
 
@@ -381,13 +407,21 @@ async function writeSummaryWorkbook(
   // ------------------------------------------------
 
   summarySheet.autoFilter = {
-    from: "A6",
-    to: `H${Math.max(6, summarySheet.rowCount)}`,
+    from: `A${legendRow+1}`,
+    to: `H${Math.max(legendRow+1, summarySheet.rowCount)}`,
   };
 
   await timeSoqlPhase("excel.serialization", () => workbook.xlsx.writeFile(
     filePath
   ));
+}
+
+function addVerificationUserRow(sheet:ExcelJS.Worksheet,users:readonly OrgCheckedUser[]):void{
+  const row=sheet.addRow(["User used for verification from org",verificationUserLabel(users)]);
+  sheet.mergeCells(row.number,2,row.number,8);
+  row.getCell(1).font={bold:true};
+  row.getCell(2).alignment={wrapText:true,vertical:"middle"};
+  row.height=users.length>1?Math.min(90,22+14*users.length):24;
 }
 
 function addSummaryFindingHeader(sheet: ExcelJS.Worksheet): void {
@@ -441,14 +475,13 @@ function appendSummaryFindingRows(sheet: ExcelJS.Worksheet, findings: ConciseFin
       vertical: "top",
     };
     row.getCell(5).font = { bold: true, color: {
-      argb: finding.criticality === "High" ? "FFB42332" :
-        finding.criticality === "Low" ? "FF167349" : "FF916514",
+      argb: finding.criticality === "Low" ? "FF167349" : "FFB42332",
     } };
     row.getCell(6).alignment = { wrapText: true, vertical: "top" };
     row.getCell(7).alignment = { wrapText: true, vertical: "top" };
     row.getCell(8).alignment = { wrapText: true, vertical: "top" };
-    row.height = Math.min(112, Math.max(30,
-      15 * Math.max(groupedReferences.length, Math.ceil(finding.explanation.length / 65))));
+    row.height = Math.min(180, Math.max(30,
+      15 * Math.max(groupedReferences.length, finding.explanation.split("\n").reduce((lines,part)=>lines+Math.max(1,Math.ceil(part.length/60)),0))));
   }
 }
 

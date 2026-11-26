@@ -1,0 +1,237 @@
+import assert from "node:assert/strict";
+import {test} from "node:test";
+import {readdirSync,readFileSync} from "node:fs";
+import path from "node:path";
+import {traceApexDependencies} from "../src/core/apex/ApexBackwardDependencyEngine.js";
+import {ApexRepositoryMethodIndex} from "../src/core/apex/ApexRepositoryMethodIndex.js";
+import {collectApexLiteralStringReturns} from "../src/core/apex/ApexLiteralReturnEvidence.js";
+import {indexApexMethods} from "../src/core/apex/ApexSourceModel.js";
+import {evaluateApexExpression,textValue,type ApexValue} from "../src/core/apex/ApexValueEvaluator.js";
+import {parseApexAccessLevel,defaultApexDatabaseAccessMode} from "../src/core/apex/ApexDatabaseAccessMode.js";
+import {readApexOperandBoundary} from "../src/core/apex/ApexOperandBoundary.js";
+import {maskApexSource} from "../src/core/apex/ApexSourceModel.js";
+import {OBJECT_PERMISSION_KEYS} from "../src/models/ObjectPrivilegeAccess.js";
+import {MATRIX_PERMISSION_KEYS} from "../src/models/ObjectAccessMatrixResult.js";
+
+test("shared backward engine traces non-SOQL collection dependency through callers and loop",()=>{
+  const files=[
+    {filePath:"Writer.cls",source:"public class Writer {public static void save(List<String> names){Sink.consume(names);}}"},
+    {filePath:"Bridge.cls",source:"public class Bridge {public static void forward(List<String> names){Writer.save(names);}}"},
+    {filePath:"Entry.cls",source:"public class Entry {public static void start(Boolean flag){Set<String> values=new Set<String>{'Status'};for(String item:new List<String>{'Amount','Description'}){values.add(item);}if(flag){values.add('OwnerId');}Bridge.forward(new List<String>(values));}}"}
+  ];
+  const source=files[0].source;
+  const trace=traceApexDependencies(source,files[0].filePath,{expression:"names",offset:source.indexOf("Sink.consume")},new ApexRepositoryMethodIndex(files));
+  assert.equal(trace.kind,"SOURCE_CANDIDATES");
+  const collections=trace.candidates.flatMap(e=>e.value.kind==="collection"?[e.value.items]:[]);
+  assert.deepEqual(collections.map(items=>new Set(items)),[new Set(["Status","Amount","Description","OwnerId"])],JSON.stringify(trace));
+  assert.ok(trace.callerEdges>=2);
+});
+test("default tracer does not invent a conditional String merge or expand an unknown metadata selector",()=>{
+  const source="public class Worker {public static void run(Boolean flag){String s='base';if(flag){s+='extra';}Sink.consume(s);}}";
+  const trace=traceApexDependencies(source,"Worker.cls",{expression:"s",offset:source.indexOf("Sink.consume")});
+  assert.ok(trace.candidates.every(e=>e.value.kind==="unknown"));
+  const metadata="public class Worker {public static void run(String key){Config__mdt cfg=Config__mdt.getInstance(key);Sink.consume(cfg.Name__c);}}";
+  let calls=0;
+  const read=traceApexDependencies(metadata,"Worker.cls",{expression:"cfg.Name__c",offset:metadata.indexOf("Sink.consume")},undefined,()=>{calls++;return undefined;});
+  assert.equal(calls,0);
+  assert.ok(read.candidates.every(e=>e.value.kind==="unknown"));
+});
+test("generic String join does not need a SQL grammar",()=>{
+  const source="public class Worker {public static void run(){List<String> names=new List<String>{'A','B'};String s=String.join(names,'/');Sink.consume(s);}}";
+  const trace=traceApexDependencies(source,"Worker.cls",{expression:"s",offset:source.indexOf("Sink.consume")});
+  assert.deepEqual(trace.candidates.map(e=>e.value),[textValue("A/B")]);
+});
+test("generic helper return evidence can describe non-query alternatives",()=>{
+  const source="public class Worker {public static void run(Integer step){Sink.consume(operation(step));}private static String operation(Integer step){switch on step {when 1 {return 'insert';}when 2 {return 'update';}when else {return null;}}}}";
+  const methods=indexApexMethods(source),owner=methods.find(m=>m.name==="run")!;
+  assert.deepEqual(new Set(collectApexLiteralStringReturns(source,owner,"operation(step)",[],methods)),new Set(["insert","update"]));
+});
+test("Apex core never imports SOQL analyzer, scanner, permission or report layer",()=>{
+  const directory=path.resolve("src/core/apex");
+  for(const name of readdirSync(directory).filter(n=>n.endsWith(".ts"))){
+    const source=readFileSync(path.join(directory,name),"utf8");
+    const imports=[...source.matchAll(/(?:\bfrom\s*|\bimport\s*\(\s*)['"]([^'"]+)['"]/g)].map(m=>m[1]);
+    for(const target of imports)assert.doesNotMatch(target,/(?:^|\/)(?:analyzer|scanner|reporter|services|salesforce|config|models)\//i,name+": "+target);
+  }
+});
+
+test("shared access mode and operand parsing do not depend on query grammar",()=>{
+  assert.equal(parseApexAccessLevel("AccessLevel.USER_MODE"),"USER_MODE");
+  assert.equal(parseApexAccessLevel("mode"),null);
+  assert.equal(parseApexAccessLevel(),undefined);
+  assert.equal(defaultApexDatabaseAccessMode(66),"SYSTEM_MODE");
+  assert.equal(defaultApexDatabaseAccessMode(67),"USER_MODE");
+  assert.equal(defaultApexDatabaseAccessMode(),undefined);
+  const input="new Map<String,List<String>>().get('x')[0], rest";
+  assert.equal(readApexOperandBoundary(maskApexSource(input),0)?.end,input.indexOf(", rest"));
+  assert.equal(readApexOperandBoundary("service.call(",0)?.malformed,true);
+  assert.equal(OBJECT_PERMISSION_KEYS,MATRIX_PERMISSION_KEYS);
+});
+
+
+test("loop-header lookup and chained built-ins reuse evaluator in backward evidence",()=>{
+  const source="public class Worker {public static void run(){List<String> requested=new List<String>{' Name ',' Industry ',' Unknown '};Map<String,String> allowed=new Map<String,String>{'name'=>'Name','industry'=>'Industry'};Set<String> fields=new Set<String>();for(String item:requested){String normalized=item.trim().toLowerCase();if(allowed.containsKey(normalized)){fields.add(normalized);}}Sink.consume(fields);}}";
+  const trace=traceApexDependencies(source,"Worker.cls",{expression:"fields",offset:source.indexOf("Sink.consume")});
+  assert.deepEqual(trace.candidates.map(e=>e.value.kind==="collection"?e.value.items:e.value),[["name","industry"]],JSON.stringify(trace));
+});
+test("unknown maps and input collections and loop mutation remain unresolved",()=>{
+  const sources=[
+    "public class Worker {public static void run(List<String> requested){Set<String> fields=new Set<String>();for(String item:requested){fields.add(item);}Sink.consume(fields);}}",
+    "public class Worker {public static void run(Map<String,String> allowed){List<String> requested=new List<String>{'Name'};Set<String> fields=new Set<String>();for(String item:requested){if(allowed.containsKey(item)){fields.add(item);}}Sink.consume(fields);}}",
+    "public class Worker {public static void run(){List<String> requested=new List<String>{'Name'};Set<String> fields=new Set<String>();for(String item:requested){requested.clear();fields.add(item);}Sink.consume(fields);}}",
+    "public class Worker {public static void run(){List<String> requested=new List<String>{'Name'};Map<String,String> allowed=new Map<String,String>{'Name'=>'Name'};Set<String> fields=new Set<String>();for(String item:requested){if(allowed.containsKey(item)){fields.add(item);}allowed.clear();}Sink.consume(fields);}}"
+  ];
+  for(const source of sources){
+    const trace=traceApexDependencies(source,"Worker.cls",{expression:"fields",offset:source.indexOf("Sink.consume")});
+    assert.ok(trace.candidates.every(e=>e.value.kind==="unknown"),JSON.stringify(trace));
+  }
+});
+test("shared parser retains enhanced-for element types and evaluator handles chains",()=>{
+  const source="public class Worker {public static void run(List<OrderSummary> orders){for(OrderSummary os:orders){Sink.consume(os);}}}";
+  const loop=indexApexMethods(source).find(m=>m.name==="run")!.body[0];
+  assert.equal(loop.kind,"for");assert.equal(loop.loopVariableType,"OrderSummary");assert.equal(loop.loopVariable,"os");assert.equal(loop.iterable,"orders");
+  assert.deepEqual(evaluateApexExpression("item.trim().toLowerCase()",{values:new Map([["item",textValue(" Name ")]])}),textValue("name"));
+});
+
+
+test("backward traversal reuses class-level initializer for copied list and loop",()=>{
+  const source="public class Worker {private static final List<String> BASE_FIELDS=new List<String>{' Id ',' Name '};public static void run(){List<String> requested=new List<String>(BASE_FIELDS);Set<String> safeFields=new Set<String>();for(String item:requested){safeFields.add(item.trim());}Sink.consume(safeFields);}}";
+  const filePath="Worker.cls",index=new ApexRepositoryMethodIndex([{filePath,source}]);
+  const events:string[]=[];
+  const result=traceApexDependencies(source,filePath,{expression:"safeFields",offset:source.indexOf("Sink.consume")},index,undefined,{observe:e=>events.push(e.code)});
+  assert.deepEqual(result.candidates.map(e=>e.value),[{kind:"collection",items:["Id","Name"],unique:true}],JSON.stringify(result));
+  assert.ok(events.includes("CLASS_MEMBER_RESOLVED"));
+});
+test("local and parameter scope take precedence over a class-level member",()=>{
+  for(const [method,expected] of [
+    ["public static void run(){String FIELD='Industry';Sink.consume(FIELD);}",textValue("Industry")],
+    ["public static void run(){String FIELD;Sink.consume(FIELD);}",undefined],
+    ["public static void run(String FIELD){Sink.consume(FIELD);}",undefined],
+    ["public static void run(){String f='Phone';{String FIELD=f;Sink.consume(FIELD);}}",textValue("Phone")],
+  ] as const){
+    const source="public class Worker {private static final String FIELD='Name';"+method+"}";
+    const filePath="Worker.cls",index=new ApexRepositoryMethodIndex([{filePath,source}]);
+    const trace=traceApexDependencies(source,filePath,{expression:"FIELD",offset:source.indexOf("Sink.consume")},index);
+    if(expected)assert.deepEqual(trace.candidates.map(e=>e.value),[expected]);
+    else assert.ok(trace.candidates.length&&trace.candidates.every(e=>e.value.kind==="unknown"),JSON.stringify(trace));
+  }
+});
+test("class-level lookup does not accept mutable, alias-escaped, blank or instance snapshots",()=>{
+  for(const body of [
+    "private static final List<String> BASE_FIELDS=new List<String>{'Id'}; public static void mutate(){BASE_FIELDS.add('Name');}",
+    "private static List<String> BASE_FIELDS=new List<String>{'Id'}; public static void mutate(){List<String> alias=BASE_FIELDS;alias.clear();}",
+    "private static List<String> BASE_FIELDS;",
+    "private List<String> BASE_FIELDS=new List<String>{'Id'};",
+  ]){
+    const source="public class Worker {"+body+"public void run(){Sink.consume(BASE_FIELDS);}}";
+    const filePath="Worker.cls",index=new ApexRepositoryMethodIndex([{filePath,source}]);
+    const trace=traceApexDependencies(source,filePath,{expression:"BASE_FIELDS",offset:source.indexOf("Sink.consume")},index);
+    assert.ok(trace.candidates.length&&trace.candidates.every(e=>e.value.kind==="unknown"),JSON.stringify(trace));
+  }
+});
+test("caller dependencies resolve members in the declaring caller class, not the sink class",()=>{
+  const files=[
+    {filePath:"Worker.cls",source:"public class Worker {private static String FIELD='Wrong';public static void run(String item){Sink.consume(item);}}"},
+    {filePath:"Caller.cls",source:"public class Caller {private static String FIELD='Name';public static void load(){Worker.run(FIELD);}}"}
+  ];
+  const root=files[0];
+  const trace=traceApexDependencies(root.source,root.filePath,{expression:"item",offset:root.source.indexOf("Sink.consume")},new ApexRepositoryMethodIndex(files));
+  assert.deepEqual(trace.candidates.map(e=>e.value),[textValue("Name")],JSON.stringify(trace));
+});
+
+
+test("add-only unknown iterations preserve known members and explicit incompleteness without inventing a joined String",()=>{
+  const source="public class Worker {public static void run(List<String> extra){Set<String> items=new Set<String>{'A'};if(extra!=null){for(String f:extra){if(String.isNotBlank(f)){items.add(f.trim());}}}Sink.consume(items);}}";
+  const result=traceApexDependencies(source,"Worker.cls",{expression:"items",offset:source.indexOf("Sink.consume")});
+  assert.deepEqual(result.candidates.map(e=>({value:e.value,runtime:e.runtimeMembers})),[{value:{kind:"collection",items:["A"],unique:true},runtime:{}}],JSON.stringify(result));
+  const joined=traceApexDependencies(source,"Worker.cls",{expression:"String.join(items,',')",offset:source.indexOf("Sink.consume")});
+  assert.ok(joined.candidates.every(e=>e.value.kind==="unknown"),JSON.stringify(joined));
+});
+
+
+test("backward helper dispatch reuses repository overload and return evaluation",()=>{
+  const files=[
+    {filePath:"Worker.cls",source:"public class Worker {public static void run(){String kind='detail';List<String> fields=Utils.columns(kind);Sink.consume(fields);}}"},
+    {filePath:"Utils.cls",source:"public class Utils {public static List<String> columns(String kind){List<String> fields=new List<String>{'Id'};if(kind=='detail'){fields.add('Name');}return fields;}public static List<String> columns(Integer n){return new List<String>{'Wrong'};}}"}
+  ];
+  const root=files[0],events:string[]=[];
+  const trace=traceApexDependencies(root.source,root.filePath,{expression:"fields",offset:root.source.indexOf("Sink.consume")},new ApexRepositoryMethodIndex(files),undefined,{observe:e=>events.push(e.code)});
+  assert.deepEqual(trace.candidates.map(e=>e.value),[{kind:"collection",items:["Id","Name"],unique:false}],JSON.stringify(trace));
+  assert.ok(events.includes("SHARED_HELPER_RESOLVED"));
+});
+test("same-class static helper with control flow uses existing return summary",()=>{
+  const source="public class Worker {public static void run(){String value=choose('a');Sink.consume(value);}private static String choose(String key){if(key=='a'){return 'Name';}return 'Industry';}}";
+  const filePath="Worker.cls";
+  const trace=traceApexDependencies(source,filePath,{expression:"value",offset:source.indexOf("Sink.consume")},new ApexRepositoryMethodIndex([{filePath,source}]));
+  assert.deepEqual(trace.candidates.map(e=>e.value),[textValue("Name")],JSON.stringify(trace));
+});
+test("shared dispatch does not guess runtime inputs, mutable arguments, shadowed receivers or private cross-class returns",()=>{
+  const utils={filePath:"Utils.cls",source:"public class Utils {public static String columns(String key){return 'Name';}private static String secret(){return 'Secret';}public static String mutate(List<String> input){input.clear();return 'Wrong';}}"};
+  for(const source of [
+    "public class Worker {public static void run(String key){Sink.consume(Utils.columns(key));}}",
+    "public class Worker {public static void run(){List<String> cols=new List<String>{'Id'};Sink.consume(Utils.mutate(cols));}}",
+    "public class Worker {public static void run(Utils Utils){Sink.consume(Utils.columns('a'));}}",
+    "public class Worker {public static void run(){Sink.consume(Utils.secret());}}",
+    "public class Worker {public static void run(){Sink.consume(Utils.columns(null));}}".replace("columns(null)","secret()")
+  ]){
+    const filePath="Worker.cls";
+    const expression=source.slice(source.indexOf("Sink.consume(")+13,source.lastIndexOf(");"));
+    const result=traceApexDependencies(source,filePath,{expression,offset:source.indexOf("Sink.consume")},new ApexRepositoryMethodIndex([{filePath,source},utils]));
+    assert.ok(result.candidates.length&&result.candidates.every(e=>e.value.kind==="unknown"),JSON.stringify(result));
+  }
+});
+test("caller-frame helper resolution uses caller source rather than root source",()=>{
+  const files=[
+    {filePath:"Worker.cls",source:"public class Worker {public static void run(String field){Sink.consume(field);}}"},
+    {filePath:"Entry.cls",source:"public class Entry {public static void load(){String field=pick('yes');Worker.run(field);}private static String pick(String flag){if(flag=='yes'){return 'Name';}return 'Phone';}}"}
+  ];
+  const root=files[0],index=new ApexRepositoryMethodIndex(files);
+  const result=traceApexDependencies(root.source,root.filePath,{expression:"field",offset:root.source.indexOf("Sink.consume")},index,
+    (name,args,hints,from)=>index.evaluateReturn(from??root.filePath,name,args,undefined,hints));
+  assert.deepEqual(result.candidates.map(e=>e.value),[textValue("Name")],JSON.stringify(result));
+});
+
+
+test("backward tracer uses AUE argument effects for known collection mutations and scalar return assignments",()=>{
+  const source="public class Builder {public static void run(){Set<String> fields=new Set<String>{'Id'};List<String> paths=new List<String>{'Name','Industry'};for(String path:paths){String ignored=addField(fields,path);}replaceField(fields);Sink.consume(fields);}private static String addField(Set<String> cols,String path){cols.add(path);return path;}private static void replaceField(Set<String> cols){cols.remove('Industry');cols.add('Phone');}}";
+  const events:string[]=[];
+  const result=traceApexDependencies(source,"Builder.cls",{expression:"fields",offset:source.indexOf("Sink.consume")},undefined,undefined,{observe:e=>events.push(e.code)});
+  assert.deepEqual(result.candidates.map(e=>e.value),[{kind:"collection",items:["Id","Name","Phone"],unique:true}],JSON.stringify(result));
+  assert.equal(events.filter(e=>e==="SHARED_HELPER_EFFECT_RESOLVED").length,3);
+});
+test("backward helper reassignment does not replace caller collection",()=>{
+  const source="public class Builder {public static void run(){List<String> fields=new List<String>{'Id'};change(fields);Sink.consume(fields);}private static void change(List<String> cols){cols.add('Name');cols=new List<String>();cols.add('Phone');}}";
+  const result=traceApexDependencies(source,"Builder.cls",{expression:"fields",offset:source.indexOf("Sink.consume")});
+  assert.deepEqual(result.candidates.map(e=>e.value),[{kind:"collection",items:["Id","Name"],unique:false}],JSON.stringify(result));
+});
+test("backward effect replay never treats a conditional candidate union, runtime argument, or escaped reference as an exact collection",()=>{
+  const base="public class Builder {public static void run(Boolean flag,String path){Set<String> fields=new Set<String>{'Id'};PREFIX change(fields,ARG);Sink.consume(fields);}private static void change(Set<String> cols,String path){cols.remove('Id');cols.add(path);}}";
+  for(const [prefix,arg] of [["if(flag){fields.add('Name');}","'Phone'"],["","path"],["Other.mutate(fields);","'Phone'"],["Set<String> alias=fields;","'Phone'"]]){
+    const source=base.replace("PREFIX",prefix).replace("ARG",arg);
+    const result=traceApexDependencies(source,"Builder.cls",{expression:"fields",offset:source.indexOf("Sink.consume")});
+    assert.ok(result.candidates.every(e=>e.value.kind==="unknown"),JSON.stringify(result));
+  }
+});
+test("backward effects reject a returned collection alias and unsupported helper body",()=>{
+  for(const body of ["Set<String> alias=change(fields);","change(fields);"]){
+    const helper=body.startsWith("Set")?"private static Set<String> change(Set<String> cols){cols.add('Name');return cols;}":"private static void change(Set<String> cols){Other.mutate(cols);}";
+    const source="public class Builder {public static void run(){Set<String> fields=new Set<String>{'Id'};"+body+"Sink.consume(fields);}"+helper+"}";
+    const result=traceApexDependencies(source,"Builder.cls",{expression:"fields",offset:source.indexOf("Sink.consume")});
+    assert.ok(result.candidates.every(e=>e.value.kind==="unknown"),JSON.stringify(result));
+  }
+});
+
+
+test("private static calls assigned to a local member retain correlated caller arguments",()=>{
+ const source="public class Worker { public class Result {public String value;} public static void run(Boolean flag){Result result=new Result();String a='Account';String b='Name';result.value=combine(a,b);} private static String combine(String obj,String field){String q=obj+'.'+field;Sink.consume(q);return q;} }";
+ const index=new ApexRepositoryMethodIndex([{filePath:"Worker.cls",source}]);
+ const trace=traceApexDependencies(source,"Worker.cls",{expression:"q",offset:source.indexOf("Sink.consume")},index);
+ assert.deepEqual(trace.candidates.map(e=>e.value),[textValue("Account.Name")],JSON.stringify(trace));
+ assert.equal(trace.callerEdges,1);
+ for(const call of ["result.value=combine(a,mutate(b));","result.inner.value=combine(a,b);","result.value=combine(a,b)+'extra';"]){
+   const changed=source.replace("result.value=combine(a,b);",call);
+   const idx=new ApexRepositoryMethodIndex([{filePath:"Worker.cls",source:changed}]);
+   const method=idx.indexedMethods("Worker.cls",changed)!.find(m=>m.name==="combine")!;
+   assert.equal(idx.sourceCallers("Worker.cls",method).length,0,call);
+ }
+});
