@@ -687,13 +687,13 @@ const configuredPredicateFixture="public class ConfigFixture {"+
  "private class Spec { public String path; public List<String> searches; public Boolean mandatory; }"+
  "public class Input { public String key; public String value; }"+
  "private static List<Spec> parse(String cfg){List<Spec> out=new List<Spec>();if(String.isBlank(cfg)){return out;}for(String seg:cfg.split(';')){String s=seg.trim();if(String.isBlank(s)||out.size()>=2){continue;}Spec item=new Spec();item.searches=new List<String>();item.mandatory=false;if(s.startsWith('*')){item.mandatory=true;s=s.substring(1).trim();}if(s.contains(':')){item.path=s.substringBefore(':').trim();for(String extra:s.substringAfter(':').split(',')){if(String.isNotBlank(extra.trim())){item.searches.add(extra.trim());}}}else{item.path=s;}if(String.isNotBlank(item.path)){out.add(item);}}return out;}"+
- "private static void addUser(String obj,Set<String> allowed,String json,List<String> clauses,Map<String,Object> binds){if(String.isBlank(json)){return;}List<Input> items=(List<Input>)JSON.deserialize(json,List<Input>.class);if(items==null||items.isEmpty()){return;}Integer idx=0;for(Input item:items){if(item==null||String.isBlank(item.key)||!allowed.contains(item.key)){continue;}Schema.DescribeFieldResult d=describeFieldPath(obj,item.key);if(d==null){continue;}write(item.key,kind(d),d,item,idx,clauses,binds);idx++;}}"+
+ "private static void addUser(String obj,Set<String> allowed,String payload,List<String> clauses,Map<String,Object> binds){if(String.isBlank(payload)){return;}List<Input> items=(List<Input>)JSON.deserialize(payload,List<Input>.class);if(items==null||items.isEmpty()){return;}Integer idx=0;for(Input item:items){if(item==null||String.isBlank(item.key)||!allowed.contains(item.key)){continue;}Schema.DescribeFieldResult d=describeFieldPath(obj,item.key);if(d==null){continue;}write(item.key,kind(d),d,item,idx,clauses,binds);idx++;}}"+
  "private static void addDefaults(String obj,String cfg,Set<String> overrides,List<String> clauses,Map<String,Object> binds){if(String.isBlank(cfg)){return;}Integer idx=100;for(String segment:cfg.split(';')){String s=segment.trim();if(String.isBlank(s)){continue;}if(raw(s)){clauses.add('('+s+')');continue;}if(!s.contains('=')){continue;}String f=s.substringBefore('=').trim();if(overrides.contains(f)){continue;}Schema.DescribeFieldResult d=describeFieldPath(obj,f);if(d==null){continue;}Input item=new Input();item.value=defaultValue(s.substringAfter('=').trim());write(f,kind(d),d,item,idx,clauses,binds);idx++;}}"+
  "private static Boolean raw(String s){String u=' '+s.toUpperCase()+' ';return s.contains('(')||s.contains('<')||s.contains('>')||s.contains('!=')||u.contains(' IN ')||u.contains(' LIKE ')||u.contains(' NOT ')||u.contains(' AND ')||u.contains(' OR ');}"+
  "private static String kind(Schema.DescribeFieldResult d){return 'text';}private static String defaultValue(String s){return s;}"+
  "private static void write(String f,String k,Schema.DescribeFieldResult d,Input item,Integer idx,List<String> clauses,Map<String,Object> binds){if(String.isBlank(item.value)){return;}String b='b'+idx;clauses.add(f+' = :'+b);binds.put(b,item.value);}"+
  scopedDescribeFixture.slice(scopedDescribeFixture.indexOf("{")+1,scopedDescribeFixture.lastIndexOf("}"))+
- "public static void run(String json,Set<String> overrides){String obj='Account';List<String> clauses=new List<String>();Map<String,Object> binds=new Map<String,Object>();Set<String> allowed=new Set<String>();for(Spec item:parse('*Name:Email,Phone;Industry;Description')){allowed.add(item.path);}addUser(obj,allowed,json,clauses,binds);addDefaults(obj,'Type=customer;AnnualRevenue > 0',overrides,clauses,binds);String predicate=clauses.isEmpty()?'':String.join(clauses,' AND ');String q='SELECT Id FROM '+obj+(String.isNotBlank(predicate)?(' WHERE '+predicate):'');Database.queryWithBinds(q,binds,AccessLevel.USER_MODE);}}";
+ "public static void run(String payload,Set<String> overrides){String obj='Account';List<String> clauses=new List<String>();Map<String,Object> binds=new Map<String,Object>();Set<String> allowed=new Set<String>();for(Spec item:parse('*Name:Email,Phone;Industry;Description')){allowed.add(item.path);}addUser(obj,allowed,payload,clauses,binds);addDefaults(obj,'Type=customer;AnnualRevenue > 0',overrides,clauses,binds);String predicate=clauses.isEmpty()?'':String.join(clauses,' AND ');String q='SELECT Id FROM '+obj+(String.isNotBlank(predicate)?(' WHERE '+predicate):'');Database.queryWithBinds(q,binds,AccessLevel.USER_MODE);}}";
 function configuredSchema(name:string,args:ApexValue[]):ApexValue|undefined{
  if(name!=="Schema.fieldMap"||args[0]?.kind!=="text"||args[0].values[0]!=="Account")return undefined;
  return {kind:"map",keyType:"schemaField",entries:["Id","Name","Industry","Type","AnnualRevenue","Phone","Description"].map(field=>[field.toLowerCase(),{kind:"schema",schemaType:"fieldToken",objectApiName:"Account",field:{name:field,type:"string",relationshipName:null,referenceTo:[]}}])};
@@ -721,7 +721,7 @@ test("phase 4.1: COUNT uses the same proven WHERE field inventory",()=>{
 
 test("phase 4.1: metadata row-specific user and default field domains stay correlated",()=>{
  const source=configuredPredicateFixture
-  .replace("run(String json,Set<String> overrides){String obj='Account';","run(String report,String json,Set<String> overrides){Config__mdt cfg=Config__mdt.getInstance(report);String obj=cfg.Object__c;")
+  .replace("run(String payload,Set<String> overrides){String obj='Account';","run(String report,String payload,Set<String> overrides){Config__mdt cfg=Config__mdt.getInstance(report);String obj=cfg.Object__c;")
   .replace("parse('*Name:Email,Phone;Industry;Description')","parse(cfg.User__c)")
   .replace("'Type=customer;AnnualRevenue > 0',overrides","cfg.Default__c,overrides");
  const result=evidence([{filePath:"ConfigFixture.cls",source}],(name,args)=>{
@@ -745,4 +745,12 @@ test("phase 4.1: scoped bind names are valid in separate switch branches but not
    new Set(["SELECT:Id","WHERE:Name","WHERE:Industry","WHERE:Type","WHERE:AnnualRevenue"]));
  const escaped=configuredPredicateFixture.replace("String b='b'+idx;clauses.add(f+' = :'+b);","if(k=='text'){String b='b'+idx;}clauses.add(f+' = :'+b);");
  assert.equal(evidence([{filePath:"ConfigFixture.cls",source:escaped}],configuredSchema).queries.length,0);
+});
+
+
+test("phase 4.1: shadowed platform identifier is not treated as a JSON deserializer",()=>{
+ const source=configuredPredicateFixture.replace("String payload,List<String> clauses","String JSON,List<String> clauses")
+  .replace("String.isBlank(payload)){return;}List<Input>","String.isBlank(JSON)){return;}List<Input>")
+  .replace("JSON.deserialize(payload,List<Input>.class)","JSON.deserialize(JSON,List<Input>.class)");
+ assert.equal(evidence([{filePath:"ConfigFixture.cls",source}],configuredSchema).queries.length,0);
 });
