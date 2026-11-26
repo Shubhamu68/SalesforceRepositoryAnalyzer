@@ -220,3 +220,18 @@ test("backward effects reject a returned collection alias and unsupported helper
     assert.ok(result.candidates.every(e=>e.value.kind==="unknown"),JSON.stringify(result));
   }
 });
+
+
+test("private static calls assigned to a local member retain correlated caller arguments",()=>{
+ const source="public class Worker { public class Result {public String value;} public static void run(Boolean flag){Result result=new Result();String a='Account';String b='Name';result.value=combine(a,b);} private static String combine(String obj,String field){String q=obj+'.'+field;Sink.consume(q);return q;} }";
+ const index=new ApexRepositoryMethodIndex([{filePath:"Worker.cls",source}]);
+ const trace=traceApexDependencies(source,"Worker.cls",{expression:"q",offset:source.indexOf("Sink.consume")},index);
+ assert.deepEqual(trace.candidates.map(e=>e.value),[textValue("Account.Name")],JSON.stringify(trace));
+ assert.equal(trace.callerEdges,1);
+ for(const call of ["result.value=combine(a,mutate(b));","result.inner.value=combine(a,b);","result.value=combine(a,b)+'extra';"]){
+   const changed=source.replace("result.value=combine(a,b);",call);
+   const idx=new ApexRepositoryMethodIndex([{filePath:"Worker.cls",source:changed}]);
+   const method=idx.indexedMethods("Worker.cls",changed)!.find(m=>m.name==="combine")!;
+   assert.equal(idx.sourceCallers("Worker.cls",method).length,0,call);
+ }
+});

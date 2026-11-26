@@ -282,7 +282,28 @@ export class ApexRepositoryMethodIndex {
       if(!node)return false;
       const text=maskApexSource(call.caller.source.slice(node.start,node.end));
       const relative=call.offset-node.start,open=text.indexOf("(",relative);
-      if(open<0||!/^\s*(?:return\s+|(?:[\w\s<>,.\[\]]+\s+)?[A-Za-z_]\w*\s*=\s*)?$/i.test(text.slice(0,relative)))return false;
+      if(open<0)return false;
+      const prefix=text.slice(0,relative);
+      const ordinary=/^\s*(?:return\s+|(?:[\w\s<>,.\[\]]+\s+)?[A-Za-z_]\w*\s*=\s*)?$/i.test(prefix);
+      if(!ordinary){
+        // A direct RHS of a local member assignment needs no receiver
+        // chain or earlier call. Only private same-owner static targets
+        // with read-only arguments. Candidate, not exhaustive coverage.
+        const member=/^\s*([A-Za-z_]\w*)\s*\.\s*[A-Za-z_]\w*\s*=\s*$/.exec(prefix);
+        const symbols=apexSymbols(call.caller.source,call.caller.methods);
+        if(!member||!target.isStatic||target.visibility!=="private"||call.caller!==owner||
+          !symbols.sameOwner(call.method,target)||
+          !symbols.hasLocalBinding(call.method,member[1],call.offset)||
+          !symbols.lookup(call.method,member[1],call.offset))return false;
+        if(call.expressions.some(raw=>{
+          const expr=raw.trim();
+          if(/^(?:'(?:\\.|[^'\\])*'|[-+]?\d+(?:\.\d+)?|true|false|null)$/i.test(expr))return false;
+          if(/^[A-Za-z_]\w*$/.test(expr))return !symbols.hasLocalBinding(call.method,expr,call.offset);
+          const field=/^([A-Za-z_]\w*)\s*\.\s*[A-Za-z_]\w*$/.exec(expr);
+          return !field||!symbols.hasLocalBinding(call.method,field[1],call.offset)||
+            !symbols.lookup(call.method,field[1],call.offset)?.endsWith("__mdt");
+        }))return false;
+      }
       const close=matchingPair(text,open);
       return close>=0&&/^\s*;\s*$/.test(text.slice(close+1));
     };
