@@ -2,6 +2,7 @@ import type { SalesforceOrgConnection, SalesforceSObjectDescribe } from "./Sales
 import type { SalesforceFieldMetadataService } from "./SalesforceFieldMetadataService.js";
 import {setImmediate as nextTurn} from "node:timers/promises";
 import { recordSoqlCount } from "../services/SoqlPerformanceMetrics.js";
+import {VerificationReadCache} from "./VerificationReadCache.js";
 
 /**
  * Shared, conservative UserFieldAccess gateway for SOQL, Stack Trace,
@@ -28,7 +29,7 @@ type DirectAccess = {
   read: boolean | null;
   edit: boolean | null;
 };
-type CacheEntry<T> = { expires: number; promise: Promise<T> };
+
 
 export type EffectiveUserFieldAccess = {
   read: boolean | null;
@@ -141,12 +142,12 @@ function toAccess(rows: UserAccessRow[], userId: string, field: string): DirectA
 }
 
 export class SalesforceUserFieldAccessGateway {
-  private readonly fullCache = new Map<string, CacheEntry<Map<string, DirectAccess>>>();
-  private readonly exactCache = new Map<string, CacheEntry<DirectAccess>>();
+  private readonly fullCache = new VerificationReadCache<Map<string,DirectAccess>>(CACHE_MS,MAX_CACHE_ENTRIES,"org.user_field_gateway");
+  private readonly exactCache = new VerificationReadCache<DirectAccess>(CACHE_MS,MAX_CACHE_ENTRIES,"org.user_field_gateway");
   private readonly pendingExact=new Map<string,ExactGroup>();
   private readonly unsupportedBatchUntil=new Map<string,number>();
   private readonly unproductiveBatchUntil=new Map<string,number>();
-  private readonly parentCache = new Map<string, CacheEntry<Map<string, string>>>();
+  private readonly parentCache = new VerificationReadCache<Map<string,string>>(CACHE_MS,MAX_CACHE_ENTRIES,"org.user_field_gateway");
   private readonly compositePending=new Map<string,CompositeExactRequest[]>();
   private readonly compositeDisabledUntil=new Map<string,number>();
 
@@ -161,22 +162,9 @@ export class SalesforceUserFieldAccessGateway {
     return [status?.organizationId??"not-connected",status?.instanceUrl??"",status?.userId??"",this.connection.getReadEpoch?.()??""].join("|");
   }
 
-  private cached<T>(store: Map<string, CacheEntry<T>>, key: string, load: () => Promise<T>): Promise<T> {
-    const hit = store.get(key);
-    if (hit && hit.expires > Date.now()) { recordSoqlCount("org.user_field_gateway.cache_hits"); return hit.promise; }
-    recordSoqlCount("org.user_field_gateway.cache_misses");
-    if (store.size > MAX_CACHE_ENTRIES) store.clear();
-    const promise = load().catch((error: unknown) => {
-      store.delete(key); // Do not persist network/metadata failures.
-      throw error;
-    });
-    store.set(key, { expires: Date.now() + CACHE_MS, promise });
-    return promise;
-  }
-
   private async allFields(userId: string, object: string): Promise<Map<string, DirectAccess>> {
     const cacheKey = this.scope() + "|" + userKey(userId) + "|" + norm(object);
-    return this.cached(this.fullCache, cacheKey, async () => {
+    return this.fullCache.read(cacheKey, async () => {
       const soql =
         `SELECT UserId, FieldDefinition.QualifiedApiName, IsAccessible, IsUpdatable FROM UserFieldAccess WHERE User.Id = '${userId}' AND FieldDefinition.EntityDefinition.QualifiedApiName = '${object}'`;
       recordSoqlCount("org.user_field_gateway.object_wide_queries");
@@ -196,7 +184,7 @@ export class SalesforceUserFieldAccessGateway {
 
   private async exact(userId: string, object: string, field: string): Promise<DirectAccess> {
     const key = this.scope() + "|" + userKey(userId) + "|" + norm(object) + "|" + norm(field);
-    return this.cached(this.exactCache, key, async () => {
+    return this.exactCache.read(key, async () => {
       // Preserve exact equality semantics. Composite is an opt-in transport
       // experiment; do not revive the previously unproductive IN filter.
       if((this.options.compositeExact??process.env.SALESFORCE_USER_FIELD_COMPOSITE==="1")&&
@@ -376,7 +364,7 @@ export class SalesforceUserFieldAccessGateway {
 
   private async compoundParents(object: string): Promise<Map<string, string>> {
     const key = this.scope() + "|" + norm(object);
-    return this.cached(this.parentCache, key, async () => {
+    return this.parentCache.read(key, async () => {
       const describe = await this.connection.describeSObject(object);
       // The previous per-field helper rebuilt a Map of *every field* for
       // each field in the Describe. On large objects that was O(fields²).

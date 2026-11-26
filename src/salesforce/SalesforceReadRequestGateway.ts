@@ -1,4 +1,5 @@
 import {setTimeout as delay} from "node:timers/promises";
+import {recordSoqlCount,timeSoqlPhase} from "../services/SoqlPerformanceMetrics.js";
 
 /** Shared, per-connection read-only transport boundary. Queue time is not
  * charged against the individual HTTP timeout. Retries never hold a slot
@@ -50,10 +51,12 @@ export class SalesforceReadRequestGateway {
       throw new Error("Invalid Salesforce read request gateway configuration.");
   }
   private async slot<T>(work:()=>Promise<T>):Promise<T>{
-    if(this.active>=this.concurrency)
-      await new Promise<void>(resolve=>this.queue.push(resolve));
-    else this.active++;
-    try{return await work();}
+    if(this.active>=this.concurrency){
+      recordSoqlCount("org.http.queue_waits");
+      await timeSoqlPhase("org.http.queue_cumulative_ms",()=>new Promise<void>(resolve=>this.queue.push(resolve)));
+    }else this.active++;
+    recordSoqlCount("org.http.attempts");
+    try{return await timeSoqlPhase("org.http.work_cumulative_ms",work);}
     finally{
       const next=this.queue.shift();
       // Transfer this slot directly to the oldest waiter.
