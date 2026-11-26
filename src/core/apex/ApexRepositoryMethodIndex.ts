@@ -434,6 +434,13 @@ export class ApexRepositoryMethodIndex {
         },
       });
       result=timeApex("helper.repository_evaluation_ms",()=>engine.summarizeMethodReturn(method,args));
+      // Reuse the existing source-proven Field Set factory for exact
+      // scalar helper arguments when generic return evaluation is opaque.
+      if(result.kind==="unknown"&&args.every(v=>v.kind==="text"&&v.values.length===1&&!v.scalarType)&&
+        !["Schema","String","List"].some(p=>this.hasSourceClass(p))){
+        const projected=evaluateConstructorFieldList(method,args,resolveExternal);
+        if(projected!==undefined)result=projected;
+      }
       if(result.kind==="instance"||result.kind==="instanceList")result=unknown("Instance-return alias transfer is not yet proven.");
     }finally{this.active.delete(id);}
     if(this.summaries.size>=MAX_CACHED_SUMMARIES)this.summaries.delete(this.summaries.keys().next().value!);

@@ -930,3 +930,29 @@ test("B: typed Id list and date value slots preserve child SELECT and ORDER BY i
  assert.match(q.subqueries?.[0]?.query??"",/ORDER BY LastName/);
  assert.equal(evidence([files[0],{...files[1],source:files[1].source.replace("Set<Id>","Set<String>")}]).queries.length,0);
 });
+
+
+test("C: private instance member assignment domains reuse Field Set helper and literal conditional predicate",()=>{
+ const files=[{filePath:"BatchFixture.cls",source:"public class BatchFixture {private List<String> selected;private String suffix='';private List<String> types;public BatchFixture(){try{init();}catch(Exception e){System.debug(e);}}private void init(){types=new List<String>();suffix=(types!=null)?' AND Type IN :types':'';selected=Fields.load('Account','FixtureSet');}private void run(Set<Id> ids){String q='SELECT '+String.join(selected,',')+',Id FROM Account WHERE Id IN :ids'+suffix;Database.query(q);}}"},
+ {filePath:"Fields.cls",source:"public class Fields {public static List<String> load(String obj,String name){Schema.SObjectType t=Schema.getGlobalDescribe().get(obj);Schema.DescribeSObjectResult d=t.getDescribe();Schema.FieldSet s=d.fieldSets.getMap().get(name);List<Schema.FieldSetMember> m=s.getFields();List<String> out=new List<String>();for(Schema.FieldSetMember f:m){out.add(f.getFieldPath());}return out;}}"}];
+ const resolve=(name:string,args:ApexValue[]):ApexValue|undefined=>name==="Schema.fieldSetFields"&&args[0].kind==="text"&&args[0].values[0]==="Account"?{kind:"collection",items:["Name","Industry"],unique:false}:undefined;
+ const result=evidence(files,resolve);
+ assert.deepEqual(fields(result.queries),new Set(["SELECT:Id","SELECT:Name","SELECT:Industry","WHERE:Id","WHERE:Type"]),JSON.stringify(result));
+ const mutated=files[0].source.replace("selected=Fields.load('Account','FixtureSet');","selected=Fields.load('Account','FixtureSet');Other.mutate(selected);");
+ assert.equal(evidence([{...files[0],source:mutated},files[1]],resolve).queries.length,0);
+});
+test("C: append-only static field set member is correlated with current entry point, not previous invocations",()=>{
+ const files=[{filePath:"Service.cls",source:"public class Service {public static void run(String fields,Id id){String q=String.escapeSingleQuotes(fields)+' FROM Account WHERE Id = :id';Database.query(q);}}"},
+ {filePath:"Entry.cls",source:"public class Entry {private static String columns='SELECT Id ';public static void run(Id id){try{List<Schema.FieldSetMember> ms=Schema.SObjectType.Account.fieldSets.getMap().get('FixtureSet').getFields();List<Object> display=build(ms);columns+=', Type';Service.run(columns,id);}catch(Exception ex){System.debug(ex);}}public static void other(){List<Schema.FieldSetMember> ms=Schema.SObjectType.Contact.fieldSets.getMap().get('FixtureSet').getFields();List<Object> display=build(ms);System.debug(columns);}private static List<Object> build(List<Schema.FieldSetMember> members){List<Object> display=new List<Object>();for(Schema.FieldSetMember m:members){String path=m.getFieldPath();columns+=', '+path;display.add(m.getLabel());}return display;}}"}];
+ const resolve=(name:string,args:ApexValue[]):ApexValue|undefined=>name==="Schema.fieldSetFields"&&args[0].kind==="text"?{kind:"collection",items:args[0].values[0]==="Account"?["Name","Industry"]:["Email"],unique:false}:undefined;
+ const result=evidence(files,resolve);
+ assert.deepEqual(fields(result.queries),new Set(["SELECT:Id","SELECT:Name","SELECT:Industry","SELECT:Type","WHERE:Id"]),JSON.stringify(result));
+ assert.deepEqual(result.partialSelectQueries,result.queries);
+ const scan=extractDynamicSoqlQueries(files[0].source,files[0].filePath,resolve,new ApexRepositoryMethodIndex(files));
+ assert.ok(scan.queries.some(q=>q.selectPrefixOnly&&q.coverage==="PROVEN_PARTIAL_STRUCTURE"),JSON.stringify(scan));
+ for(const source of [
+ files[1].source.replace("columns+=', Type';","columns='SELECT Name';"),
+ files[1].source.replace("List<Object> display=build(ms);columns","Other.mutate(ms);List<Object> display=build(ms);columns"),
+ files[1].source.replace("Schema.SObjectType.Account.fieldSets","Schema.SObjectType.Contact.fieldSets")
+ ])assert.equal(evidence([files[0],{...files[1],source}],resolve).queries.length,0);
+});

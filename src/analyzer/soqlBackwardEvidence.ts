@@ -1,4 +1,5 @@
 import {apexSymbols} from "../core/apex/ApexSymbolTable.js";
+import {fieldSetMemberTailType} from "../core/apex/ApexPrivateMemberDomain.js";
 import {proveConfiguredFallbackDomain} from "../core/apex/ApexConfiguredFallbackDomain.js";
 import {normalizeConfiguredSoqlTemplate} from "./soqlConfiguredTemplate.js";
 import {proveConfiguredAggregateDomain} from "../core/apex/ApexConfiguredAggregateDomain.js";
@@ -400,6 +401,18 @@ export function backtrackSoqlPermissionShapes(source:string,filePath:string,site
     }
     if(!runtimeObject)allRuntime=false;
     if(!text){
+      const memberParts=proof.value.kind==="unknown"?proof.value.fragments:undefined;
+      if(memberParts?.length===3){
+        const [before,hole,after]=memberParts;
+        if(before.kind==="literal"&&hole.kind==="hole"&&hole.symbol?.type.startsWith(fieldSetMemberTailType)&&after.kind==="literal"&&
+          /^\s*SELECT\s+[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*(?:\s*,\s*[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)*\s*$/i.test(before.text)&&/^\s+FROM\s+[A-Za-z_]\w*\b/i.test(after.text)){
+          const text=(before.text+after.text).trim(),shape=simplePermissionShape(text,site.line);
+          if(shape?.mode==="UNSPECIFIED"&&shape.object.toLowerCase()===hole.symbol.type.slice(fieldSetMemberTailType.length).toLowerCase()&&matches(shape,proof.annotations)){
+            queries.add(text);partialSelectQueries.add(text);intendedValueQueries.add(text);
+            note("SOQL_APPEND_ONLY_MEMBER_REFERENCES_VALIDATED",shape.fields.length);continue;
+          }
+        }
+      }
       const mode=parseApexAccessLevel(site.accessLevelArgument);
       const parts=proof.value.kind==="unknown"?proof.value.fragments:undefined;
       // The extra SELECT members were validated individually on every

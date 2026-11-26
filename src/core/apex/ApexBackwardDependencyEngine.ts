@@ -15,6 +15,7 @@ import {findApexTernary} from "./ApexConditionalInvocation.js";
 import {evaluateSchemaExpression,evaluateSchemaGlobalGuard,schemaReceiverEligible,isSchemaFieldMap,mutateSchemaFieldMap} from "./ApexSchemaModel.js";
 import {metadataSelectorHelper} from "./ApexCustomMetadataQueryModel.js";
 import {reportApexDependency,type ApexDependencyObserver} from "./ApexDependencyDiagnostics.js";
+import {provePrivateAssignedMemberDomain,proveFieldSetStringMemberProjection,fieldSetMemberTailType} from "./ApexPrivateMemberDomain.js";
 
 const clean=(s:string)=>stripApexComments(s).trim();
 const identifier=/^[A-Za-z_]\w*$/;
@@ -78,7 +79,7 @@ export interface ApexDependencyTrace<A=never>{
 }
 interface Frame {filePath:string;source:string;methods:readonly IndexedApexMethod[];method:IndexedApexMethod;key:string;depth:number;ancestors:readonly string[]}
 type Row=Array<[string,ApexValue]>;
-type Choice={kind:"caller";edge:ApexCallerSource}|{kind:"row";row:Row};
+type Choice={kind:"caller";edge:ApexCallerSource}|{kind:"row";row:Row}|{kind:"member";value:ApexValue};
 class Expand {constructor(readonly key:string,readonly choices:readonly Choice[]){}}
 class Bounded extends Error{}
 
@@ -120,7 +121,7 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
     return empty;
   }
   const root:Frame={filePath,source,methods,method,key:"root",depth:0,ancestors:[]};
-  let work=0,edges=0,metadataRows=0,bounded=false,effectSummaries=0;
+  let work=0,edges=0,metadataRows=0,memberChoices=0,bounded=false,effectSummaries=0;
   const effectEngines=new Map<string,ApexDataFlowEngine>();
   const found=new Map<string,Evidence>();
   const note=(frame:Frame,offset:number,code:string,symbol?:string,count?:number)=>
@@ -194,6 +195,13 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
       const scalarCall=/^String\s*\.\s*(isBlank|isNotBlank|escapeSingleQuotes)\s*\(\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?)\s*\)$/i.exec(expr);
       if(scalarCall&&!index?.hasSourceClass("String")&&!apexSymbols(frame.source,frame.methods).hasLocalBinding(frame.method,"String",offset)){
         const input=resolve(frame,scalarCall[2],offset,locals);
+        if(scalarCall[1].toLowerCase()==="escapesinglequotes"&&input.value.kind==="unknown"&&
+          input.value.fragments?.some(p=>p.kind==="hole"&&p.symbol?.type.startsWith(fieldSetMemberTailType))){
+          // String escaping preserves individually proven literal pieces,
+          // not the unknown prior state or actual SOQL enforcement.
+          const fragments=input.value.fragments.map(p=>p.kind==="literal"?{...p,text:p.text.replace(/'/g,"\\'")}:p);
+          return ev({...input.value,fragments},input.annotations);
+        }
         if(exactValue(input)){
           const value=evaluateApexExpression("String."+scalarCall[1]+"(arg)",{values:new Map([["arg",input.value]])});
           if(value.kind!=="unknown")return ev(value);
@@ -513,6 +521,29 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
             const snapshot=resolveExternal?.("Apex.scopeField",[
               textValue(owner),textValue(name),textValue("unqualified"),textValue("true"),
             ])??index.evaluateScopeField(owner,name,"unqualified",true,resolveExternal);
+            if(snapshot?.kind==="unknown"&&frame.depth<MAX_DEPTH&&
+              !["String","Schema","List","Set"].some(p=>index.hasSourceClass(p))){
+              const context={source:frame.source,methods:frame.methods,method:frame.method,offset};
+              const key=frame.key+"|assigned-member|"+name.toLowerCase();
+              const selected=choices.get(key);
+              if(selected?.kind==="member")return ev(selected.value);
+              const assigned=provePrivateAssignedMemberDomain(context,name,(method,expr,at)=>{
+                const nested:Frame={...frame,method,key:frame.key+"|member-definition:"+method.start,
+                  depth:frame.depth+1,ancestors:[...frame.ancestors,frameIdentity(frame)]};
+                const value=resolve(nested,expr,at,new Map());
+                return value.annotations.length||value.runtimeMembers||value.describeObject?stop("Non-exact member assignment"):value.value;
+              });
+              if(assigned?.length){
+                note(frame,offset,"PRIVATE_MEMBER_ASSIGNMENT_DOMAIN",name,assigned.length);
+                if(assigned.length===1)return ev(assigned[0]);
+                throw new Expand(key,assigned.map(value=>({kind:"member",value})));
+              }
+              const projected=proveFieldSetStringMemberProjection(context,name,(expr,at)=>{
+                const value=resolve(frame,expr,at,locals);
+                return value.annotations.length||value.runtimeMembers||value.describeObject?stop("Non-exact Field Set member projection"):value.value;
+              });
+              if(projected){note(frame,offset,"APPEND_ONLY_MEMBER_FIELDSET_PROJECTED",name);return ev(projected);}
+            }
             if(snapshot!==undefined){
               note(frame,offset,snapshot.kind==="unknown"?"CLASS_MEMBER_UNPROVEN":"CLASS_MEMBER_RESOLVED",name);
               return ev(snapshot);
@@ -922,9 +953,9 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
     }catch(error){
       if(error instanceof Bounded){bounded=true;note(root,use.offset,"WORK_LIMIT");break;}
       if(!(error instanceof Expand))throw error;
-      if(choices.has(error.key)||queue.length+error.choices.length>MAX_EDGES||edges+metadataRows+error.choices.length>MAX_EDGES){bounded=true;note(root,use.offset,"EDGE_OR_ROW_LIMIT");continue;}
+      if(choices.has(error.key)||queue.length+error.choices.length>MAX_EDGES||edges+metadataRows+memberChoices+error.choices.length>MAX_EDGES){bounded=true;note(root,use.offset,"EDGE_OR_ROW_LIMIT");continue;}
       for(const choice of error.choices){
-        if(choice.kind==="caller")edges++;else metadataRows++;
+        if(choice.kind==="caller")edges++;else if(choice.kind==="row")metadataRows++;else memberChoices++;
         const next=new Map(choices);next.set(error.key,choice);queue.push(next);
       }
     }

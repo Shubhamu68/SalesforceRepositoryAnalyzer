@@ -272,7 +272,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
         }
         if(trace)trace.added=aggregatedPermissionInventories;
         if(aggregatedPermissionInventories)explanation+=" Permission inventory aggregated from known object and field references. The reconstructed query is for analysis only, not execution.";
-        if(traced?.intendedValueQueries?.length)explanation+=" Intended literal object and field references are checked for grants. Raw runtime String values may alter query text; effective enforcement and injection safety remain unverified.";
+        if(traced?.intendedValueQueries?.length)explanation+=" Intended object and field references are checked for grants. Unverified runtime String values or prior member state may alter query text; effective enforcement and injection safety remain unverified.";
         else if(traced?.partialSelectQueries?.length)explanation+=" Independently proven SELECT fields were checked for grants. An explicit Database AccessLevel is present, but effective enforcement, runtime WHERE and ORDER BY clauses, and possible text-mode conflicts remain unverified.";
       }
       if(backwardExplanation)explanation=backwardExplanation+" Initial analysis: "+explanation;
