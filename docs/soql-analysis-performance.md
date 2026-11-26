@@ -95,3 +95,18 @@ The original three persona runs on the older build were approximately **32s, 20s
 - On the **first** execution, the Apex index has to be built and Salesforce caches start cold. Improvements here come from faster directory discovery, early rejection of classes without static SOQL, less per-field processing, and avoiding expensive quadratic compound-field preparation.
 - On **subsequent** executions, stat-validated parsed Apex queries are reused. File edits, additions and removals trigger correct invalidation. Salesforce checks have their own independently scoped TTLs.
 - The upcoming all-personas report can use `SoqlSecurityAnalyzer.prepare(queries)` once and `analyzePrepared(persona, prepared)` for each persona. This shares static SOQL/relationship work even during its **first button click**, while each persona still gets independent permission evaluation. This new feature is not implemented in Issue #40.
+
+## Milestone optimization round — first slice
+
+Branch: feature/soql-performance-optimization. Live reference: 90.790 s, 716 inventories, 1,835 fields, 829 raw findings, 312 grouped (7 High, 290 Low, 15 Unable to verify). 307 queryAll calls, 14 Field Set SOAP requests, 193 access calls. Independent Profile/PSG/User inventory reads overlap; no permission rules or metadata freshness windows change.
+
+For a controlled experiment, restart the backend first with default concurrency (HTTP 4, verification 3), then repeat with:
+
+```powershell
+$env:SALESFORCE_SOQL_PERF = "1"
+$env:SALESFORCE_HTTP_READ_CONCURRENCY = "6"
+$env:SALESFORCE_VERIFICATION_CONCURRENCY = "5"
+npm run api
+```
+
+Both settings are bounded to 1–8, invalid values fall back to defaults. They affect shared read gateways, not just SOQL. Compare cold and warm runs with the same org/repository/persona and actual representative user. Reject tuning if throttling, failures or permission outcomes regress. No speculative missing-row shortcut or stale metadata caching is introduced. The new workbook header records users from consumed verification evidence (including cached evidence); no separate user lookup is performed. If no user-level checks occurred, show that explicitly; if multiple users contributed, disclose all rather than claiming a single representative.

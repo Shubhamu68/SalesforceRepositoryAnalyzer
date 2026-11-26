@@ -1,5 +1,7 @@
 import type { Persona } from "../models/Persona.js";
 import { recordSoqlCount, timeSoqlPhase } from "./SoqlPerformanceMetrics.js";
+import {noteVerificationEvidence} from "./SoqlVerificationProvenance.js";
+import {boundedConcurrency} from "../config/salesforceConcurrency.js";
 import type { OrgVerificationStatusPolicy } from "../config/orgVerificationStatusPolicy.js";
 import { isStatusNeutralOrgObjectRead } from "../config/orgVerificationStatusPolicy.js";
 import { isFieldLevelSecurityApplicable, PLATFORM_EVENT_FLS_REASON } from "../config/fieldSecurityPolicy.js";
@@ -50,12 +52,13 @@ export function isAccountStandardAddressField(object: string, field: string): bo
 
 const CACHE_MS = 60_000;
 const MAX_CACHE_ENTRIES = 4000;
-const MAX_INFLIGHT_ORG_CHECKS = 3;
+
 type CacheEntry<T> = { until: number; value: Promise<T> };
 
 export class OrgObjectReadVerificationService {
   private readonly objectChecks = new Map<string, CacheEntry<OrgObjectAccessEvidence | undefined>>();
   private readonly fieldChecks = new Map<string, CacheEntry<OrgObjectAccessEvidence | undefined>>();
+  private readonly maxInflight=boundedConcurrency(process.env.SALESFORCE_VERIFICATION_CONCURRENCY,3,8);
   private inflight = 0;
   private readonly waiting: Array<() => void> = [];
 
@@ -103,7 +106,7 @@ export class OrgObjectReadVerificationService {
 
   /** Bound Salesforce verification calls across ALL analyzers, not per feature. */
   private async limited<T>(work: () => Promise<T>): Promise<T> {
-    if (this.inflight >= MAX_INFLIGHT_ORG_CHECKS) {
+    if (this.inflight >= this.maxInflight) {
       recordSoqlCount("org.verification.queue_waits");
       // The finishing worker hands its slot directly to this waiter.
       // Do not increment inFlight again after waking: doing so can exceed
@@ -124,8 +127,10 @@ export class OrgObjectReadVerificationService {
   /** The same cached Salesforce UserEntityAccess check is used everywhere. */
   async verifyObject(persona: Persona, object: string): Promise<OrgObjectAccessEvidence | undefined> {
     if (!this.verifier) return undefined;
-    return this.cached(this.objectChecks, this.cacheKey(persona, object),
+    const evidence=await this.cached(this.objectChecks, this.cacheKey(persona, object),
       () => this.limited(() => this.verifier!.verifyObjectRead(persona, object)));
+    noteVerificationEvidence(evidence);
+    return evidence;
   }
 
   /** Repository-first object permission resolution; no object-name restrictions. */
@@ -149,8 +154,10 @@ export class OrgObjectReadVerificationService {
   /** Cached raw field evidence, shared by SOQL, Stack Trace, Access Checker and future features. */
   async resolveField(persona: Persona, object: string, field: string): Promise<OrgObjectAccessEvidence | undefined> {
     if (!isFieldLevelSecurityApplicable(object) || !this.verifier) return undefined;
-    return this.cached(this.fieldChecks, this.cacheKey(persona, object, field),
+    const evidence=await this.cached(this.fieldChecks, this.cacheKey(persona, object, field),
       () => this.limited(() => this.verifier!.verifyFieldRead(persona, object, field)));
+    noteVerificationEvidence(evidence);
+    return evidence;
   }
 
   /**

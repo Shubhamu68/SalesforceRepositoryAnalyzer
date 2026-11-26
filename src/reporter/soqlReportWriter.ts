@@ -1,6 +1,8 @@
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import ExcelJS from "exceljs";
+import type {OrgCheckedUser} from "../models/StackTraceImpact.js";
+import {verificationUserLabel} from "../services/SoqlVerificationProvenance.js";
 import { timeSoqlPhase, timeSoqlSync } from "../services/SoqlPerformanceMetrics.js";
 import { EXISTING_VARIANT_LIMITATION, PARTIAL_REFERENCE_LIMITATION } from "../analyzer/soqlExistingVariantReporting.js";
 
@@ -12,7 +14,8 @@ export async function writeSoqlReport(
   outputDirectory: string,
   personaName: string,
   queryCount: number,
-  findings: SoqlSecurityFinding[]
+  findings: SoqlSecurityFinding[],
+  verificationUsers?:readonly OrgCheckedUser[]
 ): Promise<{
   summaryReportPath: string;
 }> {
@@ -49,7 +52,8 @@ export async function writeSoqlReport(
     summaryReportPath,
     personaName,
     queryCount,
-    conciseFindings
+    conciseFindings,
+    verificationUsers
   );
 
   return { summaryReportPath };
@@ -64,6 +68,7 @@ export interface PersonaHighPriorityReportSection {
   personaName: string;
   queryCount: number;
   findings: SoqlSecurityFinding[];
+  verificationUsers?:readonly OrgCheckedUser[];
 }
 
 export interface PersonaHighPriorityReportSummary {
@@ -91,6 +96,7 @@ export async function writeAllPersonasHighPriorityReport(
   const grouped = timeSoqlSync("excel.grouping", () => sections.map(section => ({
     personaName: section.personaName,
     queryCount: section.queryCount,
+    verificationUsers:section.verificationUsers,
     findings: buildConciseFindings(section.findings.filter(
       finding => finding.criticality === "High" && !isMetadataObject(finding.object),
     )),
@@ -148,6 +154,7 @@ export async function writeAllPersonasHighPriorityReport(
     ]);
     countRow.font = { bold: true, size: 11 };
     countRow.height = 22;
+    if(section.verificationUsers!==undefined)addVerificationUserRow(sheet,section.verificationUsers);
     addSummaryFindingHeader(sheet);
     if (section.findings.length) {
       appendSummaryFindingRows(sheet, section.findings);
@@ -309,7 +316,8 @@ async function writeSummaryWorkbook(
   filePath: string,
   personaName: string,
   queryCount: number,
-  findings: ConciseFinding[]
+  findings: ConciseFinding[],
+  verificationUsers?:readonly OrgCheckedUser[]
 ): Promise<void> {
   const workbook =
     new ExcelJS.Workbook();
@@ -373,12 +381,14 @@ async function writeSummaryWorkbook(
   ).value =
     findings.length;
 
+  if(verificationUsers!==undefined)addVerificationUserRow(summarySheet,verificationUsers);
+  const legendRow=verificationUsers===undefined?5:6;
   summarySheet.addRow([]);
-  summarySheet.mergeCells("A5:H5");
-  summarySheet.getCell("A5").value = "High = confirmed missing Read with enforced SOQL access or in recovered dynamic-query evidence; Unable to verify = unresolved permission or analysis review; Low = advisory or org-verified Read. High does not always mean a runtime access failure. Mixed findings show the highest severity. Dynamic SOQL uses repository initializer snapshots; detected static writes and direct collection aliases invalidate those snapshots. Indirect effects may remain unresolved; reconstructed queries are repository-based, not runtime traces.";
-  summarySheet.getCell("A5").font = { italic: true, color: { argb: "FF60748D" }, size: 10 };
-  summarySheet.getCell("A5").alignment = { wrapText: true, vertical: "middle" };
-  summarySheet.getRow(5).height = 32;
+  summarySheet.mergeCells(`A${legendRow}:H${legendRow}`);
+  summarySheet.getCell(`A${legendRow}`).value = "High = confirmed missing Read with enforced SOQL access or in recovered dynamic-query evidence; Unable to verify = unresolved permission or analysis review; Low = advisory or org-verified Read. High does not always mean a runtime access failure. Mixed findings show the highest severity. Dynamic SOQL uses repository initializer snapshots; detected static writes and direct collection aliases invalidate those snapshots. Indirect effects may remain unresolved; reconstructed queries are repository-based, not runtime traces.";
+  summarySheet.getCell(`A${legendRow}`).font = { italic: true, color: { argb: "FF60748D" }, size: 10 };
+  summarySheet.getCell(`A${legendRow}`).alignment = { wrapText: true, vertical: "middle" };
+  summarySheet.getRow(legendRow).height = 32;
 
   addSummaryFindingHeader(summarySheet);
   appendSummaryFindingRows(summarySheet, findings);
@@ -386,7 +396,7 @@ async function writeSummaryWorkbook(
   summarySheet.views = [
     {
       state: "frozen",
-      ySplit: 6,
+      ySplit: legendRow+1,
     },
   ];
 
@@ -397,13 +407,21 @@ async function writeSummaryWorkbook(
   // ------------------------------------------------
 
   summarySheet.autoFilter = {
-    from: "A6",
-    to: `H${Math.max(6, summarySheet.rowCount)}`,
+    from: `A${legendRow+1}`,
+    to: `H${Math.max(legendRow+1, summarySheet.rowCount)}`,
   };
 
   await timeSoqlPhase("excel.serialization", () => workbook.xlsx.writeFile(
     filePath
   ));
+}
+
+function addVerificationUserRow(sheet:ExcelJS.Worksheet,users:readonly OrgCheckedUser[]):void{
+  const row=sheet.addRow(["User used for verification from org",verificationUserLabel(users)]);
+  sheet.mergeCells(row.number,2,row.number,8);
+  row.getCell(1).font={bold:true};
+  row.getCell(2).alignment={wrapText:true,vertical:"middle"};
+  row.height=users.length>1?Math.min(90,22+14*users.length):24;
 }
 
 function addSummaryFindingHeader(sheet: ExcelJS.Worksheet): void {

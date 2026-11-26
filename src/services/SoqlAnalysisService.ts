@@ -15,6 +15,7 @@ import type { ApexMetadataProvider } from "../core/metadata/ApexMetadataProvider
 import { writeSoqlReport, writeAllPersonasHighPriorityReport, type PersonaHighPriorityReportSection } from "../reporter/soqlReportWriter.js";
 import { recordSoqlCount, timeSoqlPhase, withSoqlPerformance } from "./SoqlPerformanceMetrics.js";
 import type { SoqlAnalysisProgress } from "./SoqlAnalysisProgress.js";
+import {captureVerificationUsers} from "./SoqlVerificationProvenance.js";
 
 export interface SoqlAnalysisSummary extends DeclaredSoqlModeCounts {
   queriesAnalyzed: number;
@@ -100,13 +101,13 @@ export class SoqlAnalysisService {
     // (including CLI/tests). With progress, the SAME preparation/evaluation
     // methods are split to report real milestones and per-object completion.
     progress?.moveTo("preparing");
-    const evaluatedFindings = await timeSoqlPhase("security.total", async () => {
+    const {result:evaluatedFindings,users:verificationUsers} = await captureVerificationUsers(()=>timeSoqlPhase("security.total", async () => {
       if (!progress) return this.soqlSecurityAnalyzer.analyze(persona, queries);
       const prepared = await this.soqlSecurityAnalyzer.prepare(queries);
       progress.moveTo("permissions");
       return this.soqlSecurityAnalyzer.analyzePrepared(persona, prepared,
         (completed, total) => progress.reportObjects(completed, total));
-    });
+    }));
     // Coverage advisories for accepted runtime-field inventories are emitted
     // by the security analyzer using its already resolved API-version mode.
     const {findings,handledSiteIds,existingSiteIds,partialSiteIds}=applyLimitedCoverageReporting(scanned.unresolvedDynamic,queries,evaluatedFindings);
@@ -130,7 +131,8 @@ export class SoqlAnalysisService {
         outputDirectory,
         persona.name,
         queries.length,
-        findings
+        findings,
+        verificationUsers
       ));
 
     const affectedApexClasses =
@@ -216,15 +218,15 @@ export class SoqlAnalysisService {
         while (nextPersona < personas.length) {
           const index = nextPersona++;
           const persona = personas[index];
-          const evaluated = await timeSoqlPhase("security.personas_cumulative_ms",
-            () => this.soqlSecurityAnalyzer.analyzePrepared(persona, prepared));
+          const {result:evaluated,users:verificationUsers}=await captureVerificationUsers(()=>timeSoqlPhase("security.personas_cumulative_ms",
+            () => this.soqlSecurityAnalyzer.analyzePrepared(persona, prepared)));
           // Apply the same persona-specific reporting policy as the normal
           // report. Only confirmed denials in the scoped variant domain can
           // change priority; unknown verification results remain reviews.
           const {findings}=applyLimitedCoverageReporting(scanned.unresolvedDynamic,queries,evaluated);
           const high = findings.filter((finding) => finding.criticality === "High");
           recordSoqlCount("findings.high", high.length);
-          sections[index] = { personaName: persona.name, queryCount: queries.length, findings: high };
+          sections[index] = { personaName: persona.name, queryCount: queries.length, findings: high, verificationUsers };
           progress?.personaCompleted();
         }
       };
