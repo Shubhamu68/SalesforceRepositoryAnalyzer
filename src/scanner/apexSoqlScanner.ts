@@ -11,7 +11,7 @@ import { parseNestedSoql, maskSoql } from "../analyzer/nestedSoqlScopes.js";
 import { extractDynamicSoqlQueries, type UnresolvedDynamicSoql } from "./dynamicSoqlScanner.js";
 import {emitSoqlTraceReports} from "../analyzer/soqlTraceDiagnostics.js";
 import type {ApexValue} from "../core/apex/ApexValueEvaluator.js";
-import {ApexAnalysisEngine} from "../core/apex/ApexAnalysisEngine.js";
+import {ApexAnalysisEngine,type ApexDependencyManifest,type ApexAnalysisContext} from "../core/apex/ApexAnalysisEngine.js";
 import { ApexRepositoryMethodIndex } from "../core/apex/ApexRepositoryMethodIndex.js";
 import { maskApexSource } from "../core/apex/ApexSourceModel.js";
 import type { ApexMetadataProvider } from "../core/metadata/ApexMetadataProvider.js";
@@ -42,6 +42,7 @@ type CachedApexFile = {
   source: string;
   queries: SoqlQuery[];
   unresolvedDynamic: UnresolvedDynamicSoql[];
+  dynamicDependencies?:ApexDependencyManifest;
 };
 type CachedRepositoryGraph = { signature: string; index: ApexRepositoryMethodIndex };
 const repositoryGraphs = new Map<string,CachedRepositoryGraph>();
@@ -165,6 +166,12 @@ async function scanRepositoryApex(
   // A changed caller invalidates a callee's dynamic query analysis even if
   // the callee source is unchanged. Never retain a stale cross-class result.
   const engine=new ApexAnalysisEngine(repositoryIndex,metadata);
+  // Diagnostic/replay scans must execute the complete traversal, with their
+  // original exact capture request set. Normal warm scans may reuse only
+  // unchanged graph + fresh matching dependency evidence.
+  const dependencyReuse=!!metadata&&!traceEnabled&&!cacheKey.endsWith("|CAPTURE")&&
+    !metadata.scopeKey.startsWith("OFFLINE_REPLAY:")&&process.env.SALESFORCE_APEX_REUSE!=="0";
+  const allSourcesUnchanged=graphUnchanged&&sources.every(item=>item.reused);
   let completed=0;
   onProgress?.(0,sources.length);
   const finishFile=async()=>{
@@ -186,19 +193,32 @@ async function scanRepositoryApex(
          !(metadata && hasDynamicCall)){
         await finishFile();return [entry.filePath,existing];
       }
+      if(dependencyReuse&&allSourcesUnchanged&&hasDynamicCall&&existing?.dynamicDependencies){
+        if(await engine.canReuse(existing.dynamicDependencies)){
+          recordSoqlCount("scanner.dynamic_dependency_reuse_hits");
+          await finishFile();return [entry.filePath,existing];
+        }
+        recordSoqlCount("scanner.dynamic_dependency_reuse_misses");
+      }
       const staticQueries=entry.reused && existing
         ?existing.queries.filter(query=>!query.dynamicOrigin)
         :extractSoqlQueries(entry.source,entry.filePath);
-      const dynamic=hasDynamicCall?await engine.analyze(entry.filePath,context=>
-        preserveDynamicFailureDiagnostics(entry.source,entry.filePath,
+      const consume=(context:ApexAnalysisContext)=>preserveDynamicFailureDiagnostics(entry.source,entry.filePath,
           extractDynamicSoqlQueries(entry.source,entry.filePath,context.resolveExternal,context.repositoryIndex,traceEnabled),
-          context.resolveLocal)):{queries:[],unresolved:[]};
+          context.resolveLocal);
+      const evaluated=hasDynamicCall?(dependencyReuse?
+        await engine.analyzeWithDependencies(entry.filePath,consume):
+        {analysis:await engine.analyze(entry.filePath,consume),manifest:undefined}):
+        {analysis:{queries:[],unresolved:[]},manifest:undefined};
+      const dynamic=evaluated.analysis;
+      if(hasDynamicCall)recordSoqlCount("scanner.dynamic_evaluated_files");
       if(!hasDynamicCall)recordSoqlCount("scanner.static_only_files");
       await finishFile();
       return [entry.filePath,{
         fingerprint:entry.fingerprint,source:entry.source,
         queries:[...staticQueries,...dynamic.queries],
         unresolvedDynamic:dynamic.unresolved,
+        ...(evaluated.manifest?{dynamicDependencies:evaluated.manifest}:{}),
       }];
     }));
   recordSoqlCount("scanner.reused_files",graphUnchanged?sources.filter(s=>s.reused).length:0);
