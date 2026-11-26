@@ -16,6 +16,14 @@ const identifier=/^[A-Za-z_]\w*$/;
 const fieldPath=/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/;
 const scalarText=(v:ApexValue)=>v.kind==="text"&&!v.scalarType&&v.values.length===1?v.values[0]:undefined;
 const same=(a:string,b:string)=>a.toLowerCase()===b.toLowerCase();
+export const configuredAggregateLoopPrefix="for(String $def:$config.split(',')){if(String.isBlank($def))continue;"+
+    "String $main;String $fallback=null;if($def.contains('##')){$main=$def.substringBefore('##').trim();$fallback=$def.substringAfter('##').trim();}else{$main=$def.trim();}"+
+    "List<String> $parts=$main.split(':');if($parts.isEmpty())continue;"+
+    "String $field=$parts[0].trim();String $func=$parts.size()>1?$parts[1].trim().toUpperCase():'SUM';"+
+    "String $label=$parts.size()>2?$parts[2].trim():null;if(String.isBlank($field)){continue;}"+
+    "Set<String> $allowed=new Set<String>{'SUM','AVG','MIN','MAX','COUNT'};if(!$allowed.contains($func)){continue;}"+
+    "Schema.DescribeFieldResult $desc=$describe($root,$field);String $fieldLabel=$desc!=null?$desc.getLabel():$field;String $alias=null;"+
+    "if($desc!=null){$alias='agg'+$index;String $expr=($func=='COUNT')?'COUNT(Id)':($func+'('+$field+')');$target.add($expr+' '+$alias);}";
 const uses=(c:Context,n:SourceNode,name:string)=>new RegExp("\\b"+name+"\\b","i").test(maskApexSource(c.source.slice(n.start,n.end)));
 /** Bounded source contract for a delimited, Schema-guarded aggregate
  * builder. Only the permission-bearing append is projected; label maps
@@ -42,14 +50,7 @@ export function proveConfiguredAggregateDomain(c:Context,target:string,resolve:(
   // function whitelist, Schema check, COUNT(Id) semantics and alias shape.
   // The suffix is permitted only if it cannot read/escape the accumulator
   // or modify the configuration/root or bypass subsequent iterations.
-  const template="for(String $def:$config.split(',')){if(String.isBlank($def))continue;"+
-    "String $main;String $fallback=null;if($def.contains('##')){$main=$def.substringBefore('##').trim();$fallback=$def.substringAfter('##').trim();}else{$main=$def.trim();}"+
-    "List<String> $parts=$main.split(':');if($parts.isEmpty())continue;"+
-    "String $field=$parts[0].trim();String $func=$parts.size()>1?$parts[1].trim().toUpperCase():'SUM';"+
-    "String $label=$parts.size()>2?$parts[2].trim():null;if(String.isBlank($field)){continue;}"+
-    "Set<String> $allowed=new Set<String>{'SUM','AVG','MIN','MAX','COUNT'};if(!$allowed.contains($func)){continue;}"+
-    "Schema.DescribeFieldResult $desc=$describe($root,$field);String $fieldLabel=$desc!=null?$desc.getLabel():$field;String $alias=null;"+
-    "if($desc!=null){$alias='agg'+$index;String $expr=($func=='COUNT')?'COUNT(Id)':($func+'('+$field+')');$target.add($expr+' '+$alias);}";
+  const template=configuredAggregateLoopPrefix;
   const expected=apexContractTokens(template);if(!expected||tokens.length<expected.length+1)return undefined;
   // Token joining must preserve token boundaries and quoted literals.
   const match=matchApexTokenContract(tokens.slice(0,expected.length).join(" "),template,

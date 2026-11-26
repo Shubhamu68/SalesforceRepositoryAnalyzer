@@ -57,6 +57,10 @@ export interface ApexDependencyPolicy<A=never>{
   /** Consumer-only structural proof, with source-scoped recursive dependency
    * resolution. Annotations and unknown slots must survive the abstraction. */
   abstractEvidence?(context:ApexDependencyExpressionContext,resolve:(expression:string)=>ApexDependencyEvidence<A>,resolveAt:(expression:string,offset:number)=>ApexDependencyEvidence<A>):ApexDependencyEvidence<A>|undefined;
+  /** Optional sink-scoped finite evidence. Unlike an expression value, a
+   * domain may contain several alternatives from a source-proven loop.
+   * Never inject those alternatives into ordinary reaching definitions. */
+  abstractUseEvidence?(context:ApexDependencyExpressionContext,resolveAt:(expression:string,offset:number)=>ApexDependencyEvidence<A>):readonly ApexDependencyEvidence<A>[]|undefined;
   join?(collection:ApexDependencyEvidence<A>,separator:string):ApexDependencyEvidence<A>|undefined;
   mergeConditionalAppends?(base:ApexDependencyEvidence<A>,additions:readonly ApexDependencyAppend<A>[]):ApexDependencyEvidence<A>|undefined;
   allowMetadataCandidateRows?:boolean;
@@ -895,17 +899,26 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
         return policy.mergeConditionalAppends?.(current,additions)??ev(reject("conditional String append requires consumer interpretation","CONDITIONAL_APPEND_UNRESOLVED"));
       }finally{active.delete(id);}
     };
-    return resolve(root,use.expression,use.offset);
+    const domain=policy.abstractUseEvidence?.(
+      {source:root.source,methods:root.methods,method:root.method,expression:clean(use.expression),offset:use.offset},
+      (expression,offset)=>offset>=root.method.start&&offset<=use.offset?resolve(root,expression,offset):ev(stop("Invalid source evidence offset")));
+    if(domain!==undefined){
+      for(const _ of domain)tick();
+      note(root,use.offset,"CONSUMER_USE_DOMAIN",undefined,domain.length);
+      return domain;
+    }
+    return [resolve(root,use.expression,use.offset)];
   };
   const queue:Array<Map<string,Choice>>=[new Map()];
   while(queue.length){
     const choices=queue.shift()!;
     try{
-      const proof=run(choices);
-      // Even unresolved values are useful dependency evidence to another
-      // consumer. Do not parse, execute, or assert complete runtime coverage.
-      found.set(JSON.stringify(proof),proof);
-      note(root,use.offset,"CANDIDATE_"+proof.value.kind.toUpperCase(),undefined,proof.value.kind==="unknown"?proof.value.fragments?.length:undefined);
+      for(const proof of run(choices)){
+        // Even unresolved values are useful dependency evidence to another
+        // consumer. Do not parse, execute, or assert complete runtime coverage.
+        found.set(JSON.stringify(proof),proof);
+        note(root,use.offset,"CANDIDATE_"+proof.value.kind.toUpperCase(),undefined,proof.value.kind==="unknown"?proof.value.fragments?.length:undefined);
+      }
     }catch(error){
       if(error instanceof Bounded){bounded=true;note(root,use.offset,"WORK_LIMIT");break;}
       if(!(error instanceof Expand))throw error;

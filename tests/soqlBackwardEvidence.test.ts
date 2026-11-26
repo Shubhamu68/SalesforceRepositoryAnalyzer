@@ -820,3 +820,79 @@ test("phase 5: reuse configured predicate evidence through a guarded summary cal
  const scan=extractDynamicSoqlQueries(source,"ConfigFixture.cls",resolve,new ApexRepositoryMethodIndex([{filePath:"ConfigFixture.cls",source}]));
  assert.ok(scan.queries.some(q=>q.dynamicAccessLevel==="USER_MODE"&&q.query.includes("AnnualRevenue")&&q.query.includes("WHERE")),JSON.stringify(scan));
 });
+
+
+const configuredFallbackFixture="public class FallbackFixture {"+
+ scopedDescribeFixture.slice(scopedDescribeFixture.indexOf("{")+1,scopedDescribeFixture.lastIndexOf("}"))+
+ "private class Card{public String label;public String type;public Object value;}"+
+ "private static String kind(Schema.DisplayType d){return 'number';}"+
+ "public static void run(String key,Map<String,String> values){Config__mdt row=Config__mdt.getInstance(key);String obj=row.Object__c;String ordering='Id';if(String.isNotBlank(row.Order__c)){ordering=row.Order__c.trim()+', Id';}if(String.isNotBlank(row.Summary__c)){try{summary(obj,row.Summary__c,values);}catch(Exception ex){System.debug(ex);}}}"+
+ "private static void summary(String obj,String config,Map<String,String> values){List<String> selected=new List<String>();List<Map<String,Object>> metas=new List<Map<String,Object>>();Integer idx=0;"+
+ "for(String def:config.split(',')){if(String.isBlank(def)) continue;String main;String alternative=null;if(def.contains('##')){main=def.substringBefore('##').trim();alternative=def.substringAfter('##').trim();}else{main=def.trim();}"+
+ "List<String> parts=main.split(':');if(parts.isEmpty()) continue;String field=parts[0].trim();String fn=parts.size()>1?parts[1].trim().toUpperCase():'SUM';String label=parts.size()>2?parts[2].trim():null;if(String.isBlank(field)){continue;}"+
+ "Set<String> allowed=new Set<String>{'SUM','AVG','MIN','MAX','COUNT'};if(!allowed.contains(fn)){continue;}Schema.DescribeFieldResult d=describeFieldPath(obj,field);String fieldLabel=d!=null?d.getLabel():field;String alias=null;"+
+ "if(d!=null){alias='agg'+idx;String expr=(fn=='COUNT')?'COUNT(Id)':(fn+'('+field+')');selected.add(expr+' '+alias);}"+
+ "Map<String,Object> meta=new Map<String,Object>{'label'=>String.isNotBlank(label)?label:(fn+' of '+fieldLabel),'type'=>(fn=='COUNT')?'number':(d!=null?kind(d.getType()):'number')};if(alias!=null){meta.put('alias',alias);}if(String.isNotBlank(alternative)){meta.put('fallbackQuery',alternative);}metas.add(meta);idx++;}"+
+ "AggregateResult agg=null;if(!selected.isEmpty()){String q='SELECT '+String.join(selected,', ')+' FROM '+String.escapeSingleQuotes(obj);List<AggregateResult> r=Database.queryWithBinds(q,new Map<String,Object>(),AccessLevel.USER_MODE);agg=r.isEmpty()?null:r[0];}"+
+ "for(Map<String,Object> item:metas){Card card=new Card();card.label=(String)item.get('label');card.type=(String)item.get('type');String alias=(String)item.get('alias');Object val=null;if(alias!=null&&agg!=null){val=agg.get(alias);}String template=(String)item.get('fallbackQuery');if(val==null&&String.isNotBlank(template)){Map<String,Object> binds=new Map<String,Object>();String query=template;Integer counter=0;"+
+ "Pattern pattern=Pattern.compile('\\\\{([^}]+)\\\\}');Matcher matcher=pattern.matcher(template);Boolean canRun=true;Set<String> placeholders=new Set<String>();while(matcher.find()){placeholders.add(matcher.group(0));}"+
+ "for(String placeholder:placeholders){String key=placeholder.substring(1,placeholder.length()-1);if(values.containsKey(key)){String bind='fb'+counter++;query=query.replace(placeholder,':'+bind);binds.put(bind,values.get(key));}else{canRun=false;break;}}"+
+ "if(canRun&&!binds.isEmpty()){try{List<AggregateResult> results=Database.queryWithBinds(query,binds,AccessLevel.SYSTEM_MODE);if(results!=null&&!results.isEmpty()){val=results[0].get('expr0');}}catch(Exception ex){System.debug(ex);}}}card.value=val;}}}";
+const fallbackMetadata=(config:string,other="")=>(name:string,args:ApexValue[]):ApexValue|undefined=>{
+ if(name==="Apex.metadataRows")return {kind:"records",items:[
+  [["DeveloperName",textValue("A")],["Object__c",textValue("Account")],["Order__c",textValue("Name")],["Summary__c",textValue(config)]],
+  [["DeveloperName",textValue("B")],["Object__c",textValue("Contact")],["Order__c",textValue("Email")],["Summary__c",textValue(other)]]
+ ]};
+ return aggregateSchema(name,args);
+};
+function fallbackEvidence(source:string,resolve:(name:string,args:ApexValue[])=>ApexValue|undefined){
+ const filePath="FallbackFixture.cls",sites=discoverApexInvocations(source,dynamicDatabaseQuerySelector);
+ const site=sites.at(-1)!;
+ return backtrackSoqlPermissionShapes(source,filePath,site,new ApexRepositoryMethodIndex([{filePath,source}]),resolve);
+}
+const fallbackConfig="Display Label##SELECT MAX(AnnualRevenue) FROM Account WHERE Type = {Input.Type} AND Name = {Input.Name},Name:COUNT:Display##SELECT MAX(NumberOfEmployees) FROM Account WHERE Type = {Input.Type},Missing__c:MAX##SELECT MIN(Amount) FROM Opportunity WHERE AccountId = {Input.Id},Skipped:BAD##SELECT MAX(Other__c) FROM Account WHERE Name = {Input.Name}";
+test("phase 6: finite fallback templates traverse metadata and nested maps independently of primary Schema guard",()=>{
+ const result=fallbackEvidence(configuredFallbackFixture,fallbackMetadata(fallbackConfig,"Other Label##SELECT MAX(Score__c) FROM Contact WHERE Email = {External.Email}"));
+ assert.deepEqual(fields(result.queries.filter(q=>/FROM Account\b/.test(q))),new Set(["SELECT:AnnualRevenue","SELECT:NumberOfEmployees","WHERE:Type","WHERE:Name"]),JSON.stringify(result));
+ assert.deepEqual(fields(result.queries.filter(q=>/FROM Opportunity\b/.test(q))),new Set(["SELECT:Amount","WHERE:AccountId"]),JSON.stringify(result));
+ assert.deepEqual(fields(result.queries.filter(q=>/FROM Contact\b/.test(q))),new Set(["SELECT:Score__c","WHERE:Email"]),JSON.stringify(result));
+ assert.equal(result.queries.length,4);
+});
+test("phase 6: scanner consolidates fallback templates by target root and retains SYSTEM_MODE and partial review",()=>{
+ const source=configuredFallbackFixture,filePath="FallbackFixture.cls";
+ const scan=extractDynamicSoqlQueries(source,filePath,fallbackMetadata(fallbackConfig),new ApexRepositoryMethodIndex([{filePath,source}]));
+ const found=scan.queries.filter(q=>q.dynamicAccessLevel==="SYSTEM_MODE");
+ assert.equal(found.length,2,JSON.stringify(scan));
+ assert.ok(found.every(q=>q.coverage==="PROVEN_PARTIAL_STRUCTURE"&&q.permissionEvidence==="AGGREGATED_STRUCTURE"&&!q.withUserMode));
+ assert.deepEqual(fields(found.filter(q=>q.object==="Account").map(q=>q.query)),new Set(["SELECT:AnnualRevenue","SELECT:NumberOfEmployees","WHERE:Type","WHERE:Name"]));
+ assert.ok(scan.unresolved.some(u=>u.aggregatedPermissionInventories===2));
+});
+test("phase 6: reject unsafe query writes, aliases and unproven placeholder transformations",()=>{
+ for(const source of [
+  configuredFallbackFixture.replace("query=query.replace(placeholder,':'+bind);","query=query.replace(placeholder,values.get(key));"),
+  configuredFallbackFixture.replace("metas.add(meta);","Other.mutate(meta);metas.add(meta);"),
+  configuredFallbackFixture.replace("AggregateResult agg=null;","Other.mutate(metas);AggregateResult agg=null;"),
+  configuredFallbackFixture.replace("matcher.group(0)","matcher.group(1)"),
+  configuredFallbackFixture.replace("query=query.replace(placeholder,':'+bind);","query=query.replace(placeholder,':'+bind);query+=' ORDER BY '+key;"),
+  configuredFallbackFixture.replace("Database.queryWithBinds(query,binds,AccessLevel.SYSTEM_MODE)","Database.queryWithBinds(query,new Map<String,Object>(),AccessLevel.SYSTEM_MODE)")
+ ])assert.equal(fallbackEvidence(source,fallbackMetadata(fallbackConfig)).queries.length,0,source);
+});
+test("phase 6: reject structural/quoted holes, preserve safe sibling templates and skip empty/no-bind definitions",()=>{
+ const bad=[
+  "SELECT {Input.Name} FROM Account WHERE Name = {Input.Name}",
+  "SELECT MAX(AnnualRevenue) FROM {Input.Root} WHERE Name = {Input.Name}",
+  "SELECT MAX(AnnualRevenue) FROM Account WHERE {Input.Field} = {Input.Name}",
+  "SELECT MAX(AnnualRevenue) FROM Account WHERE Name = '{Input.Name}'",
+  "SELECT MAX(AnnualRevenue) FROM Account WHERE Name = {Input.Name}suffix",
+  "SELECT MAX(AnnualRevenue) FROM Account WHERE Name = :old AND Type = {Input.Type}",
+  "SELECT MAX(AnnualRevenue) FROM Account WHERE Name != null"
+ ];
+ for(const template of bad)assert.equal(fallbackEvidence(configuredFallbackFixture,fallbackMetadata("Label##"+template)).queries.length,0,template);
+ const result=fallbackEvidence(configuredFallbackFixture,fallbackMetadata("Label##"+bad[0]+",Safe##SELECT MAX(AnnualRevenue) FROM Account WHERE Name = {Input.Name}"));
+ assert.deepEqual(fields(result.queries),new Set(["SELECT:AnnualRevenue","WHERE:Name"]),JSON.stringify(result));
+});
+test("phase 6: explicit USER_MODE conflict is not silently treated as SYSTEM_MODE",()=>{
+ const source=configuredFallbackFixture,filePath="FallbackFixture.cls";
+ const scan=extractDynamicSoqlQueries(source,filePath,fallbackMetadata("Label##SELECT MAX(AnnualRevenue) FROM Account WHERE Name = {Input.Name} WITH USER_MODE"),new ApexRepositoryMethodIndex([{filePath,source}]));
+ assert.equal(scan.queries.filter(q=>q.dynamicAccessLevel==="SYSTEM_MODE").length,0,JSON.stringify(scan));
+});

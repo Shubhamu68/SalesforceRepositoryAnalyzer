@@ -1,4 +1,6 @@
 import {apexSymbols} from "../core/apex/ApexSymbolTable.js";
+import {proveConfiguredFallbackDomain} from "../core/apex/ApexConfiguredFallbackDomain.js";
+import {normalizeConfiguredSoqlTemplate} from "./soqlConfiguredTemplate.js";
 import {proveConfiguredAggregateDomain} from "../core/apex/ApexConfiguredAggregateDomain.js";
 import {proveConfiguredPredicateDomain} from "../core/apex/ApexConfiguredPredicateDomain.js";
 import {addApexValues,runtimeParameter,textValue,unknown,type ApexValue,type ApexTextFragment} from "../core/apex/ApexValueEvaluator.js";
@@ -262,6 +264,29 @@ export function backtrackSoqlPermissionShapes(source:string,filePath:string,site
   const trace=traceApexDependencies<Use>(source,filePath,{expression:site.argument,offset:site.offset},index,resolveExternal,{
     observe,
     abstractExpression:abstractSoqlExpression,
+    abstractUseEvidence:(context,resolveAt)=>{
+      // The structural contract includes the actual Database sink and
+      // generated binds. Keep its candidate set isolated from expression
+      // evaluation and from USER_MODE primary aggregate evidence.
+      if(!/^(?:USER_MODE|SYSTEM_MODE)$/.test(parseApexAccessLevel(site.accessLevelArgument)??"")||
+        ["String","List","Set","Map","Schema","Pattern","Matcher","Database","AccessLevel","AggregateResult"].some(p=>!!index?.hasSourceClass(p)))return undefined;
+      const domain=proveConfiguredFallbackDomain(context,(expr,at)=>{
+        const result=resolveAt(expr,at);
+        return result.annotations.length||result.runtimeMembers||result.describeObject?stop("Non-exact fallback configuration"):result.value;
+      });
+      if(!domain)return undefined;
+      const result:Evidence[]=[];
+      let complete=domain.complete;
+      for(const template of domain.templates){
+        const text=normalizeConfiguredSoqlTemplate(template);
+        const shape=text?simplePermissionShape(text,site.line):undefined;
+        if(!text||!shape){complete=false;note("SOQL_FALLBACK_TEMPLATE_UNPROVEN");continue;}
+        result.push(ev(textValue(text),shape.fields.map(f=>({...f,predicateRoot:shape.object}))));
+      }
+      if(result.length)note("SOQL_CONFIGURED_FALLBACK_REFERENCES_PROVEN",result.length);
+      if(!complete)result.push(ev(stop("Unproven fallback template or configuration")));
+      return result;
+    },
     abstractEvidence:(context,resolve,resolveAt)=>{
       const shadowed=["String","List","Set","Map","Schema","JSON"].some(p=>!!index?.hasSourceClass(p));
       const join=/^String\s*\.\s*join\s*\(\s*([A-Za-z_]\w*)\s*,\s*',\s*'\s*\)$/i.exec(context.expression);
