@@ -125,11 +125,11 @@ test("SOQL profiling is opt-in, request-scoped, and never prints SOQL or sensiti
         await timeSoqlPhase("repository.scan", async () => {
           await timeSoqlOrgQuery(`SELECT Id FROM UserFieldAccess WHERE BadField = '${secret}'`, async () => []);
         });
-      }),
+      }, true),
       withSoqlPerformance(async () => {
         recordSoqlCount("queries.analyzed", 3);
         await timeSoqlOrgQuery("SELECT Id FROM EntityParticle", async () => []);
-      }),
+      }, true),
     ]);
     assert.ok(lines.some(line => line.includes("repository.scan: ")));
     assert.ok(lines.some(line => line.includes("org.access.calls: 1")));
@@ -139,9 +139,9 @@ test("SOQL profiling is opt-in, request-scoped, and never prints SOQL or sensiti
     assert.ok(!lines.some(line => line.includes("queries.analyzed: 5")), "concurrent scopes must stay isolated");
     assert.doesNotMatch(lines.join("\n"), /secret-persona|WHERE|SELECT|token-NEVER-LOG/);
     lines.length = 0;
-    delete process.env.SALESFORCE_SOQL_PERF;
+    // Legacy environment variable is still set, but normal code ignores it.
     await withSoqlPerformance(async () => recordSoqlCount("queries.analyzed", 5));
-    assert.deepEqual(lines, [], "no timing output unless explicitly enabled");
+    assert.deepEqual(lines, [], "no timing output in the normal release path");
   } finally {
     console.info = previousLog;
     if (old === undefined) delete process.env.SALESFORCE_SOQL_PERF;
@@ -161,7 +161,7 @@ test("end-to-end SOQL profiling retains the existing one-sheet Excel structure a
     console.info = (...parts: unknown[]) => { entries.push(parts.join(" ")); };
     const service = new SoqlAnalysisService(root,
       { analyze: async () => [] } as unknown as SoqlSecurityAnalyzer, path.join(root, "reports"));
-    const output = await service.analyze(persona);
+    const output = await withSoqlPerformance(() => service.analyze(persona), true);
     assert.equal(output.summary.queriesAnalyzed, 1);
     assert.equal(output.summary.totalFindings, 0);
     assert.equal(output.summary.userModeQueries, 1);

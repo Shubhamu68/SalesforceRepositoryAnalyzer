@@ -57,7 +57,14 @@ test("warm scan reuses unchanged dynamic analysis only after refreshing metadata
   assert.equal(reads,3);assert.ok((counts.get("engine.instances")??0)>0);
   await writeFile(helper,"public class Helper {public static String value(){return 'B';}}");
   counts.clear();assert.deepEqual(await scan(),changed);assert.ok((counts.get("engine.instances")??0)>0);
-  process.env.SALESFORCE_APEX_REUSE="0";counts.clear();assert.deepEqual(await scan(),changed);assert.ok((counts.get("engine.instances")??0)>0);
+  // Legacy environment values cannot turn off the release optimization.
+  // Allow the recent-edit guard to expire and establish a stable warm scan.
+  await delay(2100);
+  await scan();
+  process.env.SALESFORCE_APEX_REUSE="0";counts.clear();
+  assert.deepEqual(await scan(),changed);
+  assert.equal(counts.get("engine.instances")??0,0);
+  assert.ok((counts.get("metadata.reuse_dependency_checks")??0)>0);
  }finally{
   for(const [key,value] of [["SALESFORCE_APEX_REUSE",old],["SALESFORCE_SOQL_TRACE",trace],["SALESFORCE_APEX_METADATA_CAPTURE",capture]] as const)
    if(value===undefined)delete process.env[key];else process.env[key]=value;

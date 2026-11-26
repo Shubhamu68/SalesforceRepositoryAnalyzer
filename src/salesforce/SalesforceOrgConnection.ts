@@ -1,4 +1,4 @@
-import {boundedConcurrency} from "../config/salesforceConcurrency.js";
+import { SALESFORCE_HTTP_READ_CONCURRENCY } from "../config/salesforceConcurrency.js";
 import { SalesforceCliAuthProvider, SalesforceCliLoginCancelledError, type CliOrg, type CliWebLogin } from "./SalesforceCliAuthProvider.js";
 import { timedAuthStep } from "./SalesforceAuthTiming.js";
 import { SalesforceReadRequestGateway, SalesforceReadTransportError, type SalesforceReadResult } from "./SalesforceReadRequestGateway.js";
@@ -120,7 +120,7 @@ export class SalesforceOrgConnection {
   private epoch = 0;
   private pendingBrowserLogin: { controller: AbortController; work: Promise<void> } | null = null;
   constructor(private readonly cli = new SalesforceCliAuthProvider()) {}
-  private readonly readGateway=new SalesforceReadRequestGateway({concurrency:boundedConcurrency(process.env.SALESFORCE_HTTP_READ_CONCURRENCY,4,8),timeoutMs:REQUEST_TIMEOUT_MS,maxRetries:2});
+  private readonly readGateway=new SalesforceReadRequestGateway({concurrency:SALESFORCE_HTTP_READ_CONCURRENCY,timeoutMs:REQUEST_TIMEOUT_MS,maxRetries:2});
   private readonly describeCache = new Map<string, { expires: number; value: SalesforceSObjectDescribe }>();
   private readonly pendingDescribes = new Map<string, Promise<SalesforceSObjectDescribe>>();
 

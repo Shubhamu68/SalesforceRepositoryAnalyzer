@@ -16,6 +16,7 @@ import { writeSoqlReport, writeAllPersonasHighPriorityReport, type PersonaHighPr
 import { recordSoqlCount, timeSoqlPhase, withSoqlPerformance } from "./SoqlPerformanceMetrics.js";
 import type { SoqlAnalysisProgress } from "./SoqlAnalysisProgress.js";
 import {captureVerificationUsers} from "./SoqlVerificationProvenance.js";
+import { ALL_PERSONAS_CONCURRENCY } from "../config/salesforceConcurrency.js";
 
 export interface SoqlAnalysisSummary extends DeclaredSoqlModeCounts {
   queriesAnalyzed: number;
@@ -231,7 +232,7 @@ export class SoqlAnalysisService {
         }
       };
       await timeSoqlPhase("security.all_personas_wall_ms", () =>
-        Promise.all(Array.from({ length: Math.min(2, personas.length) }, () => worker())));
+        Promise.all(Array.from({ length: Math.min(ALL_PERSONAS_CONCURRENCY, personas.length) }, () => worker())));
 
       const outputDirectory = typeof this.outputDirectory === "function"
         ? this.outputDirectory() : this.outputDirectory;

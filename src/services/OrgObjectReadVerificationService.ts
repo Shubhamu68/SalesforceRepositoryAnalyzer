@@ -1,7 +1,7 @@
 import type { Persona } from "../models/Persona.js";
 import { recordSoqlCount, timeSoqlPhase } from "./SoqlPerformanceMetrics.js";
 import {noteVerificationEvidence} from "./SoqlVerificationProvenance.js";
-import {boundedConcurrency} from "../config/salesforceConcurrency.js";
+import { SALESFORCE_VERIFICATION_CONCURRENCY } from "../config/salesforceConcurrency.js";
 import type { OrgVerificationStatusPolicy } from "../config/orgVerificationStatusPolicy.js";
 import { isStatusNeutralOrgObjectRead } from "../config/orgVerificationStatusPolicy.js";
 import { isFieldLevelSecurityApplicable, PLATFORM_EVENT_FLS_REASON } from "../config/fieldSecurityPolicy.js";
@@ -58,7 +58,7 @@ type CacheEntry<T> = { until: number; value: Promise<T> };
 export class OrgObjectReadVerificationService {
   private readonly objectChecks = new Map<string, CacheEntry<OrgObjectAccessEvidence | undefined>>();
   private readonly fieldChecks = new Map<string, CacheEntry<OrgObjectAccessEvidence | undefined>>();
-  private readonly maxInflight=boundedConcurrency(process.env.SALESFORCE_VERIFICATION_CONCURRENCY,3,8);
+  private readonly maxInflight=SALESFORCE_VERIFICATION_CONCURRENCY;
   private inflight = 0;
   private readonly waiting: Array<() => void> = [];
 

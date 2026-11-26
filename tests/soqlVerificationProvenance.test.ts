@@ -10,7 +10,7 @@ import type {SalesforcePersonaAccessVerifier,OrgObjectAccessEvidence} from "../s
 import type {OrgVerificationStatusPolicy} from "../src/config/orgVerificationStatusPolicy.js";
 import type {Persona} from "../src/models/Persona.js";
 import {writeSoqlReport,writeAllPersonasHighPriorityReport} from "../src/reporter/soqlReportWriter.js";
-import {boundedConcurrency} from "../src/config/salesforceConcurrency.js";
+import { SALESFORCE_HTTP_READ_CONCURRENCY, SALESFORCE_VERIFICATION_CONCURRENCY, ALL_PERSONAS_CONCURRENCY } from "../src/config/salesforceConcurrency.js";
 const user=(id:string)=>({id,name:"Fixture "+id,username:id+"@example.invalid"});
 function evidence(id:string):OrgObjectAccessEvidence{return{object:"Account",outcome:"VERIFIED",matchedUsers:1,checkedUsers:1,sampled:false,checkedUserDetails:[user(id)],message:"Fixture"};}
 test("verification provenance includes consumed cache hits and isolates concurrent reports",async()=>{
@@ -50,10 +50,8 @@ test("verification users appear in actual single and all-persona workbooks, even
   assert.ok(labels.some(v=>v.includes("No Salesforce user verified")));
  }finally{await rm(root,{recursive:true,force:true});}
 });
-test("concurrency configuration retains bounded conservative defaults",()=>{
- for(const invalid of [undefined,"","0","9","1.5","Infinity","6x"]){
-  assert.equal(boundedConcurrency(invalid,4,8),4);
- }
- assert.equal(boundedConcurrency("6",4,8),6);
- assert.equal(boundedConcurrency("8",3,8),8);
+test("release concurrency constants match the validated benchmark",()=>{
+ assert.equal(SALESFORCE_HTTP_READ_CONCURRENCY,6);
+ assert.equal(SALESFORCE_VERIFICATION_CONCURRENCY,5);
+ assert.equal(ALL_PERSONAS_CONCURRENCY,2);
 });

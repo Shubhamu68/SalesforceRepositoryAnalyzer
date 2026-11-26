@@ -170,7 +170,7 @@ async function scanRepositoryApex(
   // original exact capture request set. Normal warm scans may reuse only
   // unchanged graph + fresh matching dependency evidence.
   const dependencyReuse=!!metadata&&!traceEnabled&&!cacheKey.endsWith("|CAPTURE")&&
-    !metadata.scopeKey.startsWith("OFFLINE_REPLAY:")&&process.env.SALESFORCE_APEX_REUSE!=="0";
+    !metadata.scopeKey.startsWith("OFFLINE_REPLAY:");
   const allSourcesUnchanged=graphUnchanged&&sources.every(item=>item.reused);
   let completed=0;
   onProgress?.(0,sources.length);

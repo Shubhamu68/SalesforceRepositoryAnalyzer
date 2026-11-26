@@ -81,10 +81,18 @@ test('Cache isolation includes persona assignment signature', async () => {
 });
 
 test('Shared gateway bounds inflight independent Salesforce requests', async () => {
-  const { service, counts } = gateway('VERIFIED', 8);
-  await Promise.all(Array.from({ length: 20 }, (_, i) => service.resolveFieldRead(persona, 'Account', `Field${i}__c`, false)));
-  assert.equal(counts().fields, 20);
-  assert.ok(counts().maximum <= 3, `Observed ${counts().maximum} concurrent org requests`);
+  const old = process.env.SALESFORCE_VERIFICATION_CONCURRENCY;
+  // A stale development setting must not affect the released backend.
+  process.env.SALESFORCE_VERIFICATION_CONCURRENCY = "1";
+  try {
+    const { service, counts } = gateway('VERIFIED', 8);
+    await Promise.all(Array.from({ length: 20 }, (_, i) => service.resolveFieldRead(persona, 'Account', `Field${i}__c`, false)));
+    assert.equal(counts().fields, 20);
+    assert.equal(counts().maximum, 5, `Observed ${counts().maximum} concurrent org requests`);
+  } finally {
+    if (old === undefined) delete process.env.SALESFORCE_VERIFICATION_CONCURRENCY;
+    else process.env.SALESFORCE_VERIFICATION_CONCURRENCY = old;
+  }
 });
 
 test('Missing Salesforce connection returns UNVERIFIED instead of inventing permissions', async () => {
