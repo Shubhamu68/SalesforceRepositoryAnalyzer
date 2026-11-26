@@ -15,6 +15,7 @@ import {ApexAnalysisEngine} from "../core/apex/ApexAnalysisEngine.js";
 import { ApexRepositoryMethodIndex } from "../core/apex/ApexRepositoryMethodIndex.js";
 import { maskApexSource } from "../core/apex/ApexSourceModel.js";
 import type { ApexMetadataProvider } from "../core/metadata/ApexMetadataProvider.js";
+import {ApexMetadataCapture} from "../core/metadata/ApexMetadataSnapshot.js";
 
 import type { SoqlQuery } from "../models/SoqlQuery.js";
 import { recordSoqlCount, timeSoqlPhase, timeSoqlSync } from "../services/SoqlPerformanceMetrics.js";
@@ -73,7 +74,10 @@ export async function scanApexSoqlWithUnresolved(
 ): Promise<SoqlScanInventory> {
   const root = path.resolve(repositoryPath);
   const traceEnabled=process.env.SALESFORCE_SOQL_TRACE==="1";
-  const cacheKey = root + "|" + (metadata?.scopeKey ?? "REPOSITORY_ONLY")+(traceEnabled?"|TRACE":"");
+  // Capture is explicit and local. Never enable it for offline replay.
+  const capture=process.env.SALESFORCE_APEX_METADATA_CAPTURE==="1"&&metadata&&!metadata.scopeKey.startsWith("OFFLINE_REPLAY:")
+    ?new ApexMetadataCapture(metadata):undefined;
+  const cacheKey = root + "|" + (metadata?.scopeKey ?? "REPOSITORY_ONLY")+(traceEnabled?"|TRACE":"")+(capture?"|CAPTURE":"");
   const pending = inFlightScans.get(cacheKey);
   if (pending) {
     recordSoqlCount("scanner.inflight_reuse");
@@ -83,10 +87,18 @@ export async function scanApexSoqlWithUnresolved(
   const listeners=new Set<ScanProgress>();
   if(onProgress)listeners.add(onProgress);
   const job:PendingScan={work:Promise.resolve({queries:[],unresolvedDynamic:[]}),listeners,completed:0,total:0};
-  job.work=scanRepositoryApex(root,cacheKey,metadata,(completed,total)=>{
+  job.work=scanRepositoryApex(root,cacheKey,capture?.provider??metadata,(completed,total)=>{
     job.completed=completed;job.total=total;
     for(const listener of job.listeners)listener(completed,total);
-  },traceEnabled);
+  },traceEnabled).then(async result=>{
+    if(capture)try{
+      const file=await capture.save(path.resolve(".apex-metadata-snapshots"));
+      console.info("[AUE Metadata Capture] Saved local snapshot: "+file);
+    }catch{
+      console.warn("[AUE Metadata Capture] Snapshot not saved (unsupported data, conflict, limit or file error). Analysis results unchanged.");
+    }
+    return result;
+  });
   inFlightScans.set(cacheKey,job);
   try{return await job.work;}
   finally{if(inFlightScans.get(cacheKey)===job)inFlightScans.delete(cacheKey);}
