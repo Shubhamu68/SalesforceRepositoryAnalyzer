@@ -958,3 +958,32 @@ test("C: append-only static field set member is correlated with current entry po
  files[1].source.replace("Schema.SObjectType.Account.fieldSets","Schema.SObjectType.Contact.fieldSets")
  ])assert.equal(evidence([files[0],{...files[1],source}],resolve).queries.length,0);
 });
+
+
+test("D: private Integer switch helper returns finite query candidates with shared literal suffix and early exit",()=>{
+ const files=[{filePath:"CleanupFixture.cls",source:"global class CleanupFixture {private Integer step=1;private Date startDate;global void finish(){CleanupFixture next=new CleanupFixture();next.step=2;}global Database.QueryLocator start(){String q=byStep(step);if(String.isBlank(q)||this.startDate==null){return Database.getQueryLocator('SELECT Id FROM Account WHERE Id = null');}return Database.getQueryLocator(q);}private String byStep(Integer n){String suffix=' CreatedDate >= :startDate '+' AND CreatedDate <= :endDate ';switch on n {when 1{return 'SELECT Id FROM Account WHERE Name LIKE :prefix AND '+suffix;}when 2{return 'SELECT Id FROM Contact WHERE Account.Name LIKE :prefix AND '+suffix;}when else{return null;}}}}"}];
+ // The first query locator is the early-exit sentinel. Select the actual
+ // dynamic consumer rather than the unrelated literal fallback.
+ const root=files[0],site=discoverApexInvocations(root.source,dynamicDatabaseQuerySelector).at(-1)!;
+ const result=backtrackSoqlPermissionShapes(root.source,root.filePath,site,new ApexRepositoryMethodIndex(files));
+ assert.equal(result.queries.length,2,JSON.stringify(result));
+ assert.deepEqual(fields(result.queries),new Set(["SELECT:Id","WHERE:Name","WHERE:Account.Name","WHERE:CreatedDate"]));
+ const scan=extractDynamicSoqlQueries(root.source,root.filePath,undefined,new ApexRepositoryMethodIndex(files));
+ assert.equal(scan.queries.filter(q=>q.permissionEvidence==="AGGREGATED_STRUCTURE").length,2,JSON.stringify(scan));
+ for(const source of [root.source.replace("when 2{return","when 2{suffix='';return"),root.source.replace("when else{return null;}","when else{return external();}")]){
+   const site=discoverApexInvocations(source,dynamicDatabaseQuerySelector).at(-1)!;
+   assert.equal(backtrackSoqlPermissionShapes(source,root.filePath,site,new ApexRepositoryMethodIndex([{...root,source}])).queries.length,0);
+ }
+});
+test("D: independent conditional whole String assignments preserve roots and security suffix",()=>{
+ const root={filePath:"Entry.cls",source:"public class Entry {public static void run(String objectName){try{String q='';if(objectName==Constants.ACCOUNT){q='SELECT Id, Name '+'FROM Account WHERE Id=:rid';}else if(objectName==Constants.CONTACT){q='SELECT Id, Email FROM Contact WHERE Id=:rid';}else if(objectName=='Lead'){q='SELECT Id, Company FROM Lead WHERE Id=:rid';}q+=' WITH SECURITY_ENFORCED';Database.query(q);}catch(Exception e){System.debug(e);}}}"};
+ const result=evidence([root]);
+ assert.equal(result.queries.length,3,JSON.stringify(result));
+ assert.deepEqual(fields(result.queries),new Set(["SELECT:Id","SELECT:Name","SELECT:Email","SELECT:Company","WHERE:Id"]));
+ assert.ok(result.queries.every(q=>q.includes("WITH SECURITY_ENFORCED")));
+ const scan=extractDynamicSoqlQueries(root.source,root.filePath,undefined,new ApexRepositoryMethodIndex([root]));
+ assert.equal(scan.queries.filter(q=>q.permissionEvidence==="AGGREGATED_STRUCTURE").length,3,JSON.stringify(scan));
+ for(const source of [root.source.replace("q='SELECT Id, Email FROM Contact WHERE Id=:rid';","q=external();"),root.source.replace("objectName==Constants.CONTACT","check(objectName)")]){
+   assert.equal(evidence([{...root,source}]).queries.length,0);
+ }
+});

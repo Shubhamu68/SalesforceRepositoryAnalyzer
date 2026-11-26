@@ -16,6 +16,7 @@ import {evaluateSchemaExpression,evaluateSchemaGlobalGuard,schemaReceiverEligibl
 import {metadataSelectorHelper} from "./ApexCustomMetadataQueryModel.js";
 import {reportApexDependency,type ApexDependencyObserver} from "./ApexDependencyDiagnostics.js";
 import {provePrivateAssignedMemberDomain,proveFieldSetStringMemberProjection,fieldSetMemberTailType} from "./ApexPrivateMemberDomain.js";
+import {proveScalarSwitchReturnDomain,proveConditionalStringAssignmentDomain} from "./ApexFiniteScalarDomain.js";
 
 const clean=(s:string)=>stripApexComments(s).trim();
 const identifier=/^[A-Za-z_]\w*$/;
@@ -393,6 +394,27 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
         if(candidates.length===1){
           const helper=candidates[0],id=frame.filePath+"@"+helper.start;
           if(helper.visibility==="private"&&(helper.isStatic||!frame.method.isStatic)&&frame.depth<MAX_DEPTH&&id!==frameIdentity(frame)&&!frame.ancestors.includes(id)){
+            // Enumerate only the complete, read-only switch return domain.
+            // This is candidate evidence, not a receiver state or an
+            // exact return summary shared with the forward interpreter.
+            const domain=proveScalarSwitchReturnDomain(frame.source,helper);
+            if(domain&&args.length===1&&canonicalApexType(symbols.expressionType(frame.method,args[0],offset))==="integer"){
+              const choiceKey=frame.key+"|switch-return|"+offset+"|"+helper.start;
+              const selected=choices.get(choiceKey);
+              if(selected?.kind==="member")return ev(selected.value);
+              const arg=resolve(frame,args[0],offset,locals);
+              if(!arg.annotations.length&&!arg.runtimeMembers&&!arg.describeObject){
+                const exactNumber=arg.value.kind==="number"?arg.value.value:undefined;
+                const arms=exactNumber!==undefined?domain.filter(a=>a.label===exactNumber):
+                  arg.value.kind==="null"?domain.filter(a=>a.label==="else"):domain;
+                const possible=arms.length?arms:domain.filter(a=>a.label==="else");
+                if(possible.length){
+                  note(frame,offset,"FINITE_SWITCH_RETURN_DOMAIN",helper.name,possible.length);
+                  if(possible.length===1)return ev(possible[0].value);
+                  throw new Expand(choiceKey,possible.map(a=>({kind:"member",value:a.value})));
+                }
+              }
+            }
             const last=helper.body.at(-1);
             const ret=last?.kind==="statement"?/^return\s+([\s\S]+);$/i.exec(clean(last.text??"")):undefined;
             if(ret){
@@ -598,6 +620,28 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
               return blocked("MAP_ALIAS_OR_WRITE");
             }
             if(n.kind==="if"){
+              if(type==="string"&&!conditional&&!additions.length&&exactValue(current)){
+                const domain=proveConditionalStringAssignmentDomain(n,name,frame.method,current.value);
+                if(domain?.length){
+                  const choiceKey=frame.key+"|conditional-assignment|"+n.start+"|"+key;
+                  const chosen=choices.get(choiceKey);
+                  if(chosen?.kind==="member"){current=ev(chosen.value);continue;}
+                  note(frame,n.start,"FINITE_SCALAR_ASSIGNMENT_DOMAIN",name,domain.length);
+                  if(domain.length===1){current=ev(domain[0]);continue;}
+                  throw new Expand(choiceKey,domain.map(value=>({kind:"member",value})));
+                }
+                // A pure blankness/null guard returning immediately cannot
+                // mutate the value along the continuing lexical path.
+                // A blank candidate cannot reach this use.
+                const guard=new RegExp("^String\\s*\\.\\s*isBlank\\s*\\(\\s*"+name+"\\s*\\)(?:\\s*\\|\\|\\s*(?:this\\.)?[A-Za-z_]\\w*\\s*==\\s*null)?$","i");
+                if(guard.test(clean(n.condition??""))&&!index?.hasSourceClass("String")&&
+                  !apexSymbols(frame.source,frame.methods).hasLocalBinding(frame.method,"String",n.start)&&
+                  !n.otherwise?.length&&n.body?.length===1&&n.body[0].kind==="statement"&&/^return\b/i.test(clean(n.body[0].text??""))){
+                  const value=one(current.value);
+                  if(value===undefined||!value.trim())return blocked("SCALAR_GUARD_PATH_TERMINATES");
+                  note(frame,n.start,"FINITE_SCALAR_EXIT_GUARD",name);continue;
+                }
+              }
               // A selected metadata row cannot be null. Follow the proven
               // branch of the explicit null guard; never execute guard code.
               if(type?.endsWith("__mdt")&&current.value.kind==="record"){
