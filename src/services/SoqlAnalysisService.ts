@@ -16,7 +16,6 @@ import { writeSoqlReport, writeAllPersonasHighPriorityReport, type PersonaHighPr
 import { recordSoqlCount, timeSoqlPhase, withSoqlPerformance } from "./SoqlPerformanceMetrics.js";
 import type { SoqlAnalysisProgress } from "./SoqlAnalysisProgress.js";
 import {captureVerificationUsers} from "./SoqlVerificationProvenance.js";
-import {boundedConcurrency} from "../config/salesforceConcurrency.js";
 
 export interface SoqlAnalysisSummary extends DeclaredSoqlModeCounts {
   queriesAnalyzed: number;
@@ -177,9 +176,8 @@ export class SoqlAnalysisService {
   /**
    * One repository scan / relationship inventory for every configured persona.
    * Effective permissions are still evaluated independently for each persona.
-   * Default two concurrent personas; optional bounded tuning affects only
-   * this report. The shared verifier and HTTP gateway enforce global limits.
-   * Preserve configured output order.
+   * Evaluate at most two personas concurrently; the shared verifier enforces
+   * its own global Salesforce request limit. Preserve configured output order.
    * Fail the entire report if a persona cannot be evaluated: never produce a
    * misleadingly incomplete "all personas" workbook.
    */
@@ -232,10 +230,8 @@ export class SoqlAnalysisService {
           progress?.personaCompleted();
         }
       };
-      const workers=Math.min(boundedConcurrency(process.env.SALESFORCE_ALL_PERSONAS_CONCURRENCY,2,4),personas.length);
-      recordSoqlCount("security.persona_workers",workers);
       await timeSoqlPhase("security.all_personas_wall_ms", () =>
-        Promise.all(Array.from({ length: workers }, () => worker())));
+        Promise.all(Array.from({ length: Math.min(2, personas.length) }, () => worker())));
 
       const outputDirectory = typeof this.outputDirectory === "function"
         ? this.outputDirectory() : this.outputDirectory;

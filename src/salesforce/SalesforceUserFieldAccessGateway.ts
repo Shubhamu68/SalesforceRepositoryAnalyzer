@@ -2,7 +2,6 @@ import type { SalesforceOrgConnection, SalesforceSObjectDescribe } from "./Sales
 import type { SalesforceFieldMetadataService } from "./SalesforceFieldMetadataService.js";
 import {setImmediate as nextTurn} from "node:timers/promises";
 import { recordSoqlCount } from "../services/SoqlPerformanceMetrics.js";
-import {VerificationReadCache} from "./VerificationReadCache.js";
 
 /**
  * Shared, conservative UserFieldAccess gateway for SOQL, Stack Trace,
@@ -15,8 +14,7 @@ import {VerificationReadCache} from "./VerificationReadCache.js";
  * confirmed component denial. Parent Edit is never inherited: compound
  * address/location parents are read-only.
  */
-type Connection = Pick<SalesforceOrgConnection, "status" | "queryAll" | "describeSObject"> &
-  Partial<Pick<SalesforceOrgConnection,"queryToolingComposite"|"getReadEpoch">>;
+type Connection = Pick<SalesforceOrgConnection, "status" | "queryAll" | "describeSObject">;
 type DescribeField = SalesforceSObjectDescribe["fields"][number];
 type UserAccessRow = {
   UserId: string;
@@ -29,7 +27,7 @@ type DirectAccess = {
   read: boolean | null;
   edit: boolean | null;
 };
-
+type CacheEntry<T> = { expires: number; promise: Promise<T> };
 
 export type EffectiveUserFieldAccess = {
   read: boolean | null;
@@ -64,9 +62,6 @@ const CACHE_MS = 60_000;
 const EXACT_BATCH_SIZE=20;
 type ExactRequest={field:string;resolve:(value:DirectAccess)=>void;reject:(error:unknown)=>void};
 type ExactGroup={scope:string;userId:string;object:string;requests:ExactRequest[]};
-type CompositeExactRequest=ExactRequest&{scope:string;userId:string;object:string};
-const COMPOSITE_SIZE=5;
-const COMPOSITE_WINDOW_MS=8;
 const MAX_CACHE_ENTRIES = 2000;
 const FIELD_NAME = /^[A-Za-z][A-Za-z0-9_]*$/;
 const USER_ID = /^005[A-Za-z0-9]{12}(?:[A-Za-z0-9]{3})?$/;
@@ -142,29 +137,40 @@ function toAccess(rows: UserAccessRow[], userId: string, field: string): DirectA
 }
 
 export class SalesforceUserFieldAccessGateway {
-  private readonly fullCache = new VerificationReadCache<Map<string,DirectAccess>>(CACHE_MS,MAX_CACHE_ENTRIES,"org.user_field_gateway");
-  private readonly exactCache = new VerificationReadCache<DirectAccess>(CACHE_MS,MAX_CACHE_ENTRIES,"org.user_field_gateway");
+  private readonly fullCache = new Map<string, CacheEntry<Map<string, DirectAccess>>>();
+  private readonly exactCache = new Map<string, CacheEntry<DirectAccess>>();
   private readonly pendingExact=new Map<string,ExactGroup>();
   private readonly unsupportedBatchUntil=new Map<string,number>();
   private readonly unproductiveBatchUntil=new Map<string,number>();
-  private readonly parentCache = new VerificationReadCache<Map<string,string>>(CACHE_MS,MAX_CACHE_ENTRIES,"org.user_field_gateway");
-  private readonly compositePending=new Map<string,CompositeExactRequest[]>();
-  private readonly compositeDisabledUntil=new Map<string,number>();
+  private readonly parentCache = new Map<string, CacheEntry<Map<string, string>>>();
 
   constructor(
     private readonly connection: Connection,
     private readonly metadata?: SalesforceFieldMetadataService,
-    private readonly options: {targetedBatching?:boolean;compositeExact?:boolean} = {},
+    private readonly options: {targetedBatching?:boolean} = {},
   ) {}
 
   private scope(): string {
     const status = this.connection.status;
-    return [status?.organizationId??"not-connected",status?.instanceUrl??"",status?.userId??"",this.connection.getReadEpoch?.()??""].join("|");
+    return (status?.organizationId ?? "not-connected") + "|" + (status?.instanceUrl ?? "");
+  }
+
+  private cached<T>(store: Map<string, CacheEntry<T>>, key: string, load: () => Promise<T>): Promise<T> {
+    const hit = store.get(key);
+    if (hit && hit.expires > Date.now()) { recordSoqlCount("org.user_field_gateway.cache_hits"); return hit.promise; }
+    recordSoqlCount("org.user_field_gateway.cache_misses");
+    if (store.size > MAX_CACHE_ENTRIES) store.clear();
+    const promise = load().catch((error: unknown) => {
+      store.delete(key); // Do not persist network/metadata failures.
+      throw error;
+    });
+    store.set(key, { expires: Date.now() + CACHE_MS, promise });
+    return promise;
   }
 
   private async allFields(userId: string, object: string): Promise<Map<string, DirectAccess>> {
     const cacheKey = this.scope() + "|" + userKey(userId) + "|" + norm(object);
-    return this.fullCache.read(cacheKey, async () => {
+    return this.cached(this.fullCache, cacheKey, async () => {
       const soql =
         `SELECT UserId, FieldDefinition.QualifiedApiName, IsAccessible, IsUpdatable FROM UserFieldAccess WHERE User.Id = '${userId}' AND FieldDefinition.EntityDefinition.QualifiedApiName = '${object}'`;
       recordSoqlCount("org.user_field_gateway.object_wide_queries");
@@ -184,95 +190,21 @@ export class SalesforceUserFieldAccessGateway {
 
   private async exact(userId: string, object: string, field: string): Promise<DirectAccess> {
     const key = this.scope() + "|" + userKey(userId) + "|" + norm(object) + "|" + norm(field);
-    return this.exactCache.read(key, async () => {
-      // Preserve exact equality semantics. Composite is an opt-in transport
-      // experiment; do not revive the previously unproductive IN filter.
-      if((this.options.compositeExact??process.env.SALESFORCE_USER_FIELD_COMPOSITE==="1")&&
-        typeof this.connection.queryToolingComposite==="function")
-        return this.enqueueCompositeExact(userId,object,field);
+    return this.cached(this.exactCache, key, async () => {
+      // Live profiling: all four speculative IN batches were unproductive.
+      // Keep equality as the default across every shared gateway consumer.
       return this.options.targetedBatching===true
         ?this.enqueueExact(userId,object,field):this.singleExact(this.scope(),userId,object,field);
     });
   }
 
-  private exactQuery(userId:string,object:string,field:string):string{
-    return `SELECT UserId, IsAccessible, IsUpdatable, FieldDefinition.QualifiedApiName FROM UserFieldAccess WHERE User.Id = '${userId}' AND FieldDefinition.EntityDefinition.QualifiedApiName = '${object}' AND FieldDefinition.QualifiedApiName = '${field}'`;
-  }
-
   private async singleExact(scope:string,userId:string,object:string,field:string):Promise<DirectAccess>{
     if(this.scope()!==scope)throw new Error("Salesforce scope changed before field verification.");
-    const soql=this.exactQuery(userId,object,field);
+    const soql=`SELECT UserId, IsAccessible, IsUpdatable, FieldDefinition.QualifiedApiName FROM UserFieldAccess WHERE User.Id = '${userId}' AND FieldDefinition.EntityDefinition.QualifiedApiName = '${object}' AND FieldDefinition.QualifiedApiName = '${field}'`;
     recordSoqlCount("org.user_field_gateway.exact_queries");
     const rows=await this.connection.queryAll<UserAccessRow>(soql,"tooling",5);
     if(this.scope()!==scope)throw new Error("Salesforce scope changed during field verification.");
     return toAccess(rows,userId,field);
-  }
-
-  /** A short bounded coalescing window across independent user/object
-   * requests. A composite contains exact GETs, not one widened SOQL query.
-   * Each request stays correlated to its own user/object/field identity. */
-  private enqueueCompositeExact(userId:string,object:string,field:string):Promise<DirectAccess>{
-    const scope=this.scope();
-    if((this.compositeDisabledUntil.get(scope)??0)>Date.now())
-      return this.singleExact(scope,userId,object,field);
-    return new Promise((resolve,reject)=>{
-      let group=this.compositePending.get(scope);
-      if(!group){
-        group=[];this.compositePending.set(scope,group);
-        const scheduled=group;
-        setTimeout(()=>{if(this.compositePending.get(scope)===scheduled){
-          this.compositePending.delete(scope);void this.flushCompositeExact(scheduled);
-        }},COMPOSITE_WINDOW_MS);
-      }
-      group.push({scope,userId,object,field,resolve,reject});
-      if(group.length===COMPOSITE_SIZE){
-        this.compositePending.delete(scope);void this.flushCompositeExact(group);
-      }
-    });
-  }
-
-  private async flushCompositeExact(group:CompositeExactRequest[]):Promise<void>{
-    const scope=group[0].scope;
-    const remaining=new Set(group);
-    if(group.length>1&&(this.compositeDisabledUntil.get(scope)??0)<=Date.now()){
-      try{
-        if(this.scope()!==scope)throw Error("Salesforce scope changed before composite verification.");
-        const results=await this.connection.queryToolingComposite!<UserAccessRow>(
-          group.map(item=>this.exactQuery(item.userId,item.object,item.field)),5);
-        if(this.scope()!==scope)throw Error("Salesforce scope changed during composite verification.");
-        recordSoqlCount("org.user_field_gateway.composite_batches");
-        recordSoqlCount("org.user_field_gateway.composite_subqueries",group.length);
-        for(let i=0;i<group.length;i++){
-          const item=group[i],rows=results.get(i);
-          // A successful, explicitly complete zero-row exact result is
-          // MISSING, never DENIED. It follows the same compound fallback.
-          if(!rows||rows.length>5||rows.some(row=>!row||typeof row!=="object"))continue;
-          const direct=toAccess(rows,item.userId,item.field);
-          if(direct.state==="INCONCLUSIVE")continue;
-          remaining.delete(item);item.resolve(direct);
-          recordSoqlCount("org.user_field_gateway.composite_resolved");
-        }
-        if(remaining.size===group.length){
-          this.disableComposite(scope);
-          recordSoqlCount("org.user_field_gateway.composite_unproductive");
-        }
-      }catch{
-        // Unsupported endpoint, session failure, malformed response, etc.
-        // Avoid repeating a failed experiment for the same scope and TTL.
-        this.disableComposite(scope);
-        recordSoqlCount("org.user_field_gateway.composite_failures");
-      }
-    }
-    await Promise.all([...remaining].map(async item=>{
-      try{
-        if(group.length>1)recordSoqlCount("org.user_field_gateway.composite_exact_fallbacks");
-        item.resolve(await this.singleExact(item.scope,item.userId,item.object,item.field));
-      }catch(error){item.reject(error);}
-    }));
-  }
-  private disableComposite(scope:string):void{
-    if(this.compositeDisabledUntil.size>=32)this.compositeDisabledUntil.clear();
-    this.compositeDisabledUntil.set(scope,Date.now()+CACHE_MS);
   }
 
   private enqueueExact(userId:string,object:string,field:string):Promise<DirectAccess>{
@@ -364,7 +296,7 @@ export class SalesforceUserFieldAccessGateway {
 
   private async compoundParents(object: string): Promise<Map<string, string>> {
     const key = this.scope() + "|" + norm(object);
-    return this.parentCache.read(key, async () => {
+    return this.cached(this.parentCache, key, async () => {
       const describe = await this.connection.describeSObject(object);
       // The previous per-field helper rebuilt a Map of *every field* for
       // each field in the Describe. On large objects that was O(fields²).

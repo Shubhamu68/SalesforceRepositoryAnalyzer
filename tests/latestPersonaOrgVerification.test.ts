@@ -294,33 +294,3 @@ test("SOQL/Stack Read verifier uses the shared compound gateway for parent-backe
   assert.match(response.message, /compound parent Account\.BillingAddress/);
   assert.ok(observed.some((q) => q.includes("FROM UserFieldAccess")));
 });
-
-
-test("independent personas selecting the same actual user coalesce only simultaneous OLS reads",async()=>{
-  const {connection,queries}=fakeOrg();
-  const original=connection.queryAll.bind(connection);
-  let release!:()=>void,started!:()=>void;
-  const gate=new Promise<void>(resolve=>{release=resolve;});
-  const ready=new Promise<void>(resolve=>{started=resolve;});
-  const proxy={
-    status:connection.status,connect:()=>connection.connect(),
-    queryAll:async<T>(soql:string,api:"data"|"tooling",limit?:number)=>{
-      if(soql.includes("FROM UserEntityAccess")){started();await gate;}
-      return original<T>(soql,api,limit);
-    }
-  } as unknown as SalesforceOrgConnection;
-  const verifier=new SalesforcePersonaAccessVerifier(proxy);
-  const a=verifier.verifyObjectRead(target,"Account");
-  const b=verifier.verifyObjectRead({...target,name:"Another persona"},"Account");
-  await ready;
-  // Allow the second matching context to reach the pending user/object read.
-  await new Promise<void>(resolve=>setImmediate(resolve));
-  release();
-  const [first,second]=await Promise.all([a,b]);
-  assert.equal(first.outcome,"VERIFIED");assert.equal(second.outcome,"VERIFIED");
-  assert.deepEqual(first.checkedUserDetails,second.checkedUserDetails);
-  assert.equal(queries.filter(q=>q.includes("FROM UserEntityAccess")).length,1);
-  await verifier.verifyObjectRead(target,"Account");
-  assert.equal(queries.filter(q=>q.includes("FROM UserEntityAccess")).length,2,
-    "no second completed OLS cache at this layer");
-});

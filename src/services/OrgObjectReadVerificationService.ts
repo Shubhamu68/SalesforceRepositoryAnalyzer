@@ -2,7 +2,6 @@ import type { Persona } from "../models/Persona.js";
 import { recordSoqlCount, timeSoqlPhase } from "./SoqlPerformanceMetrics.js";
 import {noteVerificationEvidence} from "./SoqlVerificationProvenance.js";
 import {boundedConcurrency} from "../config/salesforceConcurrency.js";
-import {VerificationReadCache} from "../salesforce/VerificationReadCache.js";
 import type { OrgVerificationStatusPolicy } from "../config/orgVerificationStatusPolicy.js";
 import { isStatusNeutralOrgObjectRead } from "../config/orgVerificationStatusPolicy.js";
 import { isFieldLevelSecurityApplicable, PLATFORM_EVENT_FLS_REASON } from "../config/fieldSecurityPolicy.js";
@@ -54,13 +53,12 @@ export function isAccountStandardAddressField(object: string, field: string): bo
 const CACHE_MS = 60_000;
 const MAX_CACHE_ENTRIES = 4000;
 
+type CacheEntry<T> = { until: number; value: Promise<T> };
+
 export class OrgObjectReadVerificationService {
-  private readonly objectChecks = new VerificationReadCache<OrgObjectAccessEvidence | undefined>(CACHE_MS,MAX_CACHE_ENTRIES,"org.object_checks");
-  private readonly fieldChecks = new VerificationReadCache<OrgObjectAccessEvidence | undefined>(CACHE_MS,MAX_CACHE_ENTRIES,"org.field_checks");
-  // Logical work and HTTP transport have independent caps. Only an explicit
-  // opt-in above eight lets more logical tasks assemble Composite requests;
-  // the shared HTTP gateway still caps actual network requests at eight.
-  private readonly maxInflight=boundedConcurrency(process.env.SALESFORCE_VERIFICATION_CONCURRENCY,3,16);
+  private readonly objectChecks = new Map<string, CacheEntry<OrgObjectAccessEvidence | undefined>>();
+  private readonly fieldChecks = new Map<string, CacheEntry<OrgObjectAccessEvidence | undefined>>();
+  private readonly maxInflight=boundedConcurrency(process.env.SALESFORCE_VERIFICATION_CONCURRENCY,3,8);
   private inflight = 0;
   private readonly waiting: Array<() => void> = [];
 
@@ -92,6 +90,20 @@ export class OrgObjectReadVerificationService {
     ]);
   }
 
+  private cached<T>(cache: Map<string, CacheEntry<T>>, key: string, lookup: () => Promise<T>): Promise<T> {
+    const hit = cache.get(key);
+    const prefix = cache === this.objectChecks ? "org.object_checks" : "org.field_checks";
+    if (hit && hit.until > Date.now()) {
+      recordSoqlCount(prefix + ".cache_hits");
+      return hit.value;
+    }
+    recordSoqlCount(prefix + ".cache_misses");
+    if (cache.size >= MAX_CACHE_ENTRIES) cache.clear();
+    const promise = lookup();
+    cache.set(key, { until: Date.now() + CACHE_MS, value: promise });
+    return promise;
+  }
+
   /** Bound Salesforce verification calls across ALL analyzers, not per feature. */
   private async limited<T>(work: () => Promise<T>): Promise<T> {
     if (this.inflight >= this.maxInflight) {
@@ -104,7 +116,6 @@ export class OrgObjectReadVerificationService {
     } else {
       this.inflight++;
     }
-    recordSoqlCount("org.verification.started");
     try { return await timeSoqlPhase("org.verification.work_cumulative_ms", work); }
     finally {
       const next = this.waiting.shift();
@@ -116,13 +127,8 @@ export class OrgObjectReadVerificationService {
   /** The same cached Salesforce UserEntityAccess check is used everywhere. */
   async verifyObject(persona: Persona, object: string): Promise<OrgObjectAccessEvidence | undefined> {
     if (!this.verifier) return undefined;
-    const scope=this.verifier.getVerificationScope?.()??"unknown-org";
-    const evidence=await this.objectChecks.read(this.cacheKey(persona, object),
-      () => this.limited(async()=>{
-        if((this.verifier!.getVerificationScope?.()??"unknown-org")!==scope)return undefined;
-        const result=await this.verifier!.verifyObjectRead(persona,object);
-        return (this.verifier!.getVerificationScope?.()??"unknown-org")===scope?result:undefined;
-      }));
+    const evidence=await this.cached(this.objectChecks, this.cacheKey(persona, object),
+      () => this.limited(() => this.verifier!.verifyObjectRead(persona, object)));
     noteVerificationEvidence(evidence);
     return evidence;
   }
@@ -148,13 +154,8 @@ export class OrgObjectReadVerificationService {
   /** Cached raw field evidence, shared by SOQL, Stack Trace, Access Checker and future features. */
   async resolveField(persona: Persona, object: string, field: string): Promise<OrgObjectAccessEvidence | undefined> {
     if (!isFieldLevelSecurityApplicable(object) || !this.verifier) return undefined;
-    const scope=this.verifier.getVerificationScope?.()??"unknown-org";
-    const evidence=await this.fieldChecks.read(this.cacheKey(persona, object, field),
-      () => this.limited(async()=>{
-        if((this.verifier!.getVerificationScope?.()??"unknown-org")!==scope)return undefined;
-        const result=await this.verifier!.verifyFieldRead(persona,object,field);
-        return (this.verifier!.getVerificationScope?.()??"unknown-org")===scope?result:undefined;
-      }));
+    const evidence=await this.cached(this.fieldChecks, this.cacheKey(persona, object, field),
+      () => this.limited(() => this.verifier!.verifyFieldRead(persona, object, field)));
     noteVerificationEvidence(evidence);
     return evidence;
   }

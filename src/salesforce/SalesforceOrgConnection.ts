@@ -124,9 +124,6 @@ export class SalesforceOrgConnection {
   private readonly describeCache = new Map<string, { expires: number; value: SalesforceSObjectDescribe }>();
   private readonly pendingDescribes = new Map<string, Promise<SalesforceSObjectDescribe>>();
 
-  /** Stable across token refresh; changes when the selected org/session is replaced. */
-  getReadEpoch():number{return this.epoch;}
-
   get status(): SalesforceConnectionStatus {
     const selected = this.selectedOrg;
     return {
@@ -616,65 +613,6 @@ export class SalesforceOrgConnection {
       nextPath = page.nextRecordsUrl;
     }
     });
-  }
-
-  /**
-   * Internal read-only Tooling Composite query transport. Each independent
-   * subrequest retains its original SOQL, reference ID, and row ceiling.
-   * Only complete responses are returned; unresolved slots must use queryAll.
-   * No composite writes, pagination guesses, or cross-request references.
-   */
-  async queryToolingComposite<T>(queries:readonly string[],limit=5):Promise<Map<number,T[]>>{
-    if(queries.length<2||queries.length>5||!Number.isInteger(limit)||limit<1||limit>20000||
-      queries.some(q=>!/^SELECT\s/i.test(q.trim())||q.length>MAX_QUERY_LENGTH||
-        q.includes(";")||q.includes("@{")||/\bFOR\s+UPDATE\b/i.test(q)))
-      throw new SalesforceConnectionError("Invalid read-only Tooling Composite query batch.",400);
-    await this.connect();
-    const originEpoch=this.epoch;
-    const version=getApiVersion();
-    const apiBase="/services/data/"+version+"/tooling";
-    const body=JSON.stringify({allOrNone:false,compositeRequest:queries.map((q,i)=>({
-      method:"GET",url:apiBase+"/query/?q="+encodeURIComponent(q),referenceId:"query"+i
-    }))});
-    recordSoqlCount("org.tooling_composite.calls");
-    recordSoqlCount("org.tooling_composite.subqueries",queries.length);
-    const result=await timeSoqlPhase("org.tooling_composite.cumulative_ms",()=>this.readThroughGateway(
-      "Salesforce read-only Tooling Composite",originEpoch,async signal=>{
-        const session=this.connection;
-        if(!session)throw new SalesforceConnectionError("Salesforce connection unavailable.",503);
-        const response=await fetch(new URL(apiBase+"/composite",session.instanceUrl),{
-          method:"POST",headers:{Authorization:"Bearer "+session.accessToken,
-            Accept:"application/json","Content-Type":"application/json"},body,signal
-        });
-        let payload:unknown=null;
-        try{payload=await response.json();}catch(error){if(!(error instanceof SyntaxError))throw error;}
-        return {response,payload};
-      }));
-    if(this.epoch!==originEpoch)
-      throw new SalesforceConnectionError("Salesforce org changed during composite verification.",409);
-    // The existing queryAll path handles session refresh and pagination on
-    // fallback. Never accept a partial or failed composite page as evidence.
-    if(!result.response.ok)throw new SalesforceConnectionError("Tooling Composite query failed.",result.response.status);
-    const entries=(result.payload as {compositeResponse?:unknown}|null)?.compositeResponse;
-    if(!Array.isArray(entries))throw new SalesforceConnectionError("Invalid Tooling Composite response.",502);
-    const expected=new Set(queries.map((_,i)=>"query"+i));
-    const grouped=new Map<string,Array<{httpStatusCode?:unknown;body?:unknown}>>();
-    for(const entry of entries){
-      if(!entry||typeof entry.referenceId!=="string"||!expected.has(entry.referenceId))
-        throw new SalesforceConnectionError("Unexpected Tooling Composite response identity.",502);
-      const list=grouped.get(entry.referenceId)??[];list.push(entry);grouped.set(entry.referenceId,list);
-    }
-    const complete=new Map<number,T[]>();
-    for(let i=0;i<queries.length;i++){
-      const group=grouped.get("query"+i);
-      if(group?.length!==1||group[0].httpStatusCode!==200)continue;
-      const page=group[0].body as QueryResult|null|undefined;
-      if(!page||page.done!==true||!Array.isArray(page.records)||page.records.length>limit||
-        !Number.isInteger(page.totalSize)||page.totalSize!==page.records.length||page.nextRecordsUrl)continue;
-      complete.set(i,page.records as T[]);
-    }
-    recordSoqlCount("org.tooling_composite.complete_subqueries",complete.size);
-    return complete;
   }
 
   /**

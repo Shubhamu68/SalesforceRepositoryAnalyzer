@@ -34,7 +34,7 @@ test("full-consensus matcher identifies ALL active persona users including never
     unclassifiedAssignmentsByUser: new Map(),
   };
   Object.assign(verifier, {
-    inventoryCache: { key: verifier.getVerificationScope(), until: Date.now() + 60000, value: inventory },
+    inventoryCache: { key: "00D000000000001|https://example.my.salesforce.com", until: Date.now() + 60000, value: inventory },
   });
   const persona = {
     name: "Administrator", profile: "Administrator",
@@ -54,7 +54,7 @@ test("full-consensus matcher rejects unknown configured PS instead of guessing b
   } as unknown as SalesforceOrgConnection;
   const verifier = new SalesforcePersonaAccessVerifier(fakeConnection);
   Object.assign(verifier, {
-    inventoryCache: { key: verifier.getVerificationScope(), until: Date.now() + 60000,
+    inventoryCache: { key: "00D000000000001|https://example.my.salesforce.com", until: Date.now() + 60000,
       value: { profiles: [{ id: ids.p, name: "Administrator" }], users: [],
         userDetails: new Map(), assignments: new Map(), knownPermissionSetNames: new Set(),
         knownGroupNames: new Set(), unclassifiedAssignmentsByUser: new Map() } },

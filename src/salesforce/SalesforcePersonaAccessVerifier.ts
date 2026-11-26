@@ -4,7 +4,6 @@ import { SalesforceOrgConnection } from "./SalesforceOrgConnection.js";
 import { matchPersonaUsers, selectMostRecentlyLoggedInMatchedUser, type OrgAssignment, type OrgProfile, type OrgUser } from "./OrgPersonaMatcher.js";
 import { SalesforceUserFieldAccessGateway, uniformlyDeniedCompoundParent, type EffectiveUserFieldAccess } from "./SalesforceUserFieldAccessGateway.js";
 import { noteSoqlUserMatching } from "../services/SoqlAnalysisProgress.js";
-import {VerificationReadCache} from "./VerificationReadCache.js";
 
 export type OrgAccessOutcome = "VERIFIED" | "DENIED" | "UNVERIFIED";
 export interface OrgObjectAccessEvidence {
@@ -100,11 +99,7 @@ const quoteId = (id: string) => `'${id}'`; // IDs are validated before interpola
  */
 export class SalesforcePersonaAccessVerifier {
   private inventoryCache: { key: string; until: number; value: Inventory } | null = null;
-  private inventoryInflight: {key:string;work:Promise<Inventory>} | null = null;
-  // Coalesce only simultaneous actual user/object reads across personas.
-  // Do not add a second completed OLS cache that could extend the effective
-  // freshness of the existing persona evidence cache.
-  private readonly userObjectReads=new VerificationReadCache<boolean|null>(0,2000,"org.user_object_gateway");
+  private inventoryInflight: Promise<Inventory> | null = null;
   // Deduplicate concurrent user selection across many OLS/FLS checks. The
   // inventory WeakMap isolates results across orgs and metadata refreshes.
   private readonly matchingCache = new WeakMap<Inventory, Map<string, Promise<MatchedUsers>>>();
@@ -116,19 +111,20 @@ export class SalesforcePersonaAccessVerifier {
   /** Cache isolation across Salesforce orgs and reconnects. */
   getVerificationScope(): string {
     const status = this.connection.status;
-    return JSON.stringify([status.organizationId??"not-connected",status.instanceUrl??"",status.userId??"",this.connection.getReadEpoch?.()??""]);
+    return `${status.organizationId ?? "not-connected"}|${status.instanceUrl ?? ""}`;
   }
 
   private async inventory(): Promise<Inventory> {
     await this.connection.connect();
-    const key = this.getVerificationScope();
+    const status = this.connection.status;
+    const key = `${status.organizationId ?? ""}|${status.instanceUrl ?? ""}`;
     if (this.inventoryCache?.key === key && Date.now() < this.inventoryCache.until) return this.inventoryCache.value;
-    if (this.inventoryInflight?.key===key) return this.inventoryInflight.work;
-    const work=this.loadInventory().then(value=>{
-      if(this.getVerificationScope()!==key)throw Error("Salesforce scope changed during persona matching.");
-      this.inventoryCache={key,until:Date.now()+CACHE_MS,value};return value;
-    }).finally(()=>{if(this.inventoryInflight?.work===work)this.inventoryInflight=null;});
-    this.inventoryInflight={key,work};return work;
+    if (this.inventoryInflight) return this.inventoryInflight;
+    this.inventoryInflight = this.loadInventory().then((value) => {
+      this.inventoryCache = { key, until: Date.now() + CACHE_MS, value };
+      return value;
+    }).finally(() => { this.inventoryInflight = null; });
+    return this.inventoryInflight;
   }
 
   private async loadInventory(): Promise<Inventory> {
@@ -394,15 +390,10 @@ export class SalesforcePersonaAccessVerifier {
         const batch = users.slice(i, i + VERIFY_CONCURRENCY);
         const results = await Promise.all(batch.map(async (userId): Promise<boolean | null> => {
           try {
-            const scope=this.getVerificationScope();
-            return await this.userObjectReads.read(JSON.stringify([scope,idKey(userId),normalized(object)]),async()=>{
-              if(this.getVerificationScope()!==scope)throw Error("Salesforce scope changed before object verification.");
-              const soql = `SELECT UserId, IsReadable FROM UserEntityAccess WHERE UserId = '${userId}' AND EntityDefinition.QualifiedApiName = '${object}'`;
-              const rows = await this.connection.queryAll<SfUserEntityAccess>(soql, "tooling", 2);
-              if(this.getVerificationScope()!==scope)throw Error("Salesforce scope changed during object verification.");
-              return rows.length === 1 && idKey(rows[0].UserId) === idKey(userId) && typeof rows[0].IsReadable === "boolean"
-                ? rows[0].IsReadable : null;
-            });
+            const soql = `SELECT UserId, IsReadable FROM UserEntityAccess WHERE UserId = '${userId}' AND EntityDefinition.QualifiedApiName = '${object}'`;
+            const rows = await this.connection.queryAll<SfUserEntityAccess>(soql, "tooling", 2);
+            return rows.length === 1 && idKey(rows[0].UserId) === idKey(userId) && typeof rows[0].IsReadable === "boolean"
+              ? rows[0].IsReadable : null;
           } catch { return null; }
         }));
         readable.push(...results);
