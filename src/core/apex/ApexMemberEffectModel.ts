@@ -4,6 +4,7 @@ import {canonicalApexType} from "./ApexTypeSystem.js";
 import {maskProvenSchemaReads,maskProvenListReads} from "./ApexSchemaModel.js";
 import {isBoundedStringOperation} from "./ApexBoundedStringOperations.js";
 import {recognizeSchemaHelper} from "./ApexSchemaHelperModel.js";
+import {stripApexAutomaticScalarProperties} from "./ApexAutomaticProperty.js";
 
 interface ScalarMember {name:string;key:string;initial:ApexValue}
 const safeCall=/^(?:String\.(?:join|valueOf|isBlank|isNotBlank|isEmpty|escapeSingleQuotes)|Math\.(?:min|max)|System\.debug)$/i;
@@ -90,17 +91,21 @@ export class ApexMemberEffectModel{
       if(end<0||end>close)continue;
       const name=hit[1],props=new Set<string>();
       let body=this.masked.slice(start+1,end);
-      body=body.replace(/(?:@\w+\s*)?(?:public|private|global)\s+(?:String|Boolean|Integer|Long|Decimal|Double|Id)\s+([A-Za-z_]\w*)\s*\{\s*get\s*;\s*set\s*;\s*\}/gi,(_all,prop:string)=>{
-        props.add(prop.toLowerCase());return "";
-      });
+      let duplicate=false;
+      const addProperty=(prop:string)=>{
+        const key=prop.toLowerCase();if(props.has(key))duplicate=true;
+        props.add(key);
+      };
+      body=stripApexAutomaticScalarProperties(body,property=>addProperty(property.name));
       // Ordinary scalar instance fields have the same no-alias property as
       // automatic scalar properties. Admit only declarations without an
       // initializer, not static fields, collection members, custom accessors
       // or arbitrary executable initialization. Remaining text is checked
       // by the existing constructor proof below.
       body=body.replace(/(?:@\w+\s*)?(?:public|private|global)\s+(?:String|Boolean|Integer|Long|Decimal|Double|Id)\s+([A-Za-z_]\w*)\s*;/gi,(_all,prop:string)=>{
-        props.add(prop.toLowerCase());return "";
+        addProperty(prop);return "";
       });
+      if(duplicate)continue;
       const constructor=new RegExp("^\\s*(?:public|private|global)\\s+"+name+"\\s*\\(([^()]*)\\)\\s*\\{([\\s\\S]*)\\}\\s*$","i").exec(body);
       if(constructor){
         const parameters=new Set<string>();

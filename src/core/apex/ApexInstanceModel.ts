@@ -4,6 +4,7 @@ import {evaluateApexExpression,addApexValues,unknown,runtimeParameter,type ApexV
 import {parseApexDeclaration,selectApexOverload,type ApexArgumentTypes,type ApexCallResolver} from "./ApexTypeSystem.js";
 import {knownBoolean} from "./ApexScalarOperators.js";
 import {countApex} from "./ApexPerformance.js";
+import {readApexAutomaticScalarProperty} from "./ApexAutomaticProperty.js";
 
 type Instance=Extract<ApexValue,{kind:"instance"}>;
 type Resolver=ApexCallResolver;
@@ -20,7 +21,8 @@ const fieldDeclaration=/^(?:(?:public|private|protected|global|final|transient)\
 
 /** Small, explicit object domain: allocation identity is reference identity.
  * Only source-backed scalar fields and bounded, known-branch initialization are
- * modeled. No guessed inheritance, properties, dynamic dispatch or effects. */
+ * modeled, including plain automatic scalar properties. No custom accessors,
+ * guessed inheritance, dynamic dispatch or effects. */
 export class ApexInstanceIndex {
   private readonly shapes=new Map<string,ClassShape[]>();
   private readonly activeAllocations=new Set<string>();
@@ -69,8 +71,14 @@ export class ApexInstanceIndex {
           }
           const end=matchingPair(masked,boundary,"{","}");
           if(end<0||end>close){shape.supported=false;break;}
-          // A collection literal/property is not a supported scalar declaration.
-          // Methods/nested classes do not run during construction.
+          const property=readApexAutomaticScalarProperty(visible,masked.slice(boundary+1,end));
+          if(property){
+            shape.fields.push(property);
+            shape.initializationOrder.push({field:property.name});
+            start=end+1;continue;
+          }
+          // Other properties are unsupported. Methods/nested classes do not
+          // run during construction.
           const simple=hit[1];
           const ctor=new RegExp("^(?:(?:public|private|protected|global)\\s+)*"+simple+"\\s*\\(([\\s\\S]*)\\)$","i").exec(visible);
           if(ctor){
@@ -89,6 +97,7 @@ export class ApexInstanceIndex {
           }
           start=end+1;
         }
+        if(new Set(shape.fields.map(f=>f.name.toLowerCase())).size!==shape.fields.length)shape.supported=false;
         const key=name.toLowerCase();
         this.shapes.set(key,[...(this.shapes.get(key)??[]),shape]);
       }
