@@ -15,7 +15,7 @@ import { recordSoqlCount } from "../services/SoqlPerformanceMetrics.js";
  * address/location parents are read-only.
  */
 type Connection = Pick<SalesforceOrgConnection, "status" | "queryAll" | "describeSObject"> &
-  Partial<Pick<SalesforceOrgConnection,"queryToolingComposite">>;
+  Partial<Pick<SalesforceOrgConnection,"queryToolingComposite"|"getReadEpoch">>;
 type DescribeField = SalesforceSObjectDescribe["fields"][number];
 type UserAccessRow = {
   UserId: string;
@@ -158,7 +158,7 @@ export class SalesforceUserFieldAccessGateway {
 
   private scope(): string {
     const status = this.connection.status;
-    return [status?.organizationId??"not-connected",status?.instanceUrl??"",status?.userId??"",status?.connectedAt??""].join("|");
+    return [status?.organizationId??"not-connected",status?.instanceUrl??"",status?.userId??"",this.connection.getReadEpoch?.()??""].join("|");
   }
 
   private cached<T>(store: Map<string, CacheEntry<T>>, key: string, load: () => Promise<T>): Promise<T> {

@@ -124,6 +124,9 @@ export class SalesforceOrgConnection {
   private readonly describeCache = new Map<string, { expires: number; value: SalesforceSObjectDescribe }>();
   private readonly pendingDescribes = new Map<string, Promise<SalesforceSObjectDescribe>>();
 
+  /** Stable across token refresh; changes when the selected org/session is replaced. */
+  getReadEpoch():number{return this.epoch;}
+
   get status(): SalesforceConnectionStatus {
     const selected = this.selectedOrg;
     return {
