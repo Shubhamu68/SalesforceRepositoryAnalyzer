@@ -2,6 +2,7 @@ import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import ExcelJS from "exceljs";
 import { timeSoqlPhase, timeSoqlSync } from "../services/SoqlPerformanceMetrics.js";
+import { EXISTING_VARIANT_LIMITATION } from "../analyzer/soqlExistingVariantReporting.js";
 
 import {
   SoqlSecurityFinding,
@@ -188,6 +189,7 @@ interface ConciseFinding {
     /** Severity and explanation are specific to this Apex query, not its group. */
     criticality: string;
     explanation: string;
+    limitedVariantCoverage?:boolean;
   }>;
 }
 
@@ -257,6 +259,7 @@ function buildConciseFindings(
         runtimeImpact: finding.runtimeImpact ?? "Undetermined",
         criticality: finding.criticality ?? (finding.severity === "ERROR" ? "High" : "Unable to verify"),
         explanation: finding.reason,
+        ...(finding.limitedVariantCoverage?{limitedVariantCoverage:true}:{}),
         ...(finding.relationshipPath ? { relationshipPath: finding.relationshipPath } : {}),
         ...(finding.queryLevel ? { queryLevel: finding.queryLevel } : {}),
         ...(finding.apiVersion !== undefined ? { apiVersion: finding.apiVersion } : {}),
@@ -273,7 +276,9 @@ function buildConciseFindings(
     if (!highest) continue;
     entry.criticality = highest.criticality;
     const isMixed = entry.references.some(ref => ref.criticality !== highest.criticality);
-    entry.explanation = highest.explanation + (isMixed
+    const coverageNote=entry.references.some(ref=>ref.limitedVariantCoverage)&&!highest.limitedVariantCoverage
+      ? " Some occurrences have limited query-variant coverage. "+EXISTING_VARIANT_LIMITATION : "";
+    entry.explanation = highest.explanation + coverageNote + (isMixed
       ? " Severity differs across SOQL queries. The highest severity is shown; see Apex Classes for locations."
       : "");
   }

@@ -40,6 +40,8 @@ export interface UnresolvedDynamicSoql {
   securityModeConflict?: boolean;
   /** Known variants coexist with this unresolved execution site. */
   knownVariants?: number;
+  /** Valid variants recovered before permission-inventory fallback; independent of trace logging. */
+  existingQueryVariants?:number;
   partialStructureVariants?:number;
   conditionalFrameworkVariants?:number;
   aggregatedPermissionInventories?:number;
@@ -179,6 +181,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
       }
       // Aggregate only additional permission evidence. Existing variants
       // keep their IDs, occurrence counts and coverage classifications.
+      const existingQueryVariants=variants.size;
       let aggregatedPermissionInventories=0,runtimeFieldCoverage=false;
       let compactBlocker:string|undefined,bounded=false,unknownWhere=false,unknownOrder=false,incompleteSelect=false;
       let runtimeInput=false,metadataOrHelper=false;
@@ -305,7 +308,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
         recoveredClauses:[...recoveredClauses],unknownWhere,unknownOrder,incompleteSelect,
         ...(conflicts.size&&mode?{conflict:"Security-mode conflict: WITH "+[...conflicts].sort().join(" / WITH ")+" disagrees with AccessLevel."+mode+". Conflicting query permissions not verified."}:{})});
       unresolved.push({filePath,lineNumber:site.line,siteId,reason:explanation,reportReason,referenceCoverage,...(finiteCoverage?{finiteCoverage}:{}),failureKind,...(backwardExplanation?{backwardExplanation}:{}),...(conflicts.size?{securityModeConflict:true}:{}),...(knownVariants?{knownVariants}:{}),
-        ...(partialStructureVariants?{partialStructureVariants}:{}),...(conditionalFrameworkVariants?{conditionalFrameworkVariants}:{}),...(aggregatedPermissionInventories?{aggregatedPermissionInventories}:{}),...(runtimeFieldCoverage?{runtimeFieldCoverage:true}:{}),...(trace?{trace}:{})});
+        ...(existingQueryVariants?{existingQueryVariants}:{}),...(partialStructureVariants?{partialStructureVariants}:{}),...(conditionalFrameworkVariants?{conditionalFrameworkVariants}:{}),...(aggregatedPermissionInventories?{aggregatedPermissionInventories}:{}),...(runtimeFieldCoverage?{runtimeFieldCoverage:true}:{}),...(trace?{trace}:{})});
     };
     const failure=flow.failures.get(site.offset);
     if(failure){fail(failure,[],undefined,"ENGINE_FAILURE");continue;}

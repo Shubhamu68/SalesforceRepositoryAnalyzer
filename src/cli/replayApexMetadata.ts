@@ -17,6 +17,8 @@ if(!snapshotFile||!repositoryPath){
     console.log(JSON.stringify({mode:"OFFLINE_METADATA_REPLAY",metadata:replay.stats,missingRequests:replay.missingRequests,
       queries:result.queries.length,unresolved:result.unresolvedDynamic.length,
       referenceCoverage:Object.fromEntries([...new Set(result.unresolvedDynamic.map(s=>s.referenceCoverage??"UNRESOLVED"))].map(k=>[k,result.unresolvedDynamic.filter(s=>(s.referenceCoverage??"UNRESOLVED")===k).length])),
+      existingVariantSites:result.unresolvedDynamic.filter(s=>s.referenceCoverage==="PARTIAL_REFERENCES"&&s.existingQueryVariants&&!s.securityModeConflict&&!s.runtimeFieldCoverage).length,
+      existingQueryVariants:result.unresolvedDynamic.filter(s=>s.referenceCoverage==="PARTIAL_REFERENCES"&&s.existingQueryVariants&&!s.securityModeConflict&&!s.runtimeFieldCoverage).reduce((n,s)=>n+(s.existingQueryVariants??0),0),
       selectedQueries:result.queries.filter(q=>include(q.filePath)),
       selectedUnresolved:result.unresolvedDynamic.filter(q=>include(q.filePath))},null,2));
     if(replay.stats.missing)process.exitCode=2;

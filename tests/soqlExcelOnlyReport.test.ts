@@ -140,3 +140,45 @@ test("Excel finalization removes only complete finite site review, preserving ge
    assert.equal(rows.filter(r=>r.getCell(5).value==="Unable to verify").length,2);
  }finally{await rm(root,{recursive:true,force:true});}
 });
+
+
+test("existing variants: actual Excel high for confirmed denial, low for known grants, unknown remains a specific review",async()=>{
+ const root=await mkdtemp(path.join(os.tmpdir(),"sf-existing-variants-"));
+ try{
+   const source=["public class Service {",
+    "public static void one(String field){Database.query('SELECT Id,'+field+' FROM Account');}",
+    "public static void two(String field){Database.query('SELECT Id,'+field+' FROM Contact');}",
+    "public static void three(String field){Database.query('SELECT Id,'+field+' FROM Lead');}",
+    "public static void other(String obj){Database.query('SELECT Id FROM '+obj);}",
+    "public static void entry(){one('Industry');two('Email');three('Company');}","}"].join("\n");
+   await writeFile(path.join(root,"Service.cls"),source);
+   const analyzer={analyze:async(_persona:Persona,queries:import("../src/models/SoqlQuery.js").SoqlQuery[])=>{
+     assert.equal(queries.length,3,JSON.stringify(queries));
+     const a=queries.find(q=>q.object==="Account")!,l=queries.find(q=>q.object==="Lead")!;
+     assert.ok(a.queryVariantId&&l.queryVariantId);
+     return [
+       {...example,filePath:a.filePath,lineNumber:a.lineNumber,queryVariantId:a.queryVariantId,
+        object:"Account",field:"Industry",query:a.query,withUserMode:false,severity:"INFO",criticality:"Low",
+        verificationSource:"ORG_DENIED",findingType:"FIELD_READ",effectiveMode:"SYSTEM_MODE",runtimeImpact:"Not enforced by query",reason:"Salesforce confirmed missing Read."},
+       {...example,filePath:l.filePath,lineNumber:l.lineNumber,queryVariantId:l.queryVariantId,
+        object:"Lead",field:"Company",query:l.query,severity:"REVIEW",criticality:"Unable to verify",
+        verificationSource:"UNVERIFIED",findingType:"FIELD_READ",reason:"Salesforce could not verify Read."},
+     ] as SoqlSecurityFinding[];
+   }} as unknown as SoqlSecurityAnalyzer;
+   const result=await new SoqlAnalysisService(root,analyzer,path.join(root,"reports")).analyze({name:"Test"} as Persona);
+   assert.equal(result.findings.length,4,JSON.stringify(result.findings));
+   const denied=result.findings.find(f=>f.field==="Industry")!;
+   assert.equal(denied.criticality,"High");assert.equal(denied.runtimeImpact,"Not enforced by query");
+   assert.equal(denied.effectiveMode,"SYSTEM_MODE");assert.equal(denied.verificationSource,"ORG_DENIED");
+   assert.match(denied.reason,/additional runtime-dependent variants may exist/);
+   const low=result.findings.find(f=>f.field.startsWith("(Recovered query variants"))!;
+   assert.equal(low.object,"Contact");assert.equal(low.criticality,"Low");assert.match(low.reason,/No missing OLS\/FLS/);
+   assert.equal(result.findings.find(f=>f.field==="Company")?.criticality,"Unable to verify");
+   assert.equal(result.findings.filter(f=>f.object==="Dynamic SOQL").length,1);
+   const workbook=new ExcelJS.Workbook();await workbook.xlsx.readFile(result.reports.summaryReportPath);
+   const rows=workbook.getWorksheet("Summary")!.getRows(7,4)!;
+   assert.equal(rows.filter(r=>r.getCell(5).value==="High").length,1);
+   assert.equal(rows.filter(r=>r.getCell(5).value==="Low").length,1);
+   assert.equal(rows.filter(r=>r.getCell(5).value==="Unable to verify").length,2);
+ }finally{await rm(root,{recursive:true,force:true});}
+});

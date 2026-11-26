@@ -10,6 +10,7 @@ import { scanApexSoqlWithUnresolved } from "../scanner/apexSoqlScanner.js";
 import type { UnresolvedDynamicSoql } from "../scanner/dynamicSoqlScanner.js";
 import {explainSoqlReview} from "../analyzer/soqlReviewExplanation.js";
 import {needsDynamicCoverageReview} from "../analyzer/soqlReferenceCoverage.js";
+import {applyExistingVariantReporting} from "../analyzer/soqlExistingVariantReporting.js";
 import type { ApexMetadataProvider } from "../core/metadata/ApexMetadataProvider.js";
 import { writeSoqlReport, writeAllPersonasHighPriorityReport, type PersonaHighPriorityReportSection } from "../reporter/soqlReportWriter.js";
 import { recordSoqlCount, timeSoqlPhase, withSoqlPerformance } from "./SoqlPerformanceMetrics.js";
@@ -99,7 +100,7 @@ export class SoqlAnalysisService {
     // (including CLI/tests). With progress, the SAME preparation/evaluation
     // methods are split to report real milestones and per-object completion.
     progress?.moveTo("preparing");
-    const findings = await timeSoqlPhase("security.total", async () => {
+    const evaluatedFindings = await timeSoqlPhase("security.total", async () => {
       if (!progress) return this.soqlSecurityAnalyzer.analyze(persona, queries);
       const prepared = await this.soqlSecurityAnalyzer.prepare(queries);
       progress.moveTo("permissions");
@@ -108,9 +109,12 @@ export class SoqlAnalysisService {
     });
     // Coverage advisories for accepted runtime-field inventories are emitted
     // by the security analyzer using its already resolved API-version mode.
+    const {findings,handledSiteIds}=applyExistingVariantReporting(scanned.unresolvedDynamic,queries,evaluatedFindings);
     const runtimeSites=new Set(queries.filter(q=>q.runtimeFieldCoverage).map(q=>q.querySiteId));
-    const reviewSites=scanned.unresolvedDynamic.filter(site=>needsDynamicCoverageReview(site,queries));
-    recordSoqlCount("coverage.complete_finite_sites",scanned.unresolvedDynamic.length-reviewSites.length);
+    const incompleteSites=scanned.unresolvedDynamic.filter(site=>needsDynamicCoverageReview(site,queries));
+    const reviewSites=incompleteSites.filter(site=>!site.siteId||!handledSiteIds.has(site.siteId));
+    recordSoqlCount("coverage.complete_finite_sites",scanned.unresolvedDynamic.length-incompleteSites.length);
+    recordSoqlCount("coverage.existing_variant_sites",handledSiteIds.size);
     recordSoqlCount("coverage.dynamic_review_sites",reviewSites.length);
     findings.push(...unresolvedDynamicFindings(reviewSites.filter(site=>!site.runtimeFieldCoverage||!runtimeSites.has(site.siteId))));
     recordSoqlCount("findings", findings.length);
@@ -211,10 +215,12 @@ export class SoqlAnalysisService {
         while (nextPersona < personas.length) {
           const index = nextPersona++;
           const persona = personas[index];
-          const findings = await timeSoqlPhase("security.personas_cumulative_ms",
+          const evaluated = await timeSoqlPhase("security.personas_cumulative_ms",
             () => this.soqlSecurityAnalyzer.analyzePrepared(persona, prepared));
-          // Only the analyzer's explicit effective High criticality qualifies.
-          // REVIEW/UNVERIFIED and Low references can never be elevated here.
+          // Apply the same persona-specific reporting policy as the normal
+          // report. Only confirmed denials in the scoped variant domain can
+          // change priority; unknown verification results remain reviews.
+          const {findings}=applyExistingVariantReporting(scanned.unresolvedDynamic,queries,evaluated);
           const high = findings.filter((finding) => finding.criticality === "High");
           recordSoqlCount("findings.high", high.length);
           sections[index] = { personaName: persona.name, queryCount: queries.length, findings: high };
