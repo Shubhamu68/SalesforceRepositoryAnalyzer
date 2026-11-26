@@ -1,5 +1,6 @@
 import {maskApexSource,matchingPair,stripApexComments,splitApexTopLevel,type IndexedApexMethod,type SourceNode} from "./ApexSourceModel.js";
 import {canonicalApexType,parseApexDeclaration,selectApexOverload,type ApexArgumentTypes} from "./ApexTypeSystem.js";
+import {proveIndexedStringProjection} from "./ApexIndexedLoop.js";
 
 interface Binding {name:string;type:string|undefined;start:number;end:number;depth:number}
 interface ClassScope {name:string;start:number;end:number;fields:Map<string,string|undefined>}
@@ -73,7 +74,7 @@ export class ApexSymbolTable{
    * iteration (including a later iteration) can reassign or shadow it.
    * This is a source proof, not a runtime-value or collection-alias proof. */
   isReadOnlyOuterScalar(method:IndexedApexMethod,name:string,loop:SourceNode,offset:number):boolean{
-    if(loop.kind!=="for"||!loop.loopVariable||!loop.iterable||
+    if(loop.kind!=="for"||(!loop.loopVariable||!loop.iterable)&&!proveIndexedStringProjection(loop)||
       !/^[A-Za-z_]\w*$/.test(name)||offset<=loop.start)return false;
     const key=name.toLowerCase();
     const bindings=this.bindings(method).filter(b=>b.name===key);
@@ -89,7 +90,7 @@ export class ApexSymbolTable{
     if(writes.test(visible)||/\b(?:return|throw|break|continue)\b/i.test(visible))return false;
     const safe=(nodes:readonly SourceNode[]):boolean=>nodes.every(n=>{
       if(n.kind==="opaque"||n.condition==="__apex_exception_path_unknown__"||
-        (n.kind==="for"&&!n.loopVariable))return false;
+        (n.kind==="for"&&!n.loopVariable&&!proveIndexedStringProjection(n)))return false;
       if(n.kind==="statement"){
         // Reject a shadow hidden in a multi-declarator statement that is
         // not represented by the ordinary single-binding index.

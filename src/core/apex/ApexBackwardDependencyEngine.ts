@@ -10,6 +10,8 @@ import {readApexReadOperation} from "./ApexReadOperations.js";
 import {evaluateApexReadOperation} from "./ApexValueEvaluator.js";
 import {applyApexStringCollectionMutation,apexIterationValues,mergeApexRuntimeMembers,proveApexAddOnlyIteration,evaluateApexCollectionGuard,isExactMetadataStringList,type ApexRuntimeCollectionMembers} from "./ApexCollectionOperations.js";
 import {knownBoolean} from "./ApexScalarOperators.js";
+import {proveIndexedStringProjection} from "./ApexIndexedLoop.js";
+import {findApexTernary} from "./ApexConditionalInvocation.js";
 import {evaluateSchemaExpression,evaluateSchemaGlobalGuard,schemaReceiverEligible,isSchemaFieldMap,mutateSchemaFieldMap} from "./ApexSchemaModel.js";
 import {metadataSelectorHelper} from "./ApexCustomMetadataQueryModel.js";
 import {reportApexDependency,type ApexDependencyObserver} from "./ApexDependencyDiagnostics.js";
@@ -176,6 +178,25 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
         const copy=listValue([...input.value.items],unique);
         if(exact(input))mark(copy);
         return ev(copy,input.annotations,input.runtimeMembers?{runtimeMembers:input.runtimeMembers}:{});
+      }
+      const scalarCall=/^String\s*\.\s*(isBlank|isNotBlank|escapeSingleQuotes)\s*\(\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?)\s*\)$/i.exec(expr);
+      if(scalarCall&&!index?.hasSourceClass("String")&&!apexSymbols(frame.source,frame.methods).hasLocalBinding(frame.method,"String",offset)){
+        const input=resolve(frame,scalarCall[2],offset,locals);
+        if(exactValue(input)){
+          const value=evaluateApexExpression("String."+scalarCall[1]+"(arg)",{values:new Map([["arg",input.value]])});
+          if(value.kind!=="unknown")return ev(value);
+        }
+      }
+      const ternary=findApexTernary(maskApexSource(expr));
+      if(ternary){
+        const condition=expr.slice(0,ternary.question).trim();
+        if(/^String\s*\.\s*(?:isBlank|isNotBlank)\s*\(\s*[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?\s*\)$/i.test(condition)){
+          const guard=resolve(frame,condition,offset,locals),truth=knownBoolean(guard.value);
+          if(truth!==undefined&&!guard.annotations.length&&!guard.runtimeMembers){
+            note(frame,offset,"EXACT_TERNARY_RESOLVED");
+            return resolve(frame,truth?expr.slice(ternary.question+1,ternary.colon):expr.slice(ternary.colon+1),offset,locals,members);
+          }
+        }
       }
       const abstraction=policy.abstractExpression?.({source:frame.source,methods:frame.methods,method:frame.method,expression:expr,offset});
       if(abstraction!==undefined){note(frame,offset,"CONSUMER_ABSTRACTION");return ev(abstraction);}
@@ -488,6 +509,9 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
         const additions:ApexDependencyAppend<A>[]=[];
         let current=base;
         let exactCurrent=freshCollection;
+        const memberRead=new RegExp("\\b"+name+"\\s*\\.\\s*[A-Za-z_]\\w*(?!\\w)(?!\\s*(?:\\(|\\.|=(?!=|>)|[+\\-*/%&|^]=|\\+\\+|--))","gi");
+        const readOnlyMetadata=(visible:string)=>!rx(name).test(visible.replace(memberRead,""));
+        const noOpaque=(nodes:readonly SourceNode[]):boolean=>nodes.every(child=>child.kind!=="opaque"&&child.condition!=="__apex_exception_path_unknown__"&&noOpaque(child.body??[])&&noOpaque(child.otherwise??[]));
         const visit=(nodes:readonly SourceNode[],conditional:boolean,bindings:Locals):boolean=>{
           for(const n of nodes){
             tick();
@@ -524,7 +548,9 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
                 const guard=new RegExp("^\\s*(?:"+name+"\\s*(==|!=)\\s*null|null\\s*(==|!=)\\s*"+name+")\\s*$","i").exec(clean(n.condition??""));
                 if(guard){
                   const truth=(guard[1]??guard[2])==="!=";
-                  if(!visit(truth?n.body??[]:n.otherwise??[],conditional,bindings))return false;
+                  const chosen=truth?n.body??[]:n.otherwise??[];
+                  if(chosen.some(child=>/\b(?:return|throw|break|continue)\b/i.test(maskApexSource(frame.source.slice(child.start,child.end)))))return blocked("METADATA_GUARD_PATH_TERMINATES");
+                  if(!visit(chosen,conditional,bindings))return false;
                   note(frame,n.start,"METADATA_NULL_GUARD_RESOLVED",name);
                   continue;
                 }
@@ -579,6 +605,26 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
                   }
                 }
               }
+              // Exact blankness guards, including scalar configuration
+              // members; no arbitrary callback or runtime Boolean guesses.
+              const blank=/^String\s*\.\s*(isBlank|isNotBlank)\s*\(\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?)\s*\)$/i.exec(clean(n.condition??""));
+              if(blank&&!index?.hasSourceClass("String")&&!apexSymbols(frame.source,frame.methods).hasLocalBinding(frame.method,"String",n.start)){
+                let input:Evidence|undefined;
+                if(type?.endsWith("__mdt")&&current.value.kind==="record"&&blank[2].toLowerCase().startsWith(key+"."))
+                  input=ev(evaluateApexExpression("cfg."+blank[2].split(".")[1],{values:new Map([["cfg",current.value]])}));
+                else if(!rx(name).test(blank[2]))input=resolve(frame,blank[2],n.start,bindings);
+                if(input&&exactValue(input)){
+                  const guard=evaluateApexExpression("String."+blank[1]+"(arg)",{values:new Map([["arg",input.value]])});
+                  const truth=knownBoolean(guard);
+                  if(truth!==undefined){
+                    const chosen=truth?n.body??[]:n.otherwise??[];
+                    if(chosen.some(child=>/\b(?:return|throw|break|continue)\b/i.test(maskApexSource(frame.source.slice(child.start,child.end)))))return blocked("SCALAR_GUARD_PATH_TERMINATES");
+                    note(frame,n.start,"EXACT_SCALAR_GUARD_RESOLVED",name);
+                    if(!visit(chosen,conditional,bindings))return false;
+                    continue;
+                  }
+                }
+              }
               if(rx(name).test(maskApexSource(n.condition??""))&&
                 !new RegExp("^\\s*!?\\s*"+name+"\\s*\\.\\s*isEmpty\\s*\\(\\s*\\)\\s*$","i").test(clean(n.condition??"")))return blocked("GUARD_DEPENDS_ON_TARGET");
               const condition=clean(n.condition??"");
@@ -618,6 +664,30 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
               // when resolving arguments inside an active iteration.
               if(!collection&&apexSymbols(frame.source,frame.methods).isReadOnlyOuterScalar(frame.method,name,n,offset)){
                 note(frame,n.start,"LOOP_OUTER_SCALAR_READ_PROVEN",name);
+                continue;
+              }
+              if(type?.endsWith("__mdt")&&current.value.kind==="record"&&readOnlyMetadata(visible)&&
+                !/\b(?:return|throw)\b/i.test(visible)&&n.loopVariable&&n.iterable&&noOpaque(n.body??[])){
+                note(frame,n.start,"METADATA_LOOP_READ_PROVEN",name);continue;
+              }
+              const indexed=collection?proveIndexedStringProjection(n):undefined;
+              if(indexed){
+                const symbols=apexSymbols(frame.source,frame.methods);
+                if(symbols.lookup(frame.method,indexed.list,n.start)!=="list<string>"||rx(name).test(indexed.list))return blocked("INDEXED_LOOP_TYPE_UNPROVEN");
+                const values=resolve(frame,indexed.list,n.start,bindings);
+                if(values.value.kind!=="collection"||values.value.unique||values.runtimeMembers||values.annotations.length||values.value.items.length>MAX_COLLECTION_ITEMS)
+                  return blocked("INDEXED_LOOP_ITERABLE_UNPROVEN");
+                note(frame,n.start,"INDEXED_LOOP_ITERABLE_RESOLVED",name,values.value.items.length);
+                exactCurrent=exactCurrent&&exact(values);
+                iterating.add(n);
+                try{
+                  for(const [i,item] of values.value.items.entries()){
+                    const nested=new Map(bindings);
+                    nested.set(indexed.index.toLowerCase(),ev({kind:"number",value:i}));
+                    nested.set(indexed.item.toLowerCase(),ev(textValue(item)));
+                    if(!visit((n.body??[]).slice(1),conditional,nested))return false;
+                  }
+                }finally{iterating.delete(n);}
                 continue;
               }
               if(!collection||!n.loopVariable||!n.iterable||rx(name).test(maskApexSource(n.iterable)))return blocked("LOOP_SHAPE_UNSUPPORTED");
@@ -686,8 +756,7 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
               if(type?.endsWith("__mdt")){
                 // Reading a scalar configuration member cannot mutate or
                 // escape the record; reject assignments and receiver calls.
-                const memberRead=new RegExp("\\b"+name+"\\s*\\.\\s*[A-Za-z_]\\w*(?!\\w)(?!\\s*(?:\\(|\\.|=(?!=|>)|[+\\-*/%&|^]=|\\+\\+|--))","gi");
-                if(!rx(name).test(visible.replace(memberRead,"")))continue;
+                if(readOnlyMetadata(visible))continue;
                 return blocked("METADATA_ALIAS_OR_WRITE");
               }
               if(collection){
@@ -752,6 +821,15 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
                   }
                 }
                 return blocked("COLLECTION_ALIAS_OR_WRITE");
+              }
+              if(type==="string"&&!conditional&&!additions.length){
+                const assignment=new RegExp("^"+name+"\\s*=(?!=|>)\\s*([\\s\\S]+);$","i").exec(statement);
+                if(assignment&&!rx(name).test(maskApexSource(assignment[1]))){
+                  const value=resolve(frame,assignment[1],n.start,bindings);
+                  if(exactValue(value)&&value.value.kind==="text"&&!value.value.scalarType){
+                    current=value;note(frame,n.start,"EXACT_SCALAR_ASSIGNMENT_RESOLVED",name);continue;
+                  }
+                }
               }
               // Scalar Strings are passed by value. Do not overlook writes,
               // shadow declarations or mutation through unsupported syntax.

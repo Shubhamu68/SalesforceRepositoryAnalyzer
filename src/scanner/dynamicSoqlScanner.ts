@@ -252,6 +252,7 @@ export function extractDynamicSoqlQueries(source:string,filePath:string,
         }
         if(trace)trace.added=aggregatedPermissionInventories;
         if(aggregatedPermissionInventories)explanation+=" Permission inventory aggregated from known object and field references. The reconstructed query is for analysis only, not execution.";
+        if(traced?.partialSelectQueries?.length)explanation+=" Independently proven SELECT fields were checked using the explicit Database AccessLevel. Runtime WHERE and ORDER BY clauses and possible mode conflicts remain unverified.";
       }
       if(backwardExplanation)explanation=backwardExplanation+" Initial analysis: "+explanation;
       if(runtimeFieldCoverage)explanation+=" Known fields are checked for permissions; additional runtime-dependent fields are outside verified coverage.";

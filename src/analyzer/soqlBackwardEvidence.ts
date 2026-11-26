@@ -5,6 +5,7 @@ import type {ApexRepositoryMethodIndex} from "../core/apex/ApexRepositoryMethodI
 import type {ApexCallSite} from "../core/apex/ApexInvocationModel.js";
 import type {ApexCallResolver} from "../core/apex/ApexTypeSystem.js";
 import {maskApexSource} from "../core/apex/ApexSourceModel.js";
+import {parseApexAccessLevel} from "../core/apex/ApexDatabaseAccessMode.js";
 import {reportApexDependency,type ApexDependencyObserver} from "../core/apex/ApexDependencyDiagnostics.js";
 import {provePartialSoql} from "./soqlPartialStructure.js";
 import {aggregatePermissionShapes,simplePermissionShape,permissionSelectFieldPath,type SoqlPermissionShape} from "./soqlPermissionAggregation.js";
@@ -13,6 +14,7 @@ const stop=(reason:string)=>unknown("SOQL backward evidence: "+reason);
 const path=/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/;
 const MAX_FIELDS=2000;
 const runtimeSelectPrefix="schema-filtered-select-additions:";
+const optionalWhereType="soql-optional-where-clause";
 type Use=SoqlPermissionShape["fields"][number];
 type Evidence=ApexDependencyEvidence<Use>;
 const ev=(value:ApexValue,annotations:readonly Use[]=[]):Evidence=>({value,annotations});
@@ -63,6 +65,11 @@ function fragmentText(value:ApexValue):string|undefined{
 function abstractSoqlExpression(context:ApexDependencyExpressionContext):ApexValue|undefined{
   const {source,methods,method,expression:expr,offset}=context;
   const symbols=apexSymbols(source,methods);
+  // Exact optional-clause syntax establishes a token boundary, not the
+  // content of the predicate. Never treat it as an executable query.
+  const optional=/^String\s*\.\s*isNotBlank\s*\(\s*([A-Za-z_]\w*)\s*\)\s*\?\s*\(\s*' WHERE '\s*\+\s*([A-Za-z_]\w*)\s*\)\s*:\s*''$/i.exec(expr);
+  if(optional&&optional[1].toLowerCase()===optional[2].toLowerCase()&&symbols.lookup(method,optional[1],offset)==="string"&&!symbols.hasLocalBinding(method,"String",offset)&&!/\bclass\s+String\b/i.test(maskApexSource(source)))
+    return {kind:"unknown",reason:"Optional WHERE content is not fully proven",symbol:{name:optional[1],type:optionalWhereType}};
       const escaped=/^String\s*\.\s*escapeSingleQuotes\s*\(\s*([A-Za-z_]\w*)\s*\)$/i.exec(expr);
       if(escaped){
         if(symbols.lookup(method,"String",offset)||symbols.lookup(method,escaped[1],offset)!=="string")return stop("unproven escape input");
@@ -131,7 +138,7 @@ function mergeSoqlAppends(base:Evidence,additions:readonly ApexDependencyAppend<
   return ev(stop("conditional fragment is not a proven query, predicate or field list"));
 }
 export function backtrackSoqlPermissionShapes(source:string,filePath:string,site:ApexCallSite,
-  index?:ApexRepositoryMethodIndex,resolveExternal?:ApexCallResolver,observe?:ApexDependencyObserver):{queries:string[];runtimeFieldQueries?:string[];bounded:boolean;callerEdges:number;metadataRows:number}{
+  index?:ApexRepositoryMethodIndex,resolveExternal?:ApexCallResolver,observe?:ApexDependencyObserver):{queries:string[];runtimeFieldQueries?:string[];partialSelectQueries?:string[];bounded:boolean;callerEdges:number;metadataRows:number}{
   const note=(code:string,count?:number)=>reportApexDependency(observe,code,{filePath,source,depth:0},site.offset,undefined,count);
   if(/\bclass\s+Database\b/i.test(maskApexSource(source))){note("SHADOWED_DATABASE");return {queries:[],bounded:false,callerEdges:0,metadataRows:0};}
   const trace=traceApexDependencies<Use>(source,filePath,{expression:site.argument,offset:site.offset},index,resolveExternal,{
@@ -160,7 +167,7 @@ export function backtrackSoqlPermissionShapes(source:string,filePath:string,site
       return result;
     }
   });
-  const queries=new Set<string>(),runtimeQueries=new Set<string>();
+  const queries=new Set<string>(),runtimeQueries=new Set<string>(),partialSelectQueries=new Set<string>();
   let allRuntime=trace.candidates.length>0&&!trace.bounded;
   note("BACKWARD_CANDIDATES",trace.candidates.length);
   for(const proof of trace.candidates){
@@ -183,6 +190,19 @@ export function backtrackSoqlPermissionShapes(source:string,filePath:string,site
     }
     if(!runtimeObject)allRuntime=false;
     if(!text){
+      const mode=parseApexAccessLevel(site.accessLevelArgument);
+      const fragments=proof.value.kind==="unknown"?proof.value.fragments:undefined;
+      if((mode==="USER_MODE"||mode==="SYSTEM_MODE")&&!index?.hasSourceClass("String")&&fragments&&fragments.length>=3){
+        const [prefix,hole,suffix]=fragments;
+        if(prefix.kind==="literal"&&hole.kind==="hole"&&hole.symbol?.type===optionalWhereType&&suffix.kind==="literal"&&/^ ORDER BY /i.test(suffix.text)){
+          const select=simplePermissionShape(prefix.text.trim(),site.line);
+          if(select&&select.mode==="UNSPECIFIED"&&select.fields.every(f=>f.context==="SELECT")&&matches(select,proof.annotations)){
+            const evidence=prefix.text.trim();
+            queries.add(evidence);partialSelectQueries.add(evidence);
+            note("SOQL_SELECT_PREFIX_VALIDATED",select.fields.length);
+          }
+        }
+      }
       note(proof.value.kind==="unknown"?(proof.value.fragments?.length?"SOQL_RUNTIME_SLOT_UNPROVEN":"SOQL_VALUE_UNRESOLVED"):"SOQL_NON_TEXT_CANDIDATE");
     }else if(shape&&matches(shape,proof.annotations)){
       queries.add(text!.trim());
@@ -190,6 +210,7 @@ export function backtrackSoqlPermissionShapes(source:string,filePath:string,site
       note("SOQL_CANDIDATE_VALIDATED",shape.fields.length);
     }else if(shape)note("SOQL_REQUIRED_REFERENCE_MISMATCH");
   }
-  note("BACKWARD_VALIDATED_QUERIES",queries.size);
-  return {queries:[...queries],...(allRuntime&&runtimeQueries.size&&runtimeQueries.size===queries.size?{runtimeFieldQueries:[...runtimeQueries]}:{}),bounded:trace.bounded,callerEdges:trace.callerEdges,metadataRows:trace.metadataRows};
+  note("BACKWARD_VALIDATED_QUERIES",queries.size-partialSelectQueries.size);
+  if(partialSelectQueries.size)note("BACKWARD_VALIDATED_SELECT_PREFIXES",partialSelectQueries.size);
+  return {queries:[...queries],...(allRuntime&&runtimeQueries.size&&runtimeQueries.size===queries.size?{runtimeFieldQueries:[...runtimeQueries]}:{}),...(partialSelectQueries.size?{partialSelectQueries:[...partialSelectQueries]}:{}),bounded:trace.bounded,callerEdges:trace.callerEdges,metadataRows:trace.metadataRows};
 }
