@@ -387,11 +387,43 @@ export class SalesforceOrgConnection {
     if(!/^[A-Za-z_]\w*$/.test(objectApiName)||
        !/^[A-Za-z_]\w*$/.test(fieldSetName))
       throw new SalesforceConnectionError("Invalid Field Set identity.",400);
+    const requested=objectApiName+"."+fieldSetName;
+    const records=await this.readFieldSetRecords([requested]);
+    if(records.length!==1||!records[0])
+      throw new SalesforceConnectionError("Field Set metadata record missing or ambiguous.",502);
+    if(records[0].fullName!==requested)
+      throw new SalesforceConnectionError("Field Set metadata identity did not match the request.",502);
+    return this.parseFieldSetMembers(records[0]);
+  }
+
+  /** Metadata API readMetadata accepts at most 10 full names. Correlate by
+   * exact identity, never by array position; missing/duplicate records are
+   * omitted so the caller can retry the existing single-read path. */
+  async readFieldSetMetadataBatch(fullNames:readonly string[]):Promise<Map<string,string[]>>{
+    if(fullNames.length<1||fullNames.length>10||new Set(fullNames).size!==fullNames.length||
+       fullNames.some(name=>!/^[A-Za-z_]\w*\.[A-Za-z_]\w*$/.test(name)))
+      throw new SalesforceConnectionError("Invalid Field Set batch identities.",400);
+    const records=await this.readFieldSetRecords(fullNames);
+    const expected=new Set(fullNames),grouped=new Map<string,Record<string,unknown>[]>();
+    for(const record of records){
+      if(!record||typeof record.fullName!=="string")continue;
+      if(!expected.has(record.fullName))
+        throw new SalesforceConnectionError("Field Set metadata identity did not match the request.",502);
+      const group=grouped.get(record.fullName)??[];group.push(record);grouped.set(record.fullName,group);
+    }
+    const result=new Map<string,string[]>();
+    for(const [name,group] of grouped){
+      if(group.length!==1)continue;
+      try{result.set(name,this.parseFieldSetMembers(group[0]));}catch{/* exact fallback */}
+    }
+    return result;
+  }
+
+  private async readFieldSetRecords(requested:readonly string[]):Promise<Array<Record<string,unknown>|null>>{
     await this.connect();
     const originEpoch=this.epoch;
     const session=this.connection;
     if(!session)throw new SalesforceConnectionError("Salesforce connection unavailable.",503);
-    const requested=objectApiName+"."+fieldSetName;
     const escape=(s:string)=>s.replace(/&/g,"&amp;").replace(/</g,"&lt;")
       .replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&apos;");
     const body='<?xml version="1.0" encoding="UTF-8"?>'+
@@ -400,11 +432,11 @@ export class SalesforceOrgConnection {
       '<env:Header><met:SessionHeader><met:sessionId>'+
       escape(session.accessToken)+'</met:sessionId></met:SessionHeader></env:Header>'+
       '<env:Body><met:readMetadata><met:type>FieldSet</met:type>'+
-      '<met:fullNames>'+escape(requested)+'</met:fullNames>'+
+      requested.map(name=>'<met:fullNames>'+escape(name)+'</met:fullNames>').join("")+
       '</met:readMetadata></env:Body></env:Envelope>';
     const endpoint=new URL("/services/Soap/m/"+getApiVersion().slice(1),session.instanceUrl);
     const {response,payload:xml}=await this.readThroughGateway(
-      "Salesforce Metadata API Field Set "+requested,originEpoch,async signal=>{
+      "Salesforce Metadata API Field Set read",originEpoch,async signal=>{
         const response=await fetch(endpoint,{
           method:"POST",
           headers:{"Content-Type":"text/xml; charset=utf-8",
@@ -427,11 +459,13 @@ export class SalesforceOrgConnection {
     const envelope=payload as {Envelope?:{Body?:Record<string,unknown>}};
     const bodyNode=envelope?.Envelope?.Body;
     const result=(bodyNode?.readMetadataResponse as {result?:{records?:unknown}}|undefined)?.result;
-    if(!result||!result.records||Array.isArray(result.records))
+    if(!result||!result.records)
       throw new SalesforceConnectionError("Field Set metadata record missing or ambiguous.",502);
-    const record=result.records as Record<string,unknown>;
-    if(record.fullName!==requested)
-      throw new SalesforceConnectionError("Field Set metadata identity did not match the request.",502);
+    return (Array.isArray(result.records)?result.records:[result.records]).map(
+      record=>record&&typeof record==="object"&&!Array.isArray(record)?record as Record<string,unknown>:null);
+  }
+
+  private parseFieldSetMembers(record:Record<string,unknown>):string[]{
     const raw=record.displayedFields;
     if(raw===undefined)
       throw new SalesforceConnectionError("Field Set displayedFields inventory is unavailable.",502);

@@ -1,4 +1,4 @@
-import type { ApexMetadataProvider, MetadataResult, CustomMetadataFilter, CustomMetadataResult, ApexObjectSchema } from "../core/metadata/ApexMetadataProvider.js";
+import { fieldSetIdentityKey,type FieldSetIdentity,type ApexMetadataProvider,type MetadataResult,type CustomMetadataFilter,type CustomMetadataResult,type ApexObjectSchema } from "../core/metadata/ApexMetadataProvider.js";
 import type { SalesforceOrgConnection } from "./SalesforceOrgConnection.js";
 import {recordSoqlCount,timeSoqlPhase} from "../services/SoqlPerformanceMetrics.js";
 
@@ -82,6 +82,60 @@ export class SalesforceApexMetadataProvider implements ApexMetadataProvider {
       return {complete:false,source:"LIVE_ORG",
         reason:error instanceof Error?error.message:"Tooling API Custom Label lookup failed."};
     }
+  }
+
+  /** Batch only proven label names. Preserve the exact single lookup's
+   * identity/ambiguity semantics, including namespace collisions. */
+  async getCustomLabelValues(names:readonly string[]):Promise<ReadonlyMap<string,MetadataResult<string>>>{
+    const result=new Map<string,MetadataResult<string>>();
+    if(names.length<2||names.length>20||new Set(names).size!==names.length||names.some(name=>!VALID_NAME.test(name)))return result;
+    const query="SELECT Id, Name, Value, NamespacePrefix FROM ExternalString WHERE Name IN ("+
+      names.map(name=>"'"+name+"'").join(",")+")";
+    recordSoqlCount("org.custom_label.batch_calls");
+    try{
+      // No LIMIT that could truncate a namespace collision; queryAll fails
+      // closed above the record ceiling. Out-of-scope names reject the batch.
+      const rows=await this.connection.queryAll<Record<string,unknown>>(query,"tooling",names.length*10);
+      const requested=new Set(names.map(name=>name.toLowerCase()));
+      if(rows.some(row=>!row||typeof row.Name!=="string"||!requested.has(row.Name.toLowerCase())))return result;
+      for(const name of names){
+        // Match exact spelling like the single lookup. If more than one
+        // case-insensitive name is returned, retry exact lookup instead.
+        const matching=rows.filter(row=>(row.Name as string).toLowerCase()===name.toLowerCase());
+        if(matching.length===1&&matching[0].Name===name&&typeof matching[0].Value==="string"){
+          result.set(name,{complete:true,source:"LIVE_ORG",value:matching[0].Value});
+        }
+      }
+      recordSoqlCount("org.custom_label.batch_resolved",result.size);
+    }catch{recordSoqlCount("org.custom_label.batch_failures");}
+    return result;
+  }
+
+  /** Same SOAP transport/identity checks as the individual path. Only
+   * accepted records are published; individual fallback stays in the engine. */
+  async getFieldSetFieldsBatch(identities:readonly FieldSetIdentity[]):Promise<ReadonlyMap<string,MetadataResult<string[]>>>{
+    const result=new Map<string,MetadataResult<string[]>>();
+    if(typeof this.connection.readFieldSetMetadataBatch!=="function"||
+      identities.length<2||identities.length>10||identities.some(i=>!VALID_NAME.test(i.objectApiName)||!VALID_NAME.test(i.fieldSetDeveloperName)))return result;
+    const names=identities.map(fieldSetIdentityKey);
+    if(new Set(names).size!==names.length)return result;
+    recordSoqlCount("org.field_set.soap.calls");
+    recordSoqlCount("org.field_set.soap.batch_calls");
+    try{
+      const fields=await timeSoqlPhase("org.field_set.soap.cumulative_ms",()=>this.connection.readFieldSetMetadataBatch(names));
+      if([...fields.keys()].some(key=>!names.includes(key)))return result;
+      for(const name of names){
+        const value=fields.get(name);
+        if(Array.isArray(value)&&value.length<=200&&value.every(field=>typeof field==="string"&&/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/.test(field)))
+          result.set(name,{complete:true,source:"LIVE_ORG",value});
+      }
+      recordSoqlCount("org.field_set.soap.successes");
+      recordSoqlCount("org.field_set.soap.batch_resolved",result.size);
+    }catch{
+      recordSoqlCount("org.field_set.soap.failures");
+      recordSoqlCount("org.field_set.soap.batch_failures");
+    }
+    return result;
   }
 
   /** Resolve ordered Field Set members from read-only, org-backed metadata. */

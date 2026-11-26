@@ -5,7 +5,8 @@ import type {ApexInvocationSelector} from "./ApexInvocationModel.js";
 import {listValue,textValue,unknown,type ApexValue} from "./ApexValueEvaluator.js";
 import type {ApexRepositoryMethodIndex} from "./ApexRepositoryMethodIndex.js";
 import {planCustomMetadataRequest,planCustomMetadataSelectorCandidates,resolveCustomMetadataRows,type CustomMetadataRequest,type CustomMetadataInventory} from "./ApexCustomMetadataQueries.js";
-import type {ApexMetadataProvider} from "../metadata/ApexMetadataProvider.js";
+import {fieldSetIdentityKey,type ApexMetadataProvider,type FieldSetIdentity} from "../metadata/ApexMetadataProvider.js";
+import {ScanMetadataBatcher} from "../metadata/ScanMetadataBatcher.js";
 import {resolveSchemaSnapshot,resolveSchemaFieldMap} from "./ApexSchemaModel.js";
 import {exactMetadataStringList} from "./ApexCollectionOperations.js";
 
@@ -61,8 +62,19 @@ export class ApexAnalysisEngine {
   private readonly reads:ScanMetadataReads={
     labels:new Map(),fieldSets:new Map(),describes:new Map(),schemas:new Map(),customMetadata:new Map()
   };
+  private readonly labelBatch?:ScanMetadataBatcher<string,string>;
+  private readonly fieldSetBatch?:ScanMetadataBatcher<FieldSetIdentity,string[]>;
   constructor(readonly repositoryIndex?:ApexRepositoryMethodIndex,
-    private readonly metadata?:ApexMetadataProvider){}
+    private readonly metadata?:ApexMetadataProvider){
+    if(metadata?.getCustomLabelValue)this.labelBatch=new ScanMetadataBatcher(
+      name=>name,name=>metadata.getCustomLabelValue!(name),
+      metadata.getCustomLabelValues?names=>metadata.getCustomLabelValues!(names):undefined,
+      20,value=>typeof value==="string");
+    if(metadata?.getFieldSetFields)this.fieldSetBatch=new ScanMetadataBatcher(
+      fieldSetIdentityKey,identity=>metadata.getFieldSetFields!(identity.objectApiName,identity.fieldSetDeveloperName),
+      metadata.getFieldSetFieldsBatch?identities=>metadata.getFieldSetFieldsBatch!(identities):undefined,
+      10,value=>Array.isArray(value)&&value.length<=200&&value.every(field=>typeof field==="string"&&/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/.test(field)));
+  }
   /** Resolve metadata on demand, then return generic selected call arguments. */
   analyzeInvocations(source:string,filePath:string,select:ApexInvocationSelector):Promise<ApexInvocationAnalysis>{
     return this.analyze(filePath,context=>analyzeApexInvocations(source,filePath,select,
@@ -233,9 +245,9 @@ export class ApexAnalysisEngine {
       return analysis;
     await Promise.all([
       ...(canReadLabels?labels.map(async name=>labelResults.set(name,
-        await memoRead(reads.labels,name,()=>metadata.getCustomLabelValue!(name)))):[]),
+        await memoRead(reads.labels,name,()=>this.labelBatch!.read(name)))):[]),
       ...(canReadSets?sets.map(async ([key,[object,name]])=>fieldSetValues.set(key,
-        await memoRead(reads.fieldSets,key,()=>metadata.getFieldSetFields!(object,name)))):[]),
+        await memoRead(reads.fieldSets,key,()=>this.fieldSetBatch!.read({objectApiName:object,fieldSetDeveloperName:name})))):[]),
       ...(canReadObjects?objects.map(async object=>describeSnapshots.set(object,
         await memoRead(reads.describes,object,()=>metadata.getObjectFieldNames(object)))):[]),
       ...(canReadSchemas?schemas.map(async ([key,object])=>schemaSnapshots.set(key,

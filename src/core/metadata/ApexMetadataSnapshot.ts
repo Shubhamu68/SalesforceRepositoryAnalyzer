@@ -1,7 +1,7 @@
 import {randomUUID,createHash} from "node:crypto";
 import {mkdir,open,readFile,rename,rm,stat} from "node:fs/promises";
 import path from "node:path";
-import type {ApexMetadataProvider,MetadataResult,ApexObjectSchema,CustomMetadataFilter,CustomMetadataResult} from "./ApexMetadataProvider.js";
+import {fieldSetIdentityKey,type FieldSetIdentity,type ApexMetadataProvider,type MetadataResult,type ApexObjectSchema,type CustomMetadataFilter,type CustomMetadataResult} from "./ApexMetadataProvider.js";
 
 const MAX_ENTRIES=2000,MAX_BYTES=32*1024*1024;
 type Request=
@@ -120,6 +120,23 @@ export class ApexMetadataCapture {
       ...(delegate.getObjectSchema?{getObjectSchema:(name:string)=>read({kind:"schema",name},()=>delegate.getObjectSchema!(name))}:{}),
       ...(delegate.getCustomLabelValue?{getCustomLabelValue:(name:string)=>read({kind:"label",name},()=>delegate.getCustomLabelValue!(name))}:{}),
       ...(delegate.getFieldSetFields?{getFieldSetFields:(name:string,fieldSet:string)=>read({kind:"fieldSet",name,fieldSet},()=>delegate.getFieldSetFields!(name,fieldSet))}:{}),
+      ...(delegate.getCustomLabelValue&&delegate.getCustomLabelValues?{getCustomLabelValues:async(names:readonly string[])=>{
+        const results=await delegate.getCustomLabelValues!(names);
+        const accepted=new Map<string,MetadataResult<string>>();
+        for(const name of names){const value=results.get(name);
+          if(value?.complete&&typeof value.value==="string")accepted.set(name,await read({kind:"label",name},async()=>value));
+        }
+        return accepted;
+      }}:{}),
+      ...(delegate.getFieldSetFields&&delegate.getFieldSetFieldsBatch?{getFieldSetFieldsBatch:async(identities:readonly FieldSetIdentity[])=>{
+        const results=await delegate.getFieldSetFieldsBatch!(identities);
+        const accepted=new Map<string,MetadataResult<string[]>>();
+        for(const identity of identities){const k=fieldSetIdentityKey(identity),value=results.get(k);
+          if(value?.complete&&Array.isArray(value.value)&&value.value.length<=200&&value.value.every(fieldPath))
+            accepted.set(k,await read({kind:"fieldSet",name:identity.objectApiName,fieldSet:identity.fieldSetDeveloperName},async()=>value));
+        }
+        return accepted;
+      }}:{}),
       getCustomMetadataRecords:(name,fields,filters=[])=>read({kind:"customMetadata",name,fields,filters},()=>delegate.getCustomMetadataRecords(name,fields,filters))};
   }
   snapshot():ApexMetadataSnapshot{

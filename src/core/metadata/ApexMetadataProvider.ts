@@ -31,6 +31,14 @@ export interface ApexObjectSchema {
   name:string;
   fields:readonly ApexSchemaField[];
 }
+export interface FieldSetIdentity {
+  readonly objectApiName:string;
+  readonly fieldSetDeveloperName:string;
+}
+/** Exact spelling is preserved; full name is unambiguous for validated API names. */
+export const fieldSetIdentityKey=(identity:FieldSetIdentity):string=>
+  identity.objectApiName+"."+identity.fieldSetDeveloperName;
+
 export interface ApexMetadataProvider {
   /** Cache scope must include org identity and connection epoch when live. */
   readonly scopeKey: string;
@@ -39,8 +47,12 @@ export interface ApexMetadataProvider {
   getObjectSchema?(objectApiName:string):Promise<MetadataResult<ApexObjectSchema>>;
   /** Custom Label master value from the connected org; not a guessed local fixture. */
   getCustomLabelValue?(labelApiName: string): Promise<MetadataResult<string>>;
+  /** Optional bulk reads return only complete, individually identified results.
+   * Missing keys must fall back to the existing exact lookup. */
+  getCustomLabelValues?(names:readonly string[]):Promise<ReadonlyMap<string,MetadataResult<string>>>;
   /** Ordered SOQL-ready field paths from a uniquely identified Field Set. */
   getFieldSetFields?(objectApiName:string,fieldSetDeveloperName:string):Promise<MetadataResult<string[]>>;
+  getFieldSetFieldsBatch?(identities:readonly FieldSetIdentity[]):Promise<ReadonlyMap<string,MetadataResult<string[]>>>;
   /** Complete matching records for proven equality filters; no partial results. */
   getCustomMetadataRecords(
     objectApiName: string, fields: readonly string[], filters?: readonly CustomMetadataFilter[],
