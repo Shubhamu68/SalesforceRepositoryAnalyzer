@@ -10,6 +10,8 @@ import {ApexAnalysisEngine} from "../src/core/apex/ApexAnalysisEngine.js";
 import {indexApexMethods} from "../src/core/apex/ApexSourceModel.js";
 import {recognizeSchemaHelper} from "../src/core/apex/ApexSchemaHelperModel.js";
 import {memberEffectModel} from "../src/core/apex/ApexMemberEffectModel.js";
+import {ApexMetadataCapture,ApexMetadataReplay} from "../src/core/metadata/ApexMetadataSnapshot.js";
+import type {ApexMetadataProvider,ApexSchemaField} from "../src/core/metadata/ApexMetadataProvider.js";
 function evidence(files:Array<{filePath:string;source:string}>,resolve?: (name:string,args:ApexValue[])=>ApexValue|undefined){
   const root=files[0],site=discoverApexInvocations(root.source,dynamicDatabaseQuerySelector)[0];
   return backtrackSoqlPermissionShapes(root.source,root.filePath,site,new ApexRepositoryMethodIndex(files),resolve);
@@ -533,4 +535,66 @@ test("lower-bound Set effects reject reads, escapes and unknown structural mutat
    const model=memberEffectModel(source,[method]);
    assert.equal(model.writeOnlyStringSet(method,1),false,body);
  }
+});
+
+
+// Sanitized regression of the captured 5/7/12 field-set shape. No customer
+// source or raw snapshot is committed. Preserve automatic DTO properties,
+// a non-Name designated field, date formatting, grouping and a later
+// dotted reference whose target Describe was not captured.
+test("offline replay of mixed DTO properties retains 17 proven SELECT references with absent target Describe",async()=>{
+ const source=alternativeReportSource.replace(
+   "public String apiPath;public String fieldName;public String label;public String type;\n   public Boolean navigable;",
+   "@AuraEnabled public String apiPath { get; set; }\n   @AuraEnabled public String fieldName { get; set; }\n   @AuraEnabled public String label { get; set; }\n   @AuraEnabled public String type { get; set; }\n   @AuraEnabled public Boolean navigable { get; set; }");
+ assert.notEqual(source,alternativeReportSource);
+ const filePath="ColumnBuilder.cls",index=new ApexRepositoryMethodIndex([{filePath,source}]);
+ const field=(name:string,type="string",nameField=false,relationshipName:string|null=null,referenceTo:string[]=[]):ApexSchemaField=>({name,type,nameField,relationshipName,referenceTo});
+ const id=field("Id","id"),name=field("Name","string",true);
+ const schemas:Record<string,ApexSchemaField[]>={
+   Bin__c:[id,name,field("Stock__c","reference",false,"Stock__r",["Stock__c"]),field("Received__c","date"),field("Batch__c"),field("Expiry__c","date"),field("ExpiryDays__c","double")],
+   Stock__c:[id,name,...["OnHand__c","Sent__c","Available__c","Reserved__c","Future__c"].map(n=>field(n,"double"))],
+   Allocation__c:[id,name,field("Line__c","reference",false,"Line__r",["Line__c"]),field("Bin__c","reference",false,"Bin__r",["Bin__c"]),field("Header__c","reference",false,"Header__r",["Header__c"]),field("Reserved__c","double")],
+   Line__c:[id,name,field("Header__c","reference",false,"Header__r",["Header__c"]),field("Code__c"),field("LineNumber__c","double"),field("Reserved__c","double"),field("AllocationStatus__c"),field("Requested__c","double"),field("Gross__c","currency"),field("Net__c","currency"),field("Shelf__c","double"),field("AllocationType__c","picklist")],
+   Header__c:[id,field("DocumentNumber__c","string",true),field("BillCode__c"),field("PO__c"),field("Status__c","picklist"),field("CreatedDate","datetime"),field("ShipDate__c","date"),field("DueDate__c","datetime"),field("CreatedById","reference",false,"CreatedBy",["User"])]
+ };
+ const rootFields:Record<string,string[]>={
+   Bin__c:["Stock__r.OnHand__c","Stock__r.Sent__c","Stock__r.Available__c","Stock__r.Reserved__c","Stock__r.Future__c"],
+   Allocation__c:["Line__r.Shelf__c","Line__r.Requested__c","Bin__r.Batch__c","Bin__r.Expiry__c","Bin__r.ExpiryDays__c","Reserved__c","Line__r.AllocationType__c"],
+   Line__c:["Header__r.BillCode__c","Header__r.DocumentNumber__c","Header__r.PO__c","Code__c","Header__r.Status__c","Header__r.CreatedDate","Header__r.ShipDate__c","Header__r.DueDate__c","LineNumber__c","Reserved__c","AllocationStatus__c","Header__r.CreatedById"]
+ };
+ const rows=Object.keys(rootFields).map(object=>({DeveloperName:object,Object__c:object,Field_Set__c:object+"Fields",
+   Vertical__c:object==="Bin__c"?"Received__c":null,Groups__c:object==="Line__c"?"Header__r.DocumentNumber__c;Requested__c;Gross__c;Net__c":object==="Allocation__c"?"Header__r.DocumentNumber__c":null,
+   Filters__c:null,Sort__c:object==="Line__c"?"Header__c, Header__r.CreatedDate ASC":"Id ASC",Active__c:true}));
+ const provider:ApexMetadataProvider={scopeKey:"sanitized-captured-shape",getObjectFieldNames:async()=>({complete:false,source:"LIVE_ORG"}),
+   getObjectSchema:async object=>schemas[object]?{complete:true,source:"LIVE_ORG",value:{name:object,fields:schemas[object]}}:{complete:false,source:"LIVE_ORG"},
+   getCustomMetadataRecords:async()=>({complete:true,source:"LIVE_ORG",value:rows}),
+   getFieldSetFields:async object=>({complete:true,source:"LIVE_ORG",value:rootFields[object]??[]})};
+ const capture=new ApexMetadataCapture(provider);
+ const run=async(metadata:ApexMetadataProvider)=>{
+   const engine=new ApexAnalysisEngine(index,metadata);
+   for(const site of discoverApexInvocations(source,dynamicDatabaseQuerySelector)){
+     const events:Array<{code:string;schemaPath?:string}>=[];
+     const result=await engine.analyze(filePath,ctx=>backtrackSoqlPermissionShapes(source,filePath,site,index,ctx.resolveExternal,e=>events.push(e)));
+     const detail=JSON.stringify({result,events});
+     assert.equal(result.partialSelectQueries?.length,3,detail);
+     const selected=result.queries.filter(q=>q.includes("FROM Line__c"));
+     assert.deepEqual(fields(selected),new Set(["SELECT:Id",...rootFields.Line__c.map(f=>"SELECT:"+f),"SELECT:Header__r.Id","SELECT:Requested__c","SELECT:Gross__c","SELECT:Net__c"]),detail);
+     assert.ok(selected.some(q=>q.includes("FORMAT(Header__r.CreatedDate)")&&q.includes("FORMAT(Header__r.ShipDate__c)")&&q.includes("FORMAT(Header__r.DueDate__c)")),detail);
+     assert.equal(fields(result.queries.filter(q=>q.includes("FROM Bin__c"))).size,7,detail);
+     assert.equal(fields(result.queries.filter(q=>q.includes("FROM Allocation__c"))).size,9,detail);
+     assert.ok(events.some(e=>e.code==="HELPER_SET_UNKNOWN_ADDITION"&&e.schemaPath==="Line__c.Header__r.CreatedById"),detail);
+     assert.equal(result.bounded,false,detail);
+   }
+   const scan=await engine.analyze(filePath,ctx=>extractDynamicSoqlQueries(source,filePath,ctx.resolveExternal,index));
+   assert.equal(scan.queries.filter(q=>q.selectPrefixOnly&&q.query.includes("FROM Line__c")).length,2,JSON.stringify(scan));
+   assert.ok(scan.unresolved.length>=2);
+ };
+ await run(capture.provider);
+ const snapshot=capture.snapshot();
+ assert.ok(snapshot.entries.some(e=>e.request.kind==="schema"&&e.request.name==="User"));
+ snapshot.entries=snapshot.entries.filter(e=>!(e.request.kind==="schema"&&e.request.name==="User"));
+ const replay=new ApexMetadataReplay(snapshot);
+ await run(replay.provider);
+ assert.equal(replay.stats.missing,1);
+ assert.deepEqual(replay.missingRequests,[{kind:"schema",name:"User"}]);
 });
