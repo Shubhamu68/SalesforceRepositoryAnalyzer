@@ -83,7 +83,9 @@ export function provePrivateAssignedMemberDomain(c:Context,name:string,resolve:(
   else result.push({kind:"null"});
   const ternary=findApexTernary(maskApexSource(write.rhs));
   if(ternary){
-    if(proof.type!=="string"||!/^[A-Za-z_]\w*\s*(?:!=|==)\s*null$/i.test(clean(write.rhs.slice(0,ternary.question))))return undefined;
+    // Apex commonly wraps the simple null comparison in parentheses.
+    const condition=clean(write.rhs.slice(0,ternary.question)).replace(/^\(\s*([A-Za-z_]\w*\s*(?:!=|==)\s*null)\s*\)$/i,"$1");
+    if(proof.type!=="string"||!/^[A-Za-z_]\w*\s*(?:!=|==)\s*null$/i.test(condition))return undefined;
     const yes=clean(write.rhs.slice(ternary.question+1,ternary.colon)),no=clean(write.rhs.slice(ternary.colon+1));
     if(!literal.test(yes)||!literal.test(no))return undefined;
     result.push(evaluateApexExpression(yes,{values:new Map()}),evaluateApexExpression(no,{values:new Map()}));
