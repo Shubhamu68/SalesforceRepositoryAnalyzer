@@ -43,7 +43,9 @@ export function proveConfiguredFallbackDomain(c:Context,resolveAt:(expr:string,a
   const points=[loop.start,c.offset];
   const collect=(nodes:readonly SourceNode[])=>{for(const n of nodes){points.push(n.start,n.end-1);collect(n.body??[]);collect(n.otherwise??[]);}};
   collect(c.method.body);
-  if(platforms.some(p=>points.some(at=>symbols.hasLocalBinding(c.method,p,at)||!!symbols.lookup(c.method,p,at))))return undefined;
+  // Type positions (e.g. Matcher matcher) do not resolve through a
+  // same-named local. Static receivers do; reject those shadows.
+  if(["String","Pattern","Database","AccessLevel"].some(p=>points.some(at=>symbols.hasLocalBinding(c.method,p,at)||!!symbols.lookup(c.method,p,at))))return undefined;
   const open=masked.indexOf("(",c.offset),close=open>=0?matchingPair(masked,open):-1;
   if(close<0||close>=loop.end)return undefined;
   const read=matchApexTokenContract(c.source.slice(loop.start,close+1),consumer,

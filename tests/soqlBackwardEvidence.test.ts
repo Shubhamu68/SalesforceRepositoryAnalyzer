@@ -824,7 +824,7 @@ test("phase 5: reuse configured predicate evidence through a guarded summary cal
 
 const configuredFallbackFixture="public class FallbackFixture {"+
  scopedDescribeFixture.slice(scopedDescribeFixture.indexOf("{")+1,scopedDescribeFixture.lastIndexOf("}"))+
- "private class Card{public String label;public String type;public Object value;}"+
+ "private class SummaryValue{public String label;public String type;public Object value;}"+
  "private static String kind(Schema.DisplayType d){return 'number';}"+
  "public static void run(String key,Map<String,String> values){Config__mdt row=Config__mdt.getInstance(key);String obj=row.Object__c;String ordering='Id';if(String.isNotBlank(row.Order__c)){ordering=row.Order__c.trim()+', Id';}if(String.isNotBlank(row.Summary__c)){try{summary(obj,row.Summary__c,values);}catch(Exception ex){System.debug(ex);}}}"+
  "private static void summary(String obj,String config,Map<String,String> values){List<String> selected=new List<String>();List<Map<String,Object>> metas=new List<Map<String,Object>>();Integer idx=0;"+
@@ -834,8 +834,8 @@ const configuredFallbackFixture="public class FallbackFixture {"+
  "if(d!=null){alias='agg'+idx;String expr=(fn=='COUNT')?'COUNT(Id)':(fn+'('+field+')');selected.add(expr+' '+alias);}"+
  "Map<String,Object> meta=new Map<String,Object>{'label'=>String.isNotBlank(label)?label:(fn+' of '+fieldLabel),'type'=>(fn=='COUNT')?'number':(d!=null?kind(d.getType()):'number')};if(alias!=null){meta.put('alias',alias);}if(String.isNotBlank(alternative)){meta.put('fallbackQuery',alternative);}metas.add(meta);idx++;}"+
  "AggregateResult agg=null;if(!selected.isEmpty()){String q='SELECT '+String.join(selected,', ')+' FROM '+String.escapeSingleQuotes(obj);List<AggregateResult> r=Database.queryWithBinds(q,new Map<String,Object>(),AccessLevel.USER_MODE);agg=r.isEmpty()?null:r[0];}"+
- "for(Map<String,Object> item:metas){Card card=new Card();card.label=(String)item.get('label');card.type=(String)item.get('type');String alias=(String)item.get('alias');Object val=null;if(alias!=null&&agg!=null){val=agg.get(alias);}String template=(String)item.get('fallbackQuery');if(val==null&&String.isNotBlank(template)){Map<String,Object> binds=new Map<String,Object>();String query=template;Integer counter=0;"+
- "Pattern pattern=Pattern.compile('\\\\{([^}]+)\\\\}');Matcher matcher=pattern.matcher(template);Boolean canRun=true;Set<String> placeholders=new Set<String>();while(matcher.find()){placeholders.add(matcher.group(0));}"+
+ "for(Map<String,Object> item:metas){SummaryValue card=new SummaryValue();card.label=(String)item.get('label');card.type=(String)item.get('type');String alias=(String)item.get('alias');Object val=null;if(alias!=null&&agg!=null){val=agg.get(alias);}String template=(String)item.get('fallbackQuery');if(val==null&&String.isNotBlank(template)){Map<String,Object> binds=new Map<String,Object>();String query=template;Integer counter=0;"+
+ "Pattern compiled=Pattern.compile('\\\\{([^}]+)\\\\}');Matcher matcher=compiled.matcher(template);Boolean canRun=true;Set<String> placeholders=new Set<String>();while(matcher.find()){placeholders.add(matcher.group(0));}"+
  "for(String placeholder:placeholders){String key=placeholder.substring(1,placeholder.length()-1);if(values.containsKey(key)){String bind='fb'+counter++;query=query.replace(placeholder,':'+bind);binds.put(bind,values.get(key));}else{canRun=false;break;}}"+
  "if(canRun&&!binds.isEmpty()){try{List<AggregateResult> results=Database.queryWithBinds(query,binds,AccessLevel.SYSTEM_MODE);if(results!=null&&!results.isEmpty()){val=results[0].get('expr0');}}catch(Exception ex){System.debug(ex);}}}card.value=val;}}}";
 const fallbackMetadata=(config:string,other="")=>(name:string,args:ApexValue[]):ApexValue|undefined=>{
