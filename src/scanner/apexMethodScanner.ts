@@ -1,5 +1,7 @@
 import path from "node:path";
 import { readdir, readFile } from "node:fs/promises";
+import { isExcludedRepositoryDirectory } from "./repositoryDiscoveryPolicy.js";
+import { maskApexSource, matchingPair, sourceLine } from "../core/apex/ApexSourceModel.js";
 import { extractSoqlQueries } from "./apexSoqlScanner.js";
 import type { SoqlQuery } from "../models/SoqlQuery.js";
 import type { ApexStackFrame, ReachableMethod } from "../models/StackTraceImpact.js";
@@ -20,58 +22,16 @@ export interface ApexMethodIndex {
   files: string[];
 }
 
-const IGNORED_DIRECTORIES = new Set([
-  ".git", ".sfdx", ".sf", "node_modules", "dist", "build", ".next", "coverage",
-]);
-
 const RESERVED = new Set([
   "if", "else", "for", "while", "do", "switch", "catch", "try", "return",
   "throw", "new", "with", "when", "runas", "select", "from", "insert",
   "update", "delete", "upsert", "merge", "typeof",
 ]);
 
-/** Mask comments and quoted literals, preserving character offsets and newlines. */
-export function maskApex(source: string): string {
-  const output = source.split("");
-  let state: "normal" | "line" | "block" | "single" | "double" = "normal";
-  const blank = (index: number) => { if (source[index] !== "\n" && source[index] !== "\r") output[index] = " "; };
-  for (let i = 0; i < source.length; i++) {
-    const ch = source[i];
-    const next = source[i + 1];
-    if (state === "normal") {
-      if (ch === "/" && next === "/") { blank(i); blank(i + 1); i++; state = "line"; }
-      else if (ch === "/" && next === "*") { blank(i); blank(i + 1); i++; state = "block"; }
-      else if (ch === "'") { blank(i); state = "single"; }
-      else if (ch === '"') { blank(i); state = "double"; }
-      continue;
-    }
-    if (state === "line") { if (ch === "\n") state = "normal"; else blank(i); continue; }
-    if (state === "block") {
-      if (ch === "*" && next === "/") { blank(i); blank(i + 1); i++; state = "normal"; }
-      else blank(i);
-      continue;
-    }
-    if (ch === "\\" && next !== undefined) { blank(i); blank(i + 1); i++; continue; }
-    blank(i);
-    if ((state === "single" && ch === "'") || (state === "double" && ch === '"')) state = "normal";
-  }
-  return output.join("");
-}
-
-export function matchPair(masked: string, open: number, opening: string, closing: string): number {
-  let level = 0;
-  for (let i = open; i < masked.length; i++) {
-    if (masked[i] === opening) level++;
-    if (masked[i] === closing && --level === 0) return i;
-  }
-  return -1;
-}
-
-export function lineAt(source: string, offset: number): number {
-  let line = 1;
-  for (let i = 0; i < offset; i++) if (source[i] === "\n") line++;
-  return line;
-}
+/** Compatibility names for the Stack Trace scanner. One shared source lexer. */
+export const maskApex=maskApexSource;
+export const matchPair=matchingPair;
+export const lineAt=sourceLine;
 
 /** Split method arguments at top-level commas (including generic-type brackets). */
 export function countArguments(text: string): number {
@@ -178,7 +138,7 @@ export async function createApexMethodIndex(repositoryPath: string): Promise<Ape
     for (const entry of entries) {
       if (entry.isSymbolicLink()) continue;
       const full = path.join(dir, entry.name);
-      if (entry.isDirectory() && !IGNORED_DIRECTORIES.has(entry.name.toLowerCase())) await walk(full);
+      if (entry.isDirectory() && !isExcludedRepositoryDirectory(entry.name)) await walk(full);
       else if (entry.isFile() && entry.name.toLowerCase().endsWith(".cls")) files.push(full);
     }
   }

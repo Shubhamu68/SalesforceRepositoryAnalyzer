@@ -8,6 +8,9 @@ import { SoqlSecurityFinding } from "../models/SoqlSecurityFinding.js";
 import { SoqlSecurityAnalyzer } from "../analyzer/soqlSecurityAnalyzer.js";
 import { scanApexSoqlWithUnresolved } from "../scanner/apexSoqlScanner.js";
 import type { UnresolvedDynamicSoql } from "../scanner/dynamicSoqlScanner.js";
+import {explainSoqlReview} from "../analyzer/soqlReviewExplanation.js";
+import {needsDynamicCoverageReview} from "../analyzer/soqlReferenceCoverage.js";
+import {applyLimitedCoverageReporting} from "../analyzer/soqlExistingVariantReporting.js";
 import type { ApexMetadataProvider } from "../core/metadata/ApexMetadataProvider.js";
 import { writeSoqlReport, writeAllPersonasHighPriorityReport, type PersonaHighPriorityReportSection } from "../reporter/soqlReportWriter.js";
 import { recordSoqlCount, timeSoqlPhase, withSoqlPerformance } from "./SoqlPerformanceMetrics.js";
@@ -52,18 +55,18 @@ function unresolvedDynamicFindings(sites: readonly UnresolvedDynamicSoql[]): Soq
     severity: "REVIEW",
     criticality: "Unable to verify",
     verificationSource: "UNVERIFIED",
-    findingType: "PARSER",
+    findingType: site.securityModeConflict ? "QUERY_MODE" : "PARSER",
     filePath: site.filePath,
     lineNumber: site.lineNumber,
     ...(site.siteId ? { queryVariantId: site.siteId } : {}),
     object: "Dynamic SOQL",
-    field: `(Unresolved query: ${path.basename(site.filePath)}:${site.lineNumber}${site.siteId ? "@" + site.siteId.split("@").at(-1) : ""})`,
-    query: "(dynamic SOQL could not be reconstructed)",
+    field: `(${site.securityModeConflict ? "Security mode conflict" : "Unresolved query"}: ${path.basename(site.filePath)}:${site.lineNumber}${site.siteId ? "@" + site.siteId.split("@").at(-1) : ""})`,
+    query: site.securityModeConflict ? "(dynamic SOQL security-mode conflict)" : "(dynamic SOQL could not be reconstructed)",
     withUserMode: false,
     declaredMode: "UNSPECIFIED",
     effectiveMode: "UNKNOWN",
-    runtimeImpact: "Not assessed",
-    reason: site.knownVariants || site.partialStructureVariants ? `Dynamic SOQL execution coverage is incomplete: ${site.reason} OLS/FLS findings apply only to the proven caller variants or typed numeric-slot structures; unproven paths were not assessed.` : `Dynamic SOQL could not be parsed and verified because ${site.reason} OLS/FLS analysis was not performed for this query.`,
+    runtimeImpact: site.securityModeConflict ? "Undetermined" : "Not assessed",
+    reason: site.reportReason ?? explainSoqlReview({...site,...(site.securityModeConflict?{conflict:"Security-mode conflict; effective enforcement and conflicting query permissions not verified."}:{})}),
   }));
 }
 
@@ -88,21 +91,33 @@ export class SoqlAnalysisService {
       .filter((query) => isDataAccessAnalysisObject(query.object));
     recordSoqlCount("queries.analyzed", queries.length);
     recordSoqlCount("queries.partial_structure", queries.filter(q=>q.coverage==="PROVEN_PARTIAL_STRUCTURE").length);
+    recordSoqlCount("queries.aggregated_permission_inventory", queries.filter(q=>q.permissionEvidence==="AGGREGATED_STRUCTURE").length);
     recordSoqlCount("queries.known_caller", queries.filter(q=>q.coverage==="KNOWN_CALLER_CONTEXT").length);
     recordSoqlCount("queries.complete", queries.filter(q=>!q.coverage).length);
+    recordSoqlCount("queries.conditional_framework", queries.filter(q=>q.coverage==="CONDITIONAL_FRAMEWORK_CONTEXT").length);
 
     // Keep the pre-existing analyzer path for callers without progress
     // (including CLI/tests). With progress, the SAME preparation/evaluation
     // methods are split to report real milestones and per-object completion.
     progress?.moveTo("preparing");
-    const findings = await timeSoqlPhase("security.total", async () => {
+    const evaluatedFindings = await timeSoqlPhase("security.total", async () => {
       if (!progress) return this.soqlSecurityAnalyzer.analyze(persona, queries);
       const prepared = await this.soqlSecurityAnalyzer.prepare(queries);
       progress.moveTo("permissions");
       return this.soqlSecurityAnalyzer.analyzePrepared(persona, prepared,
         (completed, total) => progress.reportObjects(completed, total));
     });
-    findings.push(...unresolvedDynamicFindings(scanned.unresolvedDynamic));
+    // Coverage advisories for accepted runtime-field inventories are emitted
+    // by the security analyzer using its already resolved API-version mode.
+    const {findings,handledSiteIds,existingSiteIds,partialSiteIds}=applyLimitedCoverageReporting(scanned.unresolvedDynamic,queries,evaluatedFindings);
+    const runtimeSites=new Set(queries.filter(q=>q.runtimeFieldCoverage).map(q=>q.querySiteId));
+    const incompleteSites=scanned.unresolvedDynamic.filter(site=>needsDynamicCoverageReview(site,queries));
+    const reviewSites=incompleteSites.filter(site=>!site.siteId||!handledSiteIds.has(site.siteId));
+    recordSoqlCount("coverage.complete_finite_sites",scanned.unresolvedDynamic.length-incompleteSites.length);
+    recordSoqlCount("coverage.existing_variant_sites",existingSiteIds.size);
+    recordSoqlCount("coverage.partial_reference_sites",partialSiteIds.size);
+    recordSoqlCount("coverage.dynamic_review_sites",reviewSites.length);
+    findings.push(...unresolvedDynamicFindings(reviewSites.filter(site=>!site.runtimeFieldCoverage||!runtimeSites.has(site.siteId))));
     recordSoqlCount("findings", findings.length);
 
     const outputDirectory = typeof this.outputDirectory === "function"
@@ -185,8 +200,10 @@ export class SoqlAnalysisService {
         .filter((query) => isDataAccessAnalysisObject(query.object));
       recordSoqlCount("queries.analyzed", queries.length);
     recordSoqlCount("queries.partial_structure", queries.filter(q=>q.coverage==="PROVEN_PARTIAL_STRUCTURE").length);
+    recordSoqlCount("queries.aggregated_permission_inventory", queries.filter(q=>q.permissionEvidence==="AGGREGATED_STRUCTURE").length);
     recordSoqlCount("queries.known_caller", queries.filter(q=>q.coverage==="KNOWN_CALLER_CONTEXT").length);
     recordSoqlCount("queries.complete", queries.filter(q=>!q.coverage).length);
+    recordSoqlCount("queries.conditional_framework", queries.filter(q=>q.coverage==="CONDITIONAL_FRAMEWORK_CONTEXT").length);
       recordSoqlCount("personas.analyzed", personas.length);
 
       progress?.moveTo("preparing");
@@ -199,10 +216,12 @@ export class SoqlAnalysisService {
         while (nextPersona < personas.length) {
           const index = nextPersona++;
           const persona = personas[index];
-          const findings = await timeSoqlPhase("security.personas_cumulative_ms",
+          const evaluated = await timeSoqlPhase("security.personas_cumulative_ms",
             () => this.soqlSecurityAnalyzer.analyzePrepared(persona, prepared));
-          // Only the analyzer's explicit effective High criticality qualifies.
-          // REVIEW/UNVERIFIED and Low references can never be elevated here.
+          // Apply the same persona-specific reporting policy as the normal
+          // report. Only confirmed denials in the scoped variant domain can
+          // change priority; unknown verification results remain reviews.
+          const {findings}=applyLimitedCoverageReporting(scanned.unresolvedDynamic,queries,evaluated);
           const high = findings.filter((finding) => finding.criticality === "High");
           recordSoqlCount("findings.high", high.length);
           sections[index] = { personaName: persona.name, queryCount: queries.length, findings: high };

@@ -15,3 +15,6 @@ config/relationship-schema.json
 config/*.local.json
 # Generated Electron desktop builds
 /release/
+# Sensitive, opt-in AUE captures are local only.
+.apex-metadata-snapshots/
+*.local.json.tmp

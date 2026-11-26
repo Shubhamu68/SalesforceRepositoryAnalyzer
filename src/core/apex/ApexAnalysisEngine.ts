@@ -1,14 +1,18 @@
+import type {ApexCallResolver,ApexArgumentTypes} from "./ApexTypeSystem.js";
 import {countApex,timeApex} from "./ApexPerformance.js";
 import {ApexDataFlowEngine,type ApexFlowOptions} from "./ApexDataFlowEngine.js";
 import type {ApexInvocationSelector} from "./ApexInvocationModel.js";
-import {listValue,unknown,type ApexValue} from "./ApexValueEvaluator.js";
+import {listValue,textValue,unknown,type ApexValue} from "./ApexValueEvaluator.js";
 import type {ApexRepositoryMethodIndex} from "./ApexRepositoryMethodIndex.js";
-import {planCustomMetadataRequest,resolveCustomMetadataRows,type CustomMetadataRequest,type CustomMetadataInventory} from "./ApexCustomMetadataQueries.js";
+import {planCustomMetadataRequest,planCustomMetadataSelectorCandidates,resolveCustomMetadataRows,type CustomMetadataRequest,type CustomMetadataInventory} from "./ApexCustomMetadataQueries.js";
 import type {ApexMetadataProvider} from "../metadata/ApexMetadataProvider.js";
+import {resolveSchemaSnapshot,resolveSchemaFieldMap} from "./ApexSchemaModel.js";
+import {exactMetadataStringList} from "./ApexCollectionOperations.js";
 
 type LabelResult=Awaited<ReturnType<NonNullable<ApexMetadataProvider["getCustomLabelValue"]>>>;
 type FieldSetResult=Awaited<ReturnType<NonNullable<ApexMetadataProvider["getFieldSetFields"]>>>;
 type DescribeResult=Awaited<ReturnType<ApexMetadataProvider["getObjectFieldNames"]>>;
+type SchemaResult=Awaited<ReturnType<NonNullable<ApexMetadataProvider["getObjectSchema"]>>>;
 
 // Fresh for each repository scan. Concurrent consumers share a read, but
 // changing a label between user-triggered scans never reuses its old value.
@@ -16,6 +20,7 @@ interface ScanMetadataReads {
   labels:Map<string,Promise<LabelResult>>;
   fieldSets:Map<string,Promise<FieldSetResult>>;
   describes:Map<string,Promise<DescribeResult>>;
+  schemas:Map<string,Promise<SchemaResult>>;
   customMetadata:Map<string,Promise<CustomMetadataInventory>>;
 }
 function memoRead<T>(cache:Map<string,Promise<T>>,key:string,read:()=>Promise<T>):Promise<T>{
@@ -23,16 +28,16 @@ function memoRead<T>(cache:Map<string,Promise<T>>,key:string,read:()=>Promise<T>
   if(!pending){pending=read();cache.set(key,pending);}
   return pending;
 }
-export type ApexExternalResolver=(name:string,args:ApexValue[])=>ApexValue|undefined;
+export type ApexExternalResolver=ApexCallResolver;
 export type ApexInvocationAnalysis=ReturnType<ApexDataFlowEngine["analyze"]>&{sites:ApexDataFlowEngine["sites"]};
 /** Feature-independent synchronous invocation analysis using a supplied resolver. */
 export function analyzeApexInvocations(source:string,filePath:string,select:ApexInvocationSelector,
   resolveExternal?:ApexExternalResolver,repositoryIndex?:ApexRepositoryMethodIndex,
   limits?:Pick<ApexFlowOptions,"maxOperations"|"maxPaths"|"maxDepth">):ApexInvocationAnalysis{
-  const resolver:ApexExternalResolver=(name,args)=>{
+  const resolver:ApexExternalResolver=(name,args,types)=>{
     if(name==="Apex.construct"&&args[0]?.kind==="text"&&args[0].values.length===1)
-      return repositoryIndex?.constructInstance(filePath,args[0].values[0],args.slice(1),resolveExternal)??resolveExternal?.(name,args);
-    return resolveExternal?.(name,args);
+      return repositoryIndex?.constructInstance(filePath,args[0].values[0],args.slice(1),resolveExternal,types?.slice(1))??resolveExternal?.(name,args,types);
+    return resolveExternal?.(name,args,types);
   };
   const engine=new ApexDataFlowEngine(source,{...limits,sourceMethods:repositoryIndex?.indexedMethods(filePath,source),selectInvocation:select,resolveExternal:resolver,
     resolvePrivateContexts:owner=>repositoryIndex?.resolvePrivateContexts(filePath,owner,resolveExternal)});
@@ -54,7 +59,7 @@ export interface ApexAnalysisContext {
  * The caller supplies an analysis consumer; no security/reporting dependency. */
 export class ApexAnalysisEngine {
   private readonly reads:ScanMetadataReads={
-    labels:new Map(),fieldSets:new Map(),describes:new Map(),customMetadata:new Map()
+    labels:new Map(),fieldSets:new Map(),describes:new Map(),schemas:new Map(),customMetadata:new Map()
   };
   constructor(readonly repositoryIndex?:ApexRepositoryMethodIndex,
     private readonly metadata?:ApexMetadataProvider){}
@@ -71,6 +76,8 @@ export class ApexAnalysisEngine {
   const labelResults=new Map<string,LabelResult>();
   const fieldSetValues=new Map<string,FieldSetResult>();
   const describeSnapshots=new Map<string,DescribeResult>();
+  const schemaSnapshots=new Map<string,SchemaResult>();
+  const requestedSchemas=new Map<string,string>();
   const requestedLabels=new Set<string>();
   const requestedFieldSets=new Map<string,[string,string]>();
   const requested=new Set<string>();
@@ -78,7 +85,7 @@ export class ApexAnalysisEngine {
   const requestedMetadata=new Map<string,CustomMetadataRequest>();
   // A new resolver identity for each pass invalidates cached helper/member summaries.
   const makeResolver=()=>{
-  const baseResolver=(name:string,args:ApexValue[]):ApexValue|undefined=>{
+  const baseResolver=(name:string,args:ApexValue[],types?:ApexArgumentTypes):ApexValue|undefined=>{
     if(name==="System.Label"){
       if(args.length!==1||args[0].kind!=="text"||args[0].values.length!==1)
         return unknown("Custom Label identity is not proven.");
@@ -103,7 +110,7 @@ export class ApexAnalysisEngine {
     if(name==="Apex.construct"){
       const type=args[0];
       if(type?.kind!=="text"||type.values.length!==1)return unknown("Instance type is not proven.");
-      return repositoryIndex?.constructInstance(filePath,type.values[0],args.slice(1),baseResolver);
+      return repositoryIndex?.constructInstance(filePath,type.values[0],args.slice(1),baseResolver,types?.slice(1));
     }
     if(name==="Apex.lazyGetter"){
       if(args.length!==2||args[0].kind!=="text"||args[1].kind!=="text"||args[0].values.length!==1||args[1].values.length!==1)return undefined;
@@ -125,10 +132,38 @@ export class ApexAnalysisEngine {
         requestedFieldSets.set(key,[object,fieldSet]);
       const selected=fieldSetValues.get(key);
       return selected?.complete&&selected.value
-        ?listValue(selected.value)
+        ?exactMetadataStringList(selected.value)
         :unknown("Complete Field Set "+object+"."+fieldSet+
           " unavailable from org metadata: "+
           (selected?.reason??"Runtime Field Set identity not proven in this scan."));
+    }
+    if(name==="Apex.metadataGetInstance"){
+      if((args.length!==2&&args.length!==3)||args.some(v=>v.kind!=="text"||v.values.length!==1))return unknown("Custom Metadata getInstance requires a proven developer name.");
+      const [type,developerName,field]=args.map(v=>v.kind==="text"?v.values[0]:"");
+      if(!/^[A-Za-z_]\w*__mdt$/i.test(type)||!/^[A-Za-z_]\w*$/.test(developerName)||field&&!/^[A-Za-z_]\w*$/.test(field))
+        return unknown("Unsupported Custom Metadata getInstance identity or member.");
+      // The same provider, exact filters, scan-local memoization and row
+      // completeness checks as the Custom Metadata SOQL interpreter.
+      const request=planCustomMetadataRequest("[SELECT "+(field??"DeveloperName")+" FROM "+type+" WHERE DeveloperName = :developerName LIMIT 1]",[textValue(developerName)]);
+      if("kind" in request)return request;
+      const found=metadataInventories.get(request.key);
+      if(!found){requestedMetadata.set(request.key,request);return unknown("Custom Metadata getInstance requires authoritative metadata.");}
+      const rows=resolveCustomMetadataRows(request,found);
+      if(rows.kind!=="records")return rows;
+      if(!rows.items.length)return field?unknown("Custom Metadata record is absent."):{kind:"null"};
+      if(rows.items.length!==1)return unknown("Custom Metadata getInstance record identity is ambiguous.");
+      if(field)return rows.items[0].find(([key])=>key.toLowerCase()===field.toLowerCase())?.[1]??unknown("Custom Metadata record omitted requested field.");
+      return {kind:"record",entries:rows.items[0],metadataIdentity:{type,developerName}};
+    }
+    if(name==="Apex.metadataSelectorCandidates"){
+      if(args.length!==1||args[0]?.kind!=="text"||args[0].scalarType||args[0].values.length!==1)
+        return unknown("Custom Metadata candidate selector identity is unresolved.");
+      const request=planCustomMetadataSelectorCandidates(args[0].values[0]);
+      if("kind" in request)return request;
+      const found=metadataInventories.get(request.key);
+      if(found)return resolveCustomMetadataRows(request,found);
+      requestedMetadata.set(request.key,request);
+      return unknown("Complete Custom Metadata selector candidates require authoritative metadata.");
     }
     if(name==="Apex.metadataRows"){
       if(args[0]?.kind!=="text"||args[0].values.length!==1)
@@ -140,6 +175,16 @@ export class ApexAnalysisEngine {
       requestedMetadata.set(request.key,request);
       return unknown("Complete Custom Metadata "+request.type+
         (metadata?" rows have not been loaded for this filter context.":" requires a connected authoritative org."));
+    }
+    if(name==="Schema.objectSchema"||name==="Schema.fieldMap"){
+      if((name==="Schema.fieldMap"?args.length!==1:args.length!==1&&args.length!==2)||args.some(v=>v.kind!=="text"||v.scalarType||v.values.length!==1||!/^[A-Za-z_]\w*$/.test(v.values[0])))
+        return unknown("Schema object or field identity is not proven.");
+      const [object,field]=args.map(v=>v.kind==="text"?v.values[0]:"");
+      if(repositoryIndex?.hasSourceClass("Schema")||repositoryIndex?.hasSourceClass(object))
+        return unknown("Schema token may be shadowed by repository Apex.");
+      const key=object.toLowerCase();
+      if(!schemaSnapshots.has(key))requestedSchemas.set(key,object);
+      return name==="Schema.fieldMap"?resolveSchemaFieldMap(schemaSnapshots.get(key),object):resolveSchemaSnapshot(schemaSnapshots.get(key),object,field);
     }
     if(name==="Schema.describeFields"){
       const object=args[0];
@@ -155,16 +200,18 @@ export class ApexAnalysisEngine {
     }
     return undefined;
   };
-  const resolver=(name:string,args:ApexValue[]):ApexValue|undefined=>
-    baseResolver(name,args) ??
-    repositoryIndex?.evaluateReturn(filePath,name,args,baseResolver);
+  // Backward caller traversal can enter a different source class. Preserve
+  // that lexical caller for existing repository accessibility checks.
+  const resolver:ApexExternalResolver=(name,args,types,fromFilePath=filePath)=>
+    baseResolver(name,args,types) ??
+    repositoryIndex?.evaluateReturn(fromFilePath,name,args,baseResolver,types);
     return {baseResolver,resolver};
   };
   // Bound metadata discovery by passes and distinct requests per query class.
   // Never fabricate data for failed lookups or silently use partial results.
-  const MAX_PASSES=5,MAX_LABELS=40,MAX_FIELDSETS=30,MAX_DESCRIBES=40,MAX_METADATA=30;
+  const MAX_PASSES=8,MAX_LABELS=40,MAX_FIELDSETS=30,MAX_DESCRIBES=40,MAX_METADATA=30;
   for(let pass=0;;pass++){
-    requestedLabels.clear();requestedFieldSets.clear();requested.clear();requestedMetadata.clear();
+    requestedLabels.clear();requestedFieldSets.clear();requested.clear();requestedSchemas.clear();requestedMetadata.clear();
     const {baseResolver,resolver}=makeResolver();
     countApex("metadata.analysis_passes");
     const analysis=consumer({repositoryIndex,resolveExternal:resolver,resolveLocal:baseResolver});
@@ -173,14 +220,16 @@ export class ApexAnalysisEngine {
     const labels=[...requestedLabels].filter(k=>!labelResults.has(k));
     const sets=[...requestedFieldSets].filter(([k])=>!fieldSetValues.has(k));
     const objects=[...requested].filter(k=>!describeSnapshots.has(k));
+    const schemas=[...requestedSchemas].filter(([k])=>!schemaSnapshots.has(k));
     const mdts=[...requestedMetadata.values()].filter(r=>!metadataInventories.has(r.key));
     const canReadLabels=!!metadata.getCustomLabelValue&&labels.length>0&&
       labelResults.size+labels.length<=MAX_LABELS;
     const canReadSets=!!metadata.getFieldSetFields&&sets.length>0&&
       fieldSetValues.size+sets.length<=MAX_FIELDSETS;
     const canReadObjects=objects.length>0&&describeSnapshots.size+objects.length<=MAX_DESCRIBES;
+    const canReadSchemas=!!metadata.getObjectSchema&&schemas.length>0&&schemaSnapshots.size+schemas.length<=MAX_DESCRIBES;
     const canReadMetadata=mdts.length>0&&metadataInventories.size+mdts.length<=MAX_METADATA;
-    if(!canReadLabels&&!canReadSets&&!canReadObjects&&!canReadMetadata)
+    if(!canReadLabels&&!canReadSets&&!canReadObjects&&!canReadSchemas&&!canReadMetadata)
       return analysis;
     await Promise.all([
       ...(canReadLabels?labels.map(async name=>labelResults.set(name,
@@ -189,6 +238,8 @@ export class ApexAnalysisEngine {
         await memoRead(reads.fieldSets,key,()=>metadata.getFieldSetFields!(object,name)))):[]),
       ...(canReadObjects?objects.map(async object=>describeSnapshots.set(object,
         await memoRead(reads.describes,object,()=>metadata.getObjectFieldNames(object)))):[]),
+      ...(canReadSchemas?schemas.map(async ([key,object])=>schemaSnapshots.set(key,
+        await memoRead(reads.schemas,key,()=>metadata.getObjectSchema!(object)))):[]),
       ...(canReadMetadata?mdts.map(async request=>metadataInventories.set(request.key,
         await memoRead(reads.customMetadata,request.key,()=>metadata.getCustomMetadataRecords(request.type,request.selected,request.filters)))):[]),
     ]);

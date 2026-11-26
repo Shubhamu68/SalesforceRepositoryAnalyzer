@@ -40,6 +40,8 @@ export interface CustomMetadataRequest {
   selected:string[];
   query:MetadataLoopQuery;
   filters:CustomMetadataFilter[];
+  /** Permission-inventory candidates, never an exact runtime singleton. */
+  selectorCandidates?:true;
 }
 export type CustomMetadataInventory=CustomMetadataResult;
 
@@ -66,6 +68,26 @@ export function planCustomMetadataRequest(expression:string,values:readonly Apex
     .sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b)));
   return {key:JSON.stringify([query.type.toLowerCase(),[...selectedMap.keys()].sort(),filterKey]),
     type:query.type,selected,query,filters};
+}
+
+/** Drop only the unresolved DeveloperName equality from a proven selector.
+ * All literal filters are retained, and the original projection is preserved.
+ * Separate cache identity prevents reuse as an exact singleton response. */
+export function planCustomMetadataSelectorCandidates(expression:string):
+  CustomMetadataRequest|{kind:"unknown";reason:string}{
+  const query=parseCustomMetadataQuery(expression);
+  const selector=query?.predicates.filter(p=>p.bind);
+  if(!query?.singletonLimit||selector?.length!==1||selector[0].field.toLowerCase()!=="developername"||
+    query.predicates.some(p=>!p.bind&&p.field.toLowerCase()==="developername"))
+    return unknown("Custom Metadata candidate selector is not proven.") as {kind:"unknown";reason:string};
+  const fields=[...query.fields];
+  if(!fields.some(f=>f.toLowerCase()==="developername"))fields.push("DeveloperName");
+  const predicates=query.predicates.filter(p=>!p.bind);
+  const expanded="[SELECT "+fields.join(",")+" FROM "+query.type+
+    (predicates.length?" WHERE "+predicates.map(p=>p.field+" = "+p.right).join(" AND "):"")+"]";
+  const request=planCustomMetadataRequest(expanded,predicates.map(p=>evaluateApexExpression(p.right,{values:new Map()})));
+  if("kind" in request)return request;
+  return {...request,key:"selector-candidates|"+request.key,selectorCandidates:true};
 }
 
 /** Apply the current invocation's filters to complete org rows. Never
@@ -95,15 +117,19 @@ export function resolveCustomMetadataRows(request:CustomMetadataRequest,found:Cu
       if(typeof value==="string"?converted.toLowerCase()!==value.toLowerCase():actual!==value){included=false;break;}
     }
     if(!included)continue;
+    if(request.selectorCandidates){
+      const developerName=read("DeveloperName");
+      if(typeof developerName!=="string"||!/^[A-Za-z_]\w*$/.test(developerName))return unknown("Custom Metadata candidate identity is invalid.");
+    }
     const values:Array<[string,ApexValue]>=[];
     for(const field of request.query.fields){
       // A singleton configuration row may contain optional null fields or
       // text templates, not only field-path identifiers. Consumers must
       // prove their use before treating those values as query structure.
       const actual=read(field);
-      const item:ApexValue=request.query.singletonLimit&&actual===null?{kind:"null"}:scalar(actual);
+      const item:ApexValue=(request.query.singletonLimit||request.selectorCandidates)&&actual===null?{kind:"null"}:scalar(actual);
       if(item.kind==="unknown")return unknown("Custom Metadata "+request.type+" selected field "+field+" is null or unsupported.");
-      if(!request.query.singletonLimit&&/(?:^|_)Field__c$/i.test(field)){
+      if(!request.query.singletonLimit&&!request.selectorCandidates&&/(?:^|_)Field__c$/i.test(field)){
         const value=single(item);
         if(!value||!/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/.test(value))
           return unknown("Custom Metadata "+request.type+" field path "+field+" is invalid.");

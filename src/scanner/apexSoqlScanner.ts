@@ -4,23 +4,26 @@ import {
   stat,
 } from "node:fs/promises";
 import path from "node:path";
+import { isExcludedRepositoryDirectory } from "./repositoryDiscoveryPolicy.js";
 import {setImmediate as yieldToEventLoop} from "node:timers/promises";
 import { classifySoqlMode } from "../analyzer/soqlExecutionMode.js";
 import { parseNestedSoql, maskSoql } from "../analyzer/nestedSoqlScopes.js";
 import { extractDynamicSoqlQueries, type UnresolvedDynamicSoql } from "./dynamicSoqlScanner.js";
+import {emitSoqlTraceReports} from "../analyzer/soqlTraceDiagnostics.js";
 import type {ApexValue} from "../core/apex/ApexValueEvaluator.js";
 import {ApexAnalysisEngine} from "../core/apex/ApexAnalysisEngine.js";
 import { ApexRepositoryMethodIndex } from "../core/apex/ApexRepositoryMethodIndex.js";
 import { maskApexSource } from "../core/apex/ApexSourceModel.js";
 import type { ApexMetadataProvider } from "../core/metadata/ApexMetadataProvider.js";
+import {ApexMetadataCapture} from "../core/metadata/ApexMetadataSnapshot.js";
 
 import type { SoqlQuery } from "../models/SoqlQuery.js";
 import { recordSoqlCount, timeSoqlPhase, timeSoqlSync } from "../services/SoqlPerformanceMetrics.js";
 
  
 /**
- * Preserve the original repository-wide semantics (including class exclusion
- * and source ordering) while avoiding repeated Apex parsing across personas.
+ * Preserve repository-wide application-source discovery, test exclusion
+ * and source ordering while avoiding repeated Apex parsing across personas.
  * Every call stats every discovered class, so changed, deleted and newly added
  * files invalidate the cached per-file parse without a stale global TTL.
  */
@@ -70,7 +73,11 @@ export async function scanApexSoqlWithUnresolved(
   repositoryPath: string, metadata?: ApexMetadataProvider, onProgress?:ScanProgress,
 ): Promise<SoqlScanInventory> {
   const root = path.resolve(repositoryPath);
-  const cacheKey = root + "|" + (metadata?.scopeKey ?? "REPOSITORY_ONLY");
+  const traceEnabled=process.env.SALESFORCE_SOQL_TRACE==="1";
+  // Capture is explicit and local. Never enable it for offline replay.
+  const capture=process.env.SALESFORCE_APEX_METADATA_CAPTURE==="1"&&metadata&&!metadata.scopeKey.startsWith("OFFLINE_REPLAY:")
+    ?new ApexMetadataCapture(metadata):undefined;
+  const cacheKey = root + "|" + (metadata?.scopeKey ?? "REPOSITORY_ONLY")+(traceEnabled?"|TRACE":"")+(capture?"|CAPTURE":"");
   const pending = inFlightScans.get(cacheKey);
   if (pending) {
     recordSoqlCount("scanner.inflight_reuse");
@@ -80,9 +87,17 @@ export async function scanApexSoqlWithUnresolved(
   const listeners=new Set<ScanProgress>();
   if(onProgress)listeners.add(onProgress);
   const job:PendingScan={work:Promise.resolve({queries:[],unresolvedDynamic:[]}),listeners,completed:0,total:0};
-  job.work=scanRepositoryApex(root,cacheKey,metadata,(completed,total)=>{
+  job.work=scanRepositoryApex(root,cacheKey,capture?.provider??metadata,(completed,total)=>{
     job.completed=completed;job.total=total;
     for(const listener of job.listeners)listener(completed,total);
+  },traceEnabled).then(async result=>{
+    if(capture)try{
+      const file=await capture.save(path.resolve(".apex-metadata-snapshots"));
+      console.info("[AUE Metadata Capture] Saved local snapshot: "+file);
+    }catch{
+      console.warn("[AUE Metadata Capture] Snapshot not saved (unsupported data, conflict, limit or file error). Analysis results unchanged.");
+    }
+    return result;
   });
   inFlightScans.set(cacheKey,job);
   try{return await job.work;}
@@ -99,19 +114,20 @@ function preserveDynamicFailureDiagnostics(
   analysis:ReturnType<typeof extractDynamicSoqlQueries>,
   standaloneResolver?: (name:string,args:ApexValue[])=>ApexValue|undefined,
 ):ReturnType<typeof extractDynamicSoqlQueries> {
-  if(!analysis.unresolved.some(finding=>
-    /Invocation is outside a supported method or execution path/i.test(finding.reason)))
+  if(!analysis.unresolved.some(finding=>finding.failureKind==="NO_CAPTURE"))
     return analysis;
   const local=extractDynamicSoqlQueries(source,filePath,standaloneResolver);
-  const localReasons=new Map(local.unresolved.map(finding=>[finding.siteId,finding.reason]));
+  const localReasons=new Map(local.unresolved.map(finding=>[finding.siteId,finding]));
   return {...analysis,unresolved:analysis.unresolved.map(finding=>{
-    if(!/Invocation is outside a supported method or execution path/i.test(finding.reason))
+    if(finding.securityModeConflict||finding.failureKind!=="NO_CAPTURE")
       return finding;
     const original=localReasons.get(finding.siteId);
-    if(!original || /Invocation is outside a supported method or execution path/i.test(original))
+    if(!original || original.failureKind==="NO_CAPTURE")
       return finding;
-    return {...finding,reason:"Repository caller execution path not established; "+
-      "source-local dependency: "+original};
+    // Keep the repository-aware dependency explanation when the existing
+    // diagnostic-only fallback supplies a more useful forward reason.
+    return {...finding,reason:(finding.backwardExplanation?finding.backwardExplanation+" ":"")+
+      "Could not follow the repository caller; analysis of this class: "+original.reason};
   })};
 }
 
@@ -120,7 +136,7 @@ function preserveDynamicFailureDiagnostics(
 
 
 async function scanRepositoryApex(
-  repositoryPath: string, cacheKey: string, metadata?: ApexMetadataProvider, onProgress?:ScanProgress,
+  repositoryPath: string, cacheKey: string, metadata?: ApexMetadataProvider, onProgress?:ScanProgress,traceEnabled=false,
 ): Promise<SoqlScanInventory> {
   const apexFiles = await timeSoqlPhase("scanner.discovery", () => findApexClasses(repositoryPath));
   apexFiles.sort((a, b) => a.localeCompare(b));
@@ -175,7 +191,7 @@ async function scanRepositoryApex(
         :extractSoqlQueries(entry.source,entry.filePath);
       const dynamic=hasDynamicCall?await engine.analyze(entry.filePath,context=>
         preserveDynamicFailureDiagnostics(entry.source,entry.filePath,
-          extractDynamicSoqlQueries(entry.source,entry.filePath,context.resolveExternal,context.repositoryIndex),
+          extractDynamicSoqlQueries(entry.source,entry.filePath,context.resolveExternal,context.repositoryIndex,traceEnabled),
           context.resolveLocal)):{queries:[],unresolved:[]};
       if(!hasDynamicCall)recordSoqlCount("scanner.static_only_files");
       await finishFile();
@@ -203,11 +219,9 @@ async function scanRepositoryApex(
     queries.push(...entry.queries);
     unresolvedDynamic.push(...entry.unresolvedDynamic);
   }
-  return {
-    queries:queries.sort((a,b)=>a.filePath.localeCompare(b.filePath)||a.lineNumber-b.lineNumber),
-    unresolvedDynamic:unresolvedDynamic.sort((a,b)=>
-      a.filePath.localeCompare(b.filePath)||a.lineNumber-b.lineNumber),
-  };
+  const sorted=unresolvedDynamic.sort((a,b)=>a.filePath.localeCompare(b.filePath)||a.lineNumber-b.lineNumber);
+  if(traceEnabled)emitSoqlTraceReports(sorted);
+  return {queries:queries.sort((a,b)=>a.filePath.localeCompare(b.filePath)||a.lineNumber-b.lineNumber),unresolvedDynamic:sorted};
 }
 
 /**
@@ -227,9 +241,10 @@ async function findApexClasses(repositoryPath: string): Promise<string[]> {
     }));
     for (const { directoryPath, entries } of listed) {
       for (const entry of entries) {
+        if (entry.isSymbolicLink()) continue;
         const fullPath = path.join(directoryPath, entry.name);
         if (entry.isDirectory()) {
-          directories.push(fullPath);
+          if (!isExcludedRepositoryDirectory(entry.name)) directories.push(fullPath);
         } else if (entry.isFile() && entry.name.toLowerCase().endsWith(".cls") &&
                    !entry.name.toLowerCase().includes("test")) {
           results.push(fullPath);

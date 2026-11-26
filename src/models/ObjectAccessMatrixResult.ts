@@ -1,34 +1,14 @@
-import type { PermissionSource } from "../analyzer/permissionAggregator.js";
 import type { ObjectReadDecision } from "../services/OrgObjectReadVerificationService.js";
 import type { ObjectPermissionEvidence } from "../services/OrgPermissionFallbackService.js";
 
-export const MATRIX_PERMISSION_KEYS = [
-  "read",
-  "create",
-  "edit",
-  "delete",
-  "viewAllRecords",
-  "modifyAllRecords",
-  "viewAllFields",
-] as const;
-
-export type MatrixPermission = (typeof MATRIX_PERMISSION_KEYS)[number];
-
-export type MatrixAccess = Record<MatrixPermission, boolean>;
-
-export interface MutedPermissionSource {
-  permissionSetGroup: string;
-  mutingPermissionSet: string;
-  /** Granting permission sets suppressed by this group's mute. */
-  affectedPermissionSets: string[];
-}
-
-export interface MatrixPermissionSources {
-  /** Effective contributing permission sets, AFTER group-scoped muting. */
-  grantedBy: PermissionSource[];
-  /** Relevant group-scoped mutes, even if other grants restore access. */
-  mutedBy: MutedPermissionSource[];
-}
+import type { ObjectPermissionKey, ObjectPrivilegeAccess, ObjectPermissionSources } from "./ObjectPrivilegeAccess.js";
+// Preserve the existing matrix/API names as aliases of the shared contract.
+export { OBJECT_PERMISSION_KEYS as MATRIX_PERMISSION_KEYS } from "./ObjectPrivilegeAccess.js";
+export type { ObjectPermissionKey as MatrixPermission, ObjectPrivilegeAccess as MatrixAccess,
+  ObjectPermissionSources as MatrixPermissionSources, MutedPermissionSource } from "./ObjectPrivilegeAccess.js";
+type MatrixPermission=ObjectPermissionKey;
+type MatrixAccess=ObjectPrivilegeAccess;
+type MatrixPermissionSources=ObjectPermissionSources;
 
 export interface ObjectAccessMatrixPersona {
   readEvidence?: ObjectReadDecision;

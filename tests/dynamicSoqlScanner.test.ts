@@ -268,3 +268,19 @@ test("Stage 3 final: unsupported collection mutation cannot preserve stale field
   assert.equal(result.unresolved.length,1);
   assert.match(result.unresolved[0].reason,/unsupported mutation/i);
 });
+
+
+test("explicit conflicting security declarations are review evidence, not a permission variant",()=>{
+  const source="public class Service {public static void run(){String q='SELECT Id, Name FROM Account WITH SECURITY_ENFORCED';Database.queryWithBinds(q,new Map<String,Object>(),AccessLevel.SYSTEM_MODE);}}";
+  const result=extractDynamicSoqlQueries(source,"Service.cls");
+  assert.equal(result.queries.length,0);
+  assert.equal(result.unresolved.length,1);
+  assert.equal(result.unresolved[0].securityModeConflict,true);
+  assert.match(result.unresolved[0].reason,/WITH SECURITY_ENFORCED/);
+  assert.match(result.unresolved[0].reason,/AccessLevel\.SYSTEM_MODE/);
+  assert.match(result.unresolved[0].reason,/REVIEW.*Security-mode conflict/);
+  const matching=source.replace("WITH SECURITY_ENFORCED","WITH SYSTEM_MODE");
+  const accepted=extractDynamicSoqlQueries(matching,"Service.cls");
+  assert.equal(accepted.queries.length,1);
+  assert.equal(accepted.unresolved.length,0);
+});

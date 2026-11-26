@@ -121,10 +121,12 @@ export class SoqlSecurityAnalyzer {
     // Version lookup is cached per class, so hundreds of queries do not trigger
     // hundreds of metadata reads. The same resolver serves Stack Trace analysis.
     const modeResults = await timeSoqlPhase("execution.modes", () => Promise.all(queries.map((query) =>
-      this.executionModeResolver.resolve(query.query, query.filePath).then(mode =>
-        query.dynamicAccessLevel && mode.declaredMode === "UNSPECIFIED"
-          ? resolveSoqlExecutionMode(query.dynamicAccessLevel, mode.apiVersion)
-          : mode)
+      this.executionModeResolver.resolve(query.query, query.filePath).then((mode):SoqlExecutionMode =>
+        query.selectPrefixOnly
+          ? {...mode, declaredMode:query.dynamicAccessLevel??"UNSPECIFIED", effectiveMode:"UNKNOWN" as const, enforcement:"UNKNOWN" as const, description:"Known query references only; runtime query text and effective enforcement remain unverified."}
+          : query.dynamicAccessLevel && mode.declaredMode === "UNSPECIFIED"
+            ? resolveSoqlExecutionMode(query.dynamicAccessLevel, mode.apiVersion)
+            : mode)
     )));
     return { queries, inventory, unresolvedFields, parserLimitations, modeResults };
   }
@@ -162,12 +164,12 @@ export class SoqlSecurityAnalyzer {
     ): SoqlSecurityFinding[] {
       const subject = type === "OBJECT_READ" ? `Object ${object}` : `Field ${object}.${field}`;
       const detail = decision.deniedCompoundParent
-        ? `${subject}: Salesforce confirmed missing Read on compound parent ${object}.${decision.deniedCompoundParent}. The requested address/location component had no conclusive direct UserFieldAccess decision; this finding is attributed to the denied parent, not an independently proven component denial.`
+        ? `${subject}: Salesforce confirmed missing Read on compound parent ${object}.${decision.deniedCompoundParent}. Direct UserFieldAccess for the address/location component was unclear. This finding applies to the parent field only.`
         : decision.source === "ORG_VERIFIED"
-        ? `${subject}: Read permission wasn't established in repository metadata, but Salesforce confirmed access.${decision.message.includes("via compound parent") ? " " + decision.message : ""}`
+        ? `${subject}: Read access was not found in the repository, but Salesforce confirmed access.${decision.message.includes("via compound parent") ? " " + decision.message : ""}`
         : decision.source === "ORG_DENIED"
-          ? `${subject}: Repository metadata did not establish Read access; Salesforce confirmed it is missing for the selected user.`
-          : `${subject}: Read permission wasn't established in repository metadata, and Salesforce couldn't verify access.`;
+          ? `${subject}: Read access was not found in the repository. Salesforce confirmed it is missing for the selected user.`
+          : `${subject}: Read access was not found in the repository, and Salesforce couldn't verify access.`;
       return refs.map((ref) => {
         const parentLine = ref.queryLineNumber ?? ref.lineNumber;
         const queryDetails = queryInfo(ref.filePath, parentLine, ref.queryVariantId);
@@ -182,8 +184,8 @@ export class SoqlSecurityAnalyzer {
         const outcome = findingOutcome(decision.source, scopedExecution);
         const advisory = decision.source === "ORG_DENIED" && outcome.criticality === "Low"
           ? execution?.enforcement === "NONE"
-            ? " This SOQL query runs in system mode, so it does not enforce the user's Read permission. Review potential data exposure in application logic."
-            : " User-level Read access is missing, but query enforcement could not be confirmed; review the Apex execution mode."
+            ? " This query runs in system mode and does not enforce the user's Read permission. Review whether the application could expose restricted data."
+            : " User Read access is missing. Check the Apex execution mode to determine if the query enforces it."
           : "";
         return {
           ...outcome, findingType: type, filePath: ref.filePath, lineNumber: ref.lineNumber,
@@ -196,9 +198,9 @@ export class SoqlSecurityAnalyzer {
             : "Undetermined" as const,
           // Preserve diagnostic details for inconclusive checks without repeating confirmed denials.
           reason: `${detail}${decision.source === "UNVERIFIED" ? ` ${decision.message}` : ""}${advisory}${unenforcedClause
-            ? " This field is referenced outside SELECT; legacy SECURITY_ENFORCED does not establish enforcement for this clause."
+            ? " This field is used outside SELECT. Legacy SECURITY_ENFORCED does not confirm permission checks for this clause."
             : ""}${ref.functionName
-            ? ` Field is referenced by ${ref.functionName}() in ${ref.usageContext ?? "SELECT"}.`
+            ? ` Field is used by ${ref.functionName}() in ${ref.usageContext ?? "SELECT"}.`
             : ""}`.trim(),
         };
       });
@@ -317,8 +319,8 @@ export class SoqlSecurityAnalyzer {
         } : {}),
         runtimeImpact: "Not assessed",
         reason: unresolved.kind === "RELATIONSHIP"
-          ? `Unable to resolve child relationship ${unresolved.baseObject}.${unresolved.fieldPath}; access was not assessed.`
-          : `Could not resolve ${unresolved.baseObject}.${unresolved.fieldPath} from relationship metadata. Field access wasn't assessed.`,
+          ? `Could not resolve child relationship ${unresolved.baseObject}.${unresolved.fieldPath}; permissions were not checked.`
+          : `Could not resolve ${unresolved.baseObject}.${unresolved.fieldPath} using relationship metadata. Field permissions were not checked.`,
       });
     }
     // A parser/semantic limitation is a review finding, not a missing FLS
@@ -335,7 +337,7 @@ export class SoqlSecurityAnalyzer {
         object: query.object, field: "(SOQL syntax review)",
         ...queryInfo(query.filePath, query.lineNumber, query.queryVariantId),
         runtimeImpact: "Not assessed",
-        reason: `SOQL field extraction was incomplete: ${message} No access decision was inferred from this expression.`,
+        reason: `Could not identify all fields in the SOQL: ${message} Permissions for this expression were not checked.`,
       });
     }
     // API 67.0+ rejects WITH SECURITY_ENFORCED at compile time, regardless
@@ -353,15 +355,39 @@ export class SoqlSecurityAnalyzer {
         reason: mode.description,
       });
     });
+    // A proven schema-filtered SELECT inventory has a coverage advisory,
+    // not a fabricated permission decision. Unknown/invalid execution modes
+    // still require REVIEW. The usual object/field permission findings stand.
+    queries.forEach((query,index)=>{
+      if(!query.runtimeFieldCoverage)return;
+      const mode=modeResults[index];
+      const known=mode.enforcement!=="UNKNOWN"&&mode.enforcement!=="INVALID";
+      findings.push({
+        severity:known?"INFO":"REVIEW",criticality:known?"Low":"Unable to verify",
+        verificationSource:"UNVERIFIED",findingType:known?"PARSER":"QUERY_MODE",
+        filePath:query.filePath,lineNumber:query.lineNumber,object:query.object,
+        field:"(Runtime-dependent additional fields)",
+        ...queryInfo(query.filePath,query.lineNumber,query.queryVariantId),
+        ...(query.queryVariantId?{queryVariantId:query.queryVariantId}:{}),
+        runtimeImpact:"Not assessed",
+        reason:"Known fields were included in OLS/FLS analysis. Additional runtime-dependent fields are limited to the object's schema but remain outside verified coverage. "+mode.description,
+      });
+    });
     // Tag every finding from a partial caller variant (including relationship
     // and parser diagnostics). The distinct site-level REVIEW remains.
     for(const finding of findings){
       const variant=finding.queryVariantId;
       const coverage=variant?queryByLocation.get(variant)?.query.coverage:undefined;
-      if(coverage==="KNOWN_CALLER_CONTEXT")
-        finding.reason += " Coverage: known repository caller variant only; other execution contexts remain unverified.";
-      if(coverage==="PROVEN_PARTIAL_STRUCTURE")
-        finding.reason += " Coverage: proven partial SOQL structure only; numeric placeholders are synthetic, not runtime values. Other execution contexts remain unverified.";
+      if(variant&&queryByLocation.get(variant)?.query.runtimeFieldCoverage){
+        if(finding.field!=="(Runtime-dependent additional fields)")finding.reason += " Additional runtime fields unverified.";
+      }else if(variant&&queryByLocation.get(variant)?.query.referenceCoverage==="COMPLETE_FINITE_DOMAIN")
+        finding.reason += " All source-defined permission references are included; the runtime query may vary.";
+      else if(coverage==="KNOWN_CALLER_CONTEXT")
+        finding.reason += " Other callers unverified.";
+      else if(coverage==="CONDITIONAL_FRAMEWORK_CONTEXT")
+        finding.reason += " Actual job state unverified.";
+      else if(coverage==="PROVEN_PARTIAL_STRUCTURE")
+        finding.reason += " Partial query coverage only.";
     }
     return findings;
   }

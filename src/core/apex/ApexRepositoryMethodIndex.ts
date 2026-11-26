@@ -1,15 +1,22 @@
+import {isLiteralMapFactory} from "./ApexPureFactory.js";
+import {evaluateConstructorFieldList} from "./ApexConstructorUtility.js";
+import {supportsReceiverPrefix,receiverMapSamples,supportsInitialBatchExecute} from "./ApexFrameworkReceiver.js";
+import {outerApexClass} from "./ApexClassModel.js";
 import path from "node:path";
 import {countApex,timeApex} from "./ApexPerformance.js";
+import {apexSymbols} from "./ApexSymbolTable.js";
+import {canonicalApexType,selectApexOverload,type ApexArgumentTypes,type ApexCallResolver} from "./ApexTypeSystem.js";
 import { ApexDataFlowEngine } from "./ApexDataFlowEngine.js";
 import {memberEffectModel} from "./ApexMemberEffectModel.js";
 import { ApexRepositorySyntaxInventory, maskApexSource, matchingPair, splitApexTopLevel,
   type IndexedApexMethod } from "./ApexSourceModel.js";
-import { unknown, type ApexValue } from "./ApexValueEvaluator.js";
+import { unknown, runtimeParameter, type ApexValue } from "./ApexValueEvaluator.js";
 import {ApexInstanceIndex} from "./ApexInstanceModel.js";
 import { ApexStaticValueIndex } from "./ApexStaticValueIndex.js";
 import {discoverApexInvocations} from "./ApexInvocationModel.js";
 import {apexStateIdentity} from "./ApexStateIdentity.js";
 import {invocationRelevantIdentifiers} from "./ApexDependencySlice.js";
+import {hasIncomingArgumentEvidence,isDirectPrivateInstanceCall} from "./ApexCallerArgumentEvidence.js";
 
 /** Shared repository evidence, independent of SOQL and persona permissions. */
 export interface ApexRepositorySource {
@@ -29,6 +36,18 @@ interface Caller {
   method: IndexedApexMethod;
   offset: number;
   expressions: string[];
+  targetStart?:number;
+  /** Proven argument-only same-receiver edge, never a receiver snapshot. */
+  privateInstanceEdge?:boolean;
+}
+/** Immutable source edge for consumers doing dependency analysis rather than execution. */
+export interface ApexCallerSource {
+  filePath:string;
+  source:string;
+  methods:readonly IndexedApexMethod[];
+  method:IndexedApexMethod;
+  offset:number;
+  expressions:readonly string[];
 }
 export interface ApexCallerContexts {
   readonly known:ApexValue[][];
@@ -89,9 +108,39 @@ export function selectApexCallerSeeds(seeds:readonly ApexValue[][],parameters:re
   }
   return selected;
 }
+/** Preserve the established ranking and use only spare invocation seed slots
+ * for fragment-only evidence. Never normalize away the actual argument values
+ * or widen the caller budget to accommodate the supplementary category. */
+export function selectApexInvocationSeeds(seeds:readonly ApexValue[][],parameters:readonly string[],
+  relevant:ReadonlySet<string>,limit:number):ApexValue[][]{
+  const established=seeds.filter(seed=>seed.some(v=>v.kind!=="unknown"));
+  const fragmentOnly=seeds.filter(seed=>seed.every(v=>v.kind==="unknown"));
+  const selected=selectApexCallerSeeds(established,parameters,relevant,limit);
+  selected.push(...selectApexCallerSeeds(fragmentOnly,parameters,relevant,limit-selected.length));
+  return selected;
+}
 const MAX_METHOD_DEPTH = 6;
 const MAX_CALL_CONTEXTS = 64;
 const MAX_CACHED_SUMMARIES = 1024;
+const MAX_RECEIVER_SNAPSHOTS = 32;
+const BASE_RECEIVER_KEY_LIMIT = 32;
+const BASE_RECEIVER_SAMPLE_LIMIT = 40;
+const MAX_EXTRA_RECEIVER_SAMPLES = 32;
+type BatchReceiver = Extract<ApexValue,{kind:"instance"}>;
+interface ReceiverCallEdge {caller:IndexedApexMethod;target:IndexedApexMethod;offset:number;expressions:string[]}
+type ReceiverPath={entry:IndexedApexMethod;edges:ReceiverCallEdge[]};
+interface LifecycleReceiverEvidence {
+  arguments:ApexValue[][];
+  scenarios:number;
+  bounded:boolean;
+  diagnostics:string[];
+}
+interface BatchReceiverInventory {
+  count:number;
+  bounded:boolean;
+  candidates:Array<{value:BatchReceiver;hypothetical:boolean}>;
+  constructorFailures:string[];
+}
 
 /**
  * Immutable, repository-scoped class/method/caller index.
@@ -116,6 +165,9 @@ export class ApexRepositoryMethodIndex {
   private readonly active=new Set<string>();
   private readonly summaries=new Map<string,ApexValue>();
   private readonly argumentProbes=new Map<string,ApexValue[][]>();
+  private readonly batchReceiverInventories=new Map<string,BatchReceiverInventory>();
+  // Syntax-only paths; no receiver values or resolver-dependent evidence.
+  private readonly lifecyclePaths=new Map<string,ReceiverPath[]>();
   private readonly scopes=new WeakMap<Function,number>();
   private nextScope=1;
 
@@ -148,11 +200,12 @@ export class ApexRepositoryMethodIndex {
           /^Database\.executeBatch$/i.test(name)&&args.length>=1&&args.length<=2?{method:name,argumentIndices:[0]}:undefined);
         for(const site of calls){
           const allocation=/^\s*new\s+([A-Za-z_]\w*)\s*\(/i.exec(site.argument);
-          if(!allocation)continue;
           const method=owner.methods.filter(m=>m.start<=site.offset&&site.offset<m.end)
             .sort((a,b)=>(a.end-a.start)-(b.end-b.start))[0];
           if(!method)continue;
-          const key=allocation[1].toLowerCase();
+          const type=allocation?.[1]??apexSymbols(owner.source,owner.methods).expressionType(method,site.argument,site.offset);
+          if(!type||!/^[A-Za-z_]\w*$/.test(type))continue;
+          const key=type.toLowerCase();
           const candidates=this.batchAllocations.get(key)??[];
           if(candidates.length<=MAX_CALL_CONTEXTS)candidates.push({caller:owner,method,offset:site.offset,expressions:[site.argument]});
           this.batchAllocations.set(key,candidates);
@@ -191,26 +244,118 @@ export class ApexRepositoryMethodIndex {
         const args=expressions?splitApexTopLevel(expressions,","):[];
         const key=this.methodKey(candidate[0].className,name,args.length);
         const targets=this.findMethods(candidate[0].className,name,args.length);
-        if(targets.length!==1)continue;
+        if(!targets.length)continue;
+        const chosen=selectApexOverload(targets.map(t=>t.method),args.length,targets.length>1?apexSymbols(owner.source,owner.methods).argumentTypes(sourceMethods[0],args,match.index):undefined);
         const callers=this.callers.get(key)??[];
-        callers.push({caller:owner,method:sourceMethods[0],offset:match.index,expressions:args});
+        const privateInstanceEdge=!!chosen&&!chosen.isStatic&&chosen.visibility==="private"&&candidate[0]===owner&&
+          apexSymbols(owner.source,owner.methods).sameOwner(sourceMethods[0],chosen)&&
+          isDirectPrivateInstanceCall(owner.source,sourceMethods[0],match.index,receiver,args);
+        callers.push({caller:owner,method:sourceMethods[0],offset:match.index,expressions:args,targetStart:chosen?.start,privateInstanceEdge});
         this.callers.set(key,callers);
       }
     }
     syntax.clear();
   }
 
+  /** Reuse the existing overload/receiver proof. This API exposes syntax,
+   * not evaluated arguments, and does not change engine selection or budgets. */
+  sourceCallers(filePath:string,target:IndexedApexMethod,observe?:(stats:{status:"CALLER_INDEX_MISSING"|"CALLER_INDEX_LIMIT"|"CALLER_INDEX_CANDIDATES";candidates:number;eligible:number})=>void):readonly ApexCallerSource[]{
+    const owner=this.paths.get(path.resolve(filePath));
+    if(!owner||!owner.methods.includes(target)){observe?.({status:"CALLER_INDEX_MISSING",candidates:0,eligible:0});return [];}
+    const candidates=this.callers.get(this.methodKey(owner.className,target.name,target.parameters.length))??[];
+    if(candidates.length>MAX_CALL_CONTEXTS){observe?.({status:"CALLER_INDEX_LIMIT",candidates:candidates.length,eligible:0});return [];}
+    const direct=(call:Caller):boolean=>{
+      const at=(nodes:readonly import("./ApexSourceModel.js").SourceNode[]):import("./ApexSourceModel.js").SourceNode|undefined=>{
+        for(const n of nodes){
+          if(n.start>call.offset||call.offset>=n.end)continue;
+          if(n.kind==="statement")return n;
+          if(n.kind!=="if"&&n.kind!=="block")return undefined;
+          // Do not admit a call in a condition/header. Earlier operands may
+          // short-circuit or mutate arguments before this invocation.
+          if(n.kind==="if"&&/^false$/i.test((n.condition??"").trim())&&n.body?.some(c=>c.start<=call.offset&&call.offset<c.end))return undefined;
+          if(n.kind==="if"&&/^true$/i.test((n.condition??"").trim())&&n.otherwise?.some(c=>c.start<=call.offset&&call.offset<c.end))return undefined;
+          return at(n.body??[])??at(n.otherwise??[]);
+        }
+        return undefined;
+      };
+      const node=at(call.method.body);
+      if(!node)return false;
+      const text=maskApexSource(call.caller.source.slice(node.start,node.end));
+      const relative=call.offset-node.start,open=text.indexOf("(",relative);
+      if(open<0)return false;
+      const prefix=text.slice(0,relative);
+      const ordinary=/^\s*(?:return\s+|(?:[\w\s<>,.\[\]]+\s+)?[A-Za-z_]\w*\s*=\s*)?$/i.test(prefix);
+      if(!ordinary){
+        // A direct RHS of a local member assignment needs no receiver
+        // chain or earlier call. Only private same-owner static targets
+        // with read-only arguments. Candidate, not exhaustive coverage.
+        const member=/^\s*([A-Za-z_]\w*)\s*\.\s*[A-Za-z_]\w*\s*=\s*$/.exec(prefix);
+        const symbols=apexSymbols(call.caller.source,call.caller.methods);
+        if(!member||!target.isStatic||target.visibility!=="private"||call.caller!==owner||
+          !symbols.sameOwner(call.method,target)||
+          !symbols.hasLocalBinding(call.method,member[1],call.offset)||
+          !symbols.lookup(call.method,member[1],call.offset))return false;
+        if(call.expressions.some(raw=>{
+          const expr=raw.trim();
+          if(/^(?:'(?:\\.|[^'\\])*'|[-+]?\d+(?:\.\d+)?|true|false|null)$/i.test(expr))return false;
+          if(/^[A-Za-z_]\w*$/.test(expr))return !symbols.hasLocalBinding(call.method,expr,call.offset);
+          const field=/^([A-Za-z_]\w*)\s*\.\s*[A-Za-z_]\w*$/.exec(expr);
+          return !field||!symbols.hasLocalBinding(call.method,field[1],call.offset)||
+            !symbols.lookup(call.method,field[1],call.offset)?.endsWith("__mdt");
+        }))return false;
+      }
+      const close=matchingPair(text,open);
+      return close>=0&&/^\s*;\s*$/.test(text.slice(close+1));
+    };
+    const eligible=candidates.filter(call=>call.targetStart===target.start&&
+      (target.isStatic||call.privateInstanceEdge)&&
+      (call.caller===owner||target.visibility==="public"||target.visibility==="global")&&direct(call))
+      .map(call=>({filePath:call.caller.filePath,source:call.caller.source,methods:call.caller.methods,
+        method:call.method,offset:call.offset,expressions:[...call.expressions]}));
+    observe?.({status:"CALLER_INDEX_CANDIDATES",candidates:candidates.length,eligible:eligible.length});
+    return eligible;
+  }
+
+  /** Used by conservative platform-operation proofs. */
+  hasSourceClass(name:string):boolean{return this.classes.has(name.toLowerCase());}
+
   indexedMethods(filePath:string,source:string):IndexedApexMethod[]|undefined{
     const owner=this.paths.get(path.resolve(filePath));
     return owner?.source===source?owner.methods:undefined;
   }
 
-  constructInstance(filePath:string,name:string,args:ApexValue[],resolveExternal?: (name:string,args:ApexValue[])=>ApexValue|undefined):ApexValue|undefined{
-    return this.instances.construct(name,args,filePath,resolveExternal);
+  constructInstance(filePath:string,name:string,args:ApexValue[],resolveExternal?: ApexCallResolver,types?:ApexArgumentTypes,normalScenario=false):ApexValue|undefined{
+    const resolver:ApexCallResolver=(method,inputs,hints)=>{
+      if(method==="Apex.constructorUtility"&&inputs[0]?.kind==="text"&&inputs[0].values.length===1){
+        const qualified=inputs[0].values[0],match=/^([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/.exec(qualified);
+        if(!match||["schema","list","string"].some(platform=>this.classes.has(platform)))return undefined;
+        const owners=this.classes.get(match[1].toLowerCase());
+        if(owners?.length!==1||outerApexClass(owners[0].source)?.parent)return undefined;
+        const methods=this.findMethods(match[1],match[2],inputs.length-1);
+        const chosen=selectApexOverload(methods.map(m=>m.method),inputs.length-1,hints?.slice(1));
+        if(!chosen)return undefined;
+        const symbols=apexSymbols(owners[0].source,owners[0].methods);
+        if(["Schema","List","String"].some(platform=>symbols.lookup(chosen,platform,chosen.start)!==undefined))return undefined;
+        const result=evaluateConstructorFieldList(chosen,inputs.slice(1),resolveExternal);
+        if(result===undefined)countApex("constructor.utility_rejected_source");
+        return result;
+      }
+      if(method==="Apex.constructorFactory"&&inputs[0]?.kind==="text"&&inputs[0].values.length===1){
+        const qualified=inputs[0].values[0];
+        const match=/^([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/.exec(qualified);
+        if(!match)return undefined;
+        const methods=this.findMethods(match[1],match[2],inputs.length-1);
+        if(methods.length!==1||!isLiteralMapFactory(methods[0].method))return undefined;
+        const result=this.evaluateReturn(filePath,qualified,inputs.slice(1),resolveExternal,hints?.slice(1));
+        return result?.kind==="map"?result:undefined;
+      }
+      return resolveExternal?.(method,inputs,hints);
+    };
+    return this.instances.construct(name,args,filePath,resolver,types,normalScenario);
   }
 
   /** Source-backed scalar initializers; unresolved/mutable values fail closed. */
-  evaluateConstant(name:string,metadata?: (name:string,args:ApexValue[])=>ApexValue|undefined):ApexValue|undefined {
+  evaluateConstant(name:string,metadata?: ApexCallResolver):ApexValue|undefined {
     const cls=name.split(".")[0];
     if(!this.staticValues.hasClass(cls) && /^[a-z]/.test(cls))return undefined;
     return this.staticValues.resolve(name,metadata);
@@ -223,7 +368,7 @@ export class ApexRepositoryMethodIndex {
 
   /** Resolve an unqualified static/instance member using its actual owner. */
   evaluateScopeField(owner:string,field:string,mode:"this"|"unqualified",
-    inStaticMethod:boolean,metadata?: (name:string,args:ApexValue[])=>ApexValue|undefined):ApexValue|undefined {
+    inStaticMethod:boolean,metadata?: ApexCallResolver):ApexValue|undefined {
     if(!this.staticValues.hasClass(owner))return undefined;
     if(mode==="this"){
       return inStaticMethod?unknown("Cannot read this."+field+" inside a static method."):
@@ -237,10 +382,10 @@ export class ApexRepositoryMethodIndex {
   }
 
   private findMethods(cls:string,name:string,arity:number):IndexedMethod[] {
-    return this.methodsByKey.get(this.methodKey(cls,name,arity))??[];
+    return (this.methodsByKey.get(this.methodKey(cls,name,arity))??[]).filter(entry=>apexSymbols(entry.owner.source,entry.owner.methods).ownerAt(entry.method.start)?.toLowerCase()===cls.toLowerCase());
   }
 
-  private scopeId(resolveExternal?: (name:string,args:ApexValue[])=>ApexValue|undefined):number {
+  private scopeId(resolveExternal?: ApexCallResolver):number {
     if(!resolveExternal)return 0;
     const previous=this.scopes.get(resolveExternal);
     if(previous)return previous;
@@ -254,15 +399,17 @@ export class ApexRepositoryMethodIndex {
    * declared body, parameters and all feasible return values are proven.
    */
   evaluateReturn(fromFilePath:string,name:string,args:ApexValue[],
-    resolveExternal?: (name:string,args:ApexValue[])=>ApexValue|undefined):ApexValue|undefined {
+    resolveExternal?: ApexCallResolver,types?:ApexArgumentTypes):ApexValue|undefined {
     const match=/^([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/.exec(name.trim());
     if(!match)return undefined;
     const [,cls,methodName]=match;
     const owners=this.classes.get(cls.toLowerCase());
     if(!owners)return undefined;
     const matches=this.findMethods(cls,methodName,args.length);
-    if(matches.length!==1)return unknown("Ambiguous or missing indexed Apex method: "+name);
-    const {owner,method}=matches[0];
+    const chosen=selectApexOverload(matches.map(m=>m.method),args.length,types);
+    const selected=matches.find(m=>m.method===chosen);
+    if(!selected||owners.length!==1)return unknown("Ambiguous or missing indexed Apex method: "+name);
+    const {owner,method}=selected;
     const crossClass=path.resolve(fromFilePath)!==path.resolve(owner.filePath);
     if(crossClass && (method.visibility==="private" || method.visibility==="unspecified"))
       return unknown("Cross-class Apex method is not provably accessible: "+name);
@@ -280,10 +427,20 @@ export class ApexRepositoryMethodIndex {
     let result:ApexValue;
     try {
       const engine=new ApexDataFlowEngine(owner.source,{sourceMethods:owner.methods,
-        resolveExternal:(nestedName,nestedArgs)=>resolveExternal?.(nestedName,nestedArgs) ??
-          this.evaluateReturn(owner.filePath,nestedName,nestedArgs,resolveExternal),
+        resolveExternal:(nestedName,nestedArgs,nestedTypes)=>{
+          if(nestedName==="Apex.construct"&&nestedArgs[0]?.kind==="text"&&nestedArgs[0].values.length===1)
+            return this.constructInstance(owner.filePath,nestedArgs[0].values[0],nestedArgs.slice(1),resolveExternal,nestedTypes?.slice(1));
+          return resolveExternal?.(nestedName,nestedArgs,nestedTypes)??this.evaluateReturn(owner.filePath,nestedName,nestedArgs,resolveExternal,nestedTypes);
+        },
       });
       result=timeApex("helper.repository_evaluation_ms",()=>engine.summarizeMethodReturn(method,args));
+      // Reuse the existing source-proven Field Set factory for exact
+      // scalar helper arguments when generic return evaluation is opaque.
+      if(result.kind==="unknown"&&args.every(v=>v.kind==="text"&&v.values.length===1&&!v.scalarType)&&
+        !["Schema","String","List"].some(p=>this.hasSourceClass(p))){
+        const projected=evaluateConstructorFieldList(method,args,resolveExternal);
+        if(projected!==undefined)result=projected;
+      }
       if(result.kind==="instance"||result.kind==="instanceList")result=unknown("Instance-return alias transfer is not yet proven.");
     }finally{this.active.delete(id);}
     if(this.summaries.size>=MAX_CACHED_SUMMARIES)this.summaries.delete(this.summaries.keys().next().value!);
@@ -302,11 +459,13 @@ export class ApexRepositoryMethodIndex {
    * invalidate the entire closure. Never union unknown and known paths.
    */
   resolvePrivateContexts(filePath:string,target:IndexedApexMethod,
-    resolveExternal?: (name:string,args:ApexValue[])=>ApexValue|undefined
+    resolveExternal?: ApexCallResolver
   ):ApexValue[][]|undefined {
     if(target.visibility!=="private")return undefined;
     const owner=this.paths.get(path.resolve(filePath));
     if(!owner || !owner.methods.some(method=>method.start===target.start))return undefined;
+    const symbols=apexSymbols(owner.source,owner.methods);
+    if(symbols.ownerAt(target.start)?.toLowerCase()!==owner.className.toLowerCase())return undefined;
     const cacheKey=owner.filePath+"|"+target.start+"|"+this.scopeId(resolveExternal);
     if(this.privateContexts.has(cacheKey))
       return this.privateContexts.get(cacheKey)??undefined;
@@ -316,7 +475,7 @@ export class ApexRepositoryMethodIndex {
     let proven:ApexValue[][]|undefined;
     try {
       const masked=maskApexSource(owner.source);
-      const pattern=new RegExp("\\b"+target.name+"\\s*\\(","g");
+      const pattern=new RegExp("\\b"+target.name+"\\s*\\(","gi");
       const contexts:ApexValue[][]=[];
       let callCount=0;
       let failed=false;
@@ -338,7 +497,7 @@ export class ApexRepositoryMethodIndex {
         const prior=masked.slice(Math.max(0,match.index-80),match.index);
         if(/\.\s*$/.test(prior)){
           const receiver=/\b([A-Za-z_]\w*)\.\s*$/.exec(prior)?.[1];
-          if(receiver!=="this"&&receiver?.toLowerCase()!==owner.className.toLowerCase()){
+          if(receiver?.toLowerCase()!=="this"&&receiver?.toLowerCase()!==owner.className.toLowerCase()){
             failed=true;break;
           }
         }
@@ -349,9 +508,12 @@ export class ApexRepositoryMethodIndex {
           continue;
         }
         const overloads=owner.methods.filter(method=>
-          method.name.toLowerCase()===target.name.toLowerCase()&&
+          symbols.sameOwner(target,method)&&method.name.toLowerCase()===target.name.toLowerCase()&&
           method.parameters.length===expressions.length);
-        if(overloads.length!==1||containing===target){failed=true;break;}
+        const selected=selectApexOverload(overloads,expressions.length,apexSymbols(owner.source,owner.methods).argumentTypes(containing,expressions,match.index));
+        if(!selected){failed=true;break;}
+        if(selected!==target)continue;
+        if(containing===target){failed=true;break;}
         callCount++;
         const callerContexts=containing.visibility==="private"
           ?this.resolvePrivateContexts(owner.filePath,containing,resolveExternal)
@@ -363,8 +525,8 @@ export class ApexRepositoryMethodIndex {
         const seeds=callerContexts?.length?callerContexts:[undefined];
         for(const seed of seeds){
           const engine=new ApexDataFlowEngine(owner.source,{sourceMethods:owner.methods,
-            resolveExternal:(name,args)=>resolveExternal?.(name,args) ??
-              this.evaluateReturn(owner.filePath,name,args,resolveExternal),
+            resolveExternal:(name,args,types)=>resolveExternal?.(name,args,types) ??
+              this.evaluateReturn(owner.filePath,name,args,resolveExternal,types),
           });
           const values=engine.evaluateArgumentsAt(containing,match.index,expressions,seed);
           if(!values.length || values.some(args=>
@@ -392,27 +554,27 @@ export class ApexRepositoryMethodIndex {
   /** Identify the declaring method of an execution site, without guessing dispatch. */
   methodAt(filePath:string,offset:number):{
     className:string; methodName:string; arity:number;
-    visibility:IndexedApexMethod["visibility"];
+    visibility:IndexedApexMethod["visibility"]; isStatic:boolean;
   }|undefined {
     const source=this.paths.get(path.resolve(filePath));
     if(!source)return undefined;
     const owner=source.methods.filter(method=>method.start<=offset&&offset<method.end)
       .sort((a,b)=>(a.end-a.start)-(b.end-b.start))[0];
     return owner?{className:source.className,methodName:owner.name,
-      arity:owner.parameters.length,visibility:owner.visibility}:undefined;
+      arity:owner.parameters.length,visibility:owner.visibility,isStatic:owner.isStatic===true}:undefined;
   }
 
   /** Reuse complete scalar argument probes only in the same resolver scope.
    * No mutable reference results, failed probes or cross-pass metadata reuse. */
   private probeArguments(owner:IndexedSource,method:IndexedApexMethod,offset:number,expressions:readonly string[],seed:ApexValue[]|undefined,
-    resolveExternal?: (name:string,args:ApexValue[])=>ApexValue|undefined,freshEntry=false):ApexValue[][]{
+    resolveExternal?: ApexCallResolver,freshEntry=false):ApexValue[][]{
     const scalar=(v:ApexValue)=>v.kind==="text"||v.kind==="number"||v.kind==="null";
     const eligible=!this.active.size&&(!seed||seed.every(v=>scalar(v)||v.kind==="unknown"));
     const key=eligible?JSON.stringify([owner.filePath,method.start,offset,expressions,seed?argumentIdentity(seed):null,this.scopeId(resolveExternal),freshEntry]):undefined;
     const cached=key?this.argumentProbes.get(key):undefined;
     if(cached){countApex("caller.probe_cache_hit");return cached.map(args=>[...args]);}
     const engine=new ApexDataFlowEngine(owner.source,{sourceMethods:owner.methods,maxOperations:2000,
-      resolveExternal:(name,args)=>resolveExternal?.(name,args)??this.evaluateReturn(owner.filePath,name,args,resolveExternal)});
+      resolveExternal:(name,args,types)=>resolveExternal?.(name,args,types)??this.evaluateReturn(owner.filePath,name,args,resolveExternal,types)});
     const values=engine.evaluateArgumentsAt(method,offset,expressions,seed,freshEntry);
     if(key&&values.length&&values.every(args=>args.every(scalar))){
       if(this.argumentProbes.size>=MAX_CACHED_SUMMARIES)this.argumentProbes.delete(this.argumentProbes.keys().next().value!);
@@ -428,7 +590,7 @@ export class ApexRepositoryMethodIndex {
    * happens to pass literal values. Do not narrow open dispatch to known calls.
    */
   resolveCallerContexts(filePath:string,target:IndexedApexMethod,
-    resolveExternal?: (name:string,args:ApexValue[])=>ApexValue|undefined,
+    resolveExternal?: ApexCallResolver,
     stack:ReadonlySet<string>=new Set(),work={remaining:64}):ApexCallerContexts {
     const owner=this.paths.get(path.resolve(filePath));
     const empty:ApexCallerContexts={known:[],partial:[],unknownCalls:0,candidateCalls:0,
@@ -440,17 +602,18 @@ export class ApexRepositoryMethodIndex {
     countApex("caller.context_evaluations");
     if(stack.has(key)||stack.size>=MAX_METHOD_DEPTH||work.remaining<=0)return {...empty,bounded:true};
     const nextStack=new Set(stack);nextStack.add(key);
-    const candidates=this.callers.get(this.methodKey(owner.className,target.name,target.parameters.length))??[];
-    if(candidates.length>MAX_CALL_CONTEXTS||
-      this.findMethods(owner.className,target.name,target.parameters.length).length!==1)
+    const candidates=(this.callers.get(this.methodKey(owner.className,target.name,target.parameters.length))??[]).filter(c=>c.targetStart===undefined||c.targetStart===target.start);
+    if(candidates.length>MAX_CALL_CONTEXTS)
       return {...empty,candidateCalls:candidates.length,unknownCalls:candidates.length,bounded:true};
     const known=new Map<string,ApexValue[]>();
     const partial=new Map<string,ApexValue[]>();
     let unknownCalls=0,bounded=false,inheritedBounded=false,freshEntryContexts=0;
     for(const call of candidates){
-      // A variable shadowing a class name or an instance-qualified call
-      // cannot establish static dispatch. Only explicit static targets qualify.
-      if(!target.isStatic){unknownCalls++;continue;}
+      // Admit exact static dispatch as before, plus a strictly proven direct
+      // private same-receiver edge. This transfers arguments only; no object
+      // state, virtual dispatch or exhaustive caller claim is inferred.
+      if(call.targetStart!==target.start||(!target.isStatic&&!call.privateInstanceEdge)){unknownCalls++;continue;}
+      if(call.privateInstanceEdge)countApex("caller.private_instance_argument_edges");
       const closed=call.method.visibility==="private"
         ?this.resolvePrivateContexts(call.caller.filePath,call.method,resolveExternal):undefined;
       const upstream=closed?.length?undefined:
@@ -474,7 +637,7 @@ export class ApexRepositoryMethodIndex {
           memberEffectModel(call.caller.source,call.caller.methods).freshEntry(call.method)){
           work.remaining--;
           const fresh=this.probeArguments(call.caller,call.method,call.offset,call.expressions,undefined,resolveExternal,true);
-          const samples=fresh.filter(args=>args.some(v=>v.kind!=="unknown"));
+          const samples=fresh.filter(hasIncomingArgumentEvidence);
           freshEntryContexts+=samples.length;
           contexts.push(...samples);
         }
@@ -486,7 +649,8 @@ export class ApexRepositoryMethodIndex {
             // Keep a runtime bind unknown rather than discarding the other
             // proven inputs. Only the selected invocation arguments need to
             // become complete later; no unknown placeholder becomes a grant.
-            if(args.every(v=>v.kind==="unknown"))continue;
+            if(!hasIncomingArgumentEvidence(args))continue;
+            if(args.every(v=>v.kind==="unknown"))countApex("caller.fragment_only_contexts");
             partial.set(argumentIdentity(args),args);
           }else known.set(argumentIdentity(args),args);
           if(known.size+partial.size>=MAX_CALL_CONTEXTS){bounded=true;break;}
@@ -508,103 +672,310 @@ export class ApexRepositoryMethodIndex {
     return result;
   }
 
+  /** Cache only the incoming receiver inventory, never a query-site proof.
+   * Resolver identity prevents reuse across metadata discovery passes. Cloning
+   * preserves internal aliases and isolates cached values from consumers. */
+  private batchReceiverInventory(owner:IndexedSource,method:IndexedApexMethod,
+    resolveExternal?:ApexCallResolver):BatchReceiverInventory {
+    const key=JSON.stringify([owner.filePath,method.start,this.scopeId(resolveExternal)]);
+    const eligible=this.active.size===0;
+    const cached=eligible?this.batchReceiverInventories.get(key):undefined;
+    if(cached){
+      countApex("caller.batch_receiver_cache_hits");
+      return structuredClone(cached);
+    }
+    countApex("caller.batch_receiver_inventory_evaluations");
+    const inventory=timeApex("caller.batch_receiver_inventory_ms",()=>{
+      const calls=this.batchAllocations.get(owner.className.toLowerCase())??[];
+      const receivers=new Map<string,Extract<ApexValue,{kind:"instance"}>>();
+      let bounded=calls.length>8;
+      for(const call of calls.slice(0,8)){
+        countApex("caller.batch_submission_probes");
+        const engine=new ApexDataFlowEngine(call.caller.source,{sourceMethods:call.caller.methods,maxOperations:2000,
+          resolveExternal:(name,args,types)=>{
+            if(name==="Apex.construct"&&args[0]?.kind==="text"&&args[0].values.length===1)
+              return this.constructInstance(call.caller.filePath,args[0].values[0],args.slice(1),resolveExternal,types?.slice(1));
+            return resolveExternal?.(name,args,types)??this.evaluateReturn(call.caller.filePath,name,args,resolveExternal,types);
+          }});
+        for(const args of engine.evaluateArgumentsAt(call.method,call.offset,call.expressions)){
+          const instance=args[0];
+          if(instance?.kind==="instance"&&instance.className.toLowerCase()===owner.className.toLowerCase())
+            receivers.set(argumentIdentity([instance]),instance);
+          if(receivers.size>=8){bounded=true;break;}
+        }
+        if(receivers.size>=8)break;
+      }
+      const candidates=[...receivers.values()].map(value=>({value,hypothetical:false}));
+      const constructorFailures=new Set<string>();
+      if(!candidates.length){
+        // Explicitly separate a source-initialized scenario from an observed
+        // submission. Public mutable fields may differ at runtime.
+        const signatures=this.instances.constructorSignatures(owner.className);
+        if(!signatures.length)constructorFailures.add("constructor_no_supported_signature");
+        for(const signature of signatures){
+          const args=signature.parameters.map((name,i)=>runtimeParameter(name,signature.parameterTypes[i],"Conditional constructor input: "+name));
+          countApex("caller.batch_constructor_probes");
+          const value=this.constructInstance(owner.filePath,owner.className,args,resolveExternal,signature.parameterTypes,true);
+          if(value?.kind==="instance")candidates.push({value,hypothetical:true});
+          else constructorFailures.add(value?.kind==="unknown"?(/\[(constructor_[a-z_]+)\]$/.exec(value.reason)?.[1]??"constructor_unproven_initialization"):"constructor_no_receiver");
+        }
+      }
+      return {count:receivers.size,bounded,candidates,constructorFailures:[...constructorFailures]};
+    });
+    if(eligible){
+      if(this.batchReceiverInventories.size>=MAX_RECEIVER_SNAPSHOTS)this.batchReceiverInventories.clear();
+      this.batchReceiverInventories.set(key,structuredClone(inventory));
+    }
+    return inventory;
+  }
+
   /**
    * Partial receiver evidence for direct Database.executeBatch(new T(...)).
    * Direct framework invocation after a restricted scalar local prefix.
    * No intervening member writes, arbitrary calls, or heap transfer.
    */
   private probeBatchReceivers(owner:IndexedSource,method:IndexedApexMethod,offset:number,expressions:readonly string[],
-    resolveExternal?: (name:string,args:ApexValue[])=>ApexValue|undefined):
-    {count:number;arguments:ApexValue[][];bounded:boolean}{
-    const empty={count:0,arguments:[] as ApexValue[][],bounded:false};
+    resolveExternal?: ApexCallResolver):
+    {count:number;arguments:ApexValue[][];conditionalArguments:ApexValue[][];partialArguments:ApexValue[][];scenarioCount:number;bounded:boolean}{
+    const empty={count:0,arguments:[] as ApexValue[][],conditionalArguments:[] as ApexValue[][],partialArguments:[] as ApexValue[][],scenarioCount:0,bounded:false};
     if(method.isStatic||method.name.toLowerCase()!=="start"||method.parameters.length!==1)return empty;
-    const masked=maskApexSource(owner.source);
-    const declaration=/\bclass\s+([A-Za-z_]\w*)\s+implements\s+Database\s*\.\s*Batchable\s*<\s*[A-Za-z_]\w*\s*>\s*\{/i.exec(masked);
-    if(!declaration||declaration[1].toLowerCase()!==owner.className.toLowerCase()||
-       !/\bstart\s*\(\s*Database\s*\.\s*BatchableContext\s+[A-Za-z_]\w*\s*\)\s*\{\s*$/i.test(masked.slice(Math.max(0,method.start-250),method.start)))return empty;
-    const targetIndex=method.body.findIndex(n=>n.start<=offset&&offset<n.end);
-    const target=method.body[targetIndex];
-    if(targetIndex<0||target?.kind!=="statement"||
-      !/^\s*(?:return\s*)?$/i.test(masked.slice(target.start,offset)))return empty;
-    // Only declarations of local scalars whose expressions consist of
-    // literals, parameters, previously declared locals and simple receiver
-    // member reads. No calls, assignments to members, or getter chains.
-    const locals=new Set(method.parameters.map(p=>p.toLowerCase()));
-    const requiredFields=new Set<string>();
-    for(const node of method.body.slice(0,targetIndex)){
-      if(node.kind!=="statement")return empty;
-      const declaration=/^\s*(?:final\s+)?(?:String|Boolean|Integer|Long|Decimal|Double|Id)\s+([A-Za-z_]\w*)\s*=\s*([\s\S]+);\s*$/i.exec(node.text??"");
-      if(!declaration||locals.has(declaration[1].toLowerCase()))return empty;
-      const expr=maskApexSource(declaration[2]);
-      if(!/^[\w\s.+\-]*$/.test(expr)||/\+\+|--|\bnew\b/i.test(expr)||
-        /\b(?!this\b)[A-Za-z_]\w*\s*\./i.test(expr.replace(/\bthis\s*\.\s*[A-Za-z_]\w*/gi,"")))return empty;
-      // Every qualified reference must be a direct receiver field. Bare
-      // names must be a known local/parameter or a real field of this allocation.
-      const bare=expr.replace(/\bthis\s*\.\s*([A-Za-z_]\w*)/gi,(_whole,field:string)=>{
-        requiredFields.add(field.toLowerCase());return " ";
-      });
-      if(bare.includes("."))return empty;
-      for(const token of bare.matchAll(/\b[A-Za-z_]\w*\b/g)){
-        const name=token[0].toLowerCase();
-        if(!locals.has(name)&&!["true","false","null"].includes(name))requiredFields.add(name);
-      }
-      locals.add(declaration[1].toLowerCase());
-    }
-    const calls=this.batchAllocations.get(owner.className.toLowerCase())??[];
-    const receivers=new Map<string,Extract<ApexValue,{kind:"instance"}>>();
-    let bounded=calls.length>8;
-    for(const call of calls.slice(0,8)){
-      const engine=new ApexDataFlowEngine(call.caller.source,{sourceMethods:call.caller.methods,maxOperations:2000,
-        resolveExternal:(name,args)=>{
-          if(name==="Apex.construct"&&args[0]?.kind==="text"&&args[0].values.length===1)
-            return this.constructInstance(call.caller.filePath,args[0].values[0],args.slice(1),resolveExternal);
-          return resolveExternal?.(name,args)??this.evaluateReturn(call.caller.filePath,name,args,resolveExternal);
-        }});
-      for(const args of engine.evaluateArgumentsAt(call.method,call.offset,call.expressions)){
-        const instance=args[0];
-        if(instance?.kind==="instance"&&instance.className.toLowerCase()===owner.className.toLowerCase())
-          receivers.set(JSON.stringify(instance),instance);
-        if(receivers.size>=8){bounded=true;break;}
-      }
-      if(receivers.size>=8)break;
-    }
+    const declaration=outerApexClass(owner.source);
+    if(!declaration?.batch||declaration.parent||declaration.name.toLowerCase()!==owner.className.toLowerCase()||
+       !/^database\.batchablecontext$/i.test(method.parameterTypes?.[0]??""))return empty;
+    const inventory=this.batchReceiverInventory(owner,method,resolveExternal);
+    let bounded=inventory.bounded;
+    const {candidates}=inventory;
     const argumentsByValue=new Map<string,ApexValue[]>();
-    for(const instance of receivers.values()){
-      if([...requiredFields].some(field=>!instance.entries.some(([key])=>key.toLowerCase()===field)))continue;
+    const conditionalArguments=new Map<string,ApexValue[]>();
+    const partialArguments=new Map<string,ApexValue[]>();
+    let samples=0,scenarioCount=0;
+    const overflow:BatchReceiver[]=[];
+    const probe=(instance:BatchReceiver,conditional:boolean)=>{
+      samples++;
+      if(conditional)scenarioCount++;
       const engine=new ApexDataFlowEngine(owner.source,{sourceMethods:owner.methods,maxOperations:2000,
-        resolveExternal:(name,args)=>{
-          if(name==="Apex.scopeField"&&args[0]?.kind==="text"&&args[0].values[0]?.toLowerCase()===owner.className.toLowerCase()&&args[1]?.kind==="text"){
+        resolveExternal:(name,args,types)=>{
+          if(name==="Apex.scopeField"&&args[0]?.kind==="text"&&args[0].values[0]?.toLowerCase()===owner.className.toLowerCase()&&args[1]?.kind==="text"&&args[3]?.kind==="text"&&args[3].values[0]!=="true"){
             const fieldName=args[1].values[0]?.toLowerCase();
             const field=instance.entries.find(([key])=>key.toLowerCase()===fieldName);
             if(field)return field[1];
           }
-          return resolveExternal?.(name,args)??this.evaluateReturn(owner.filePath,name,args,resolveExternal);
+          return resolveExternal?.(name,args,types)??this.evaluateReturn(owner.filePath,name,args,resolveExternal,types);
         }});
       for(const args of engine.evaluateArgumentsAt(method,offset,expressions)){
-        if(args.some(v=>v.kind==="unknown"))continue;
-        argumentsByValue.set(JSON.stringify(args),args);
+        if(args.some(v=>v.kind==="unknown")){
+          if(args.some(v=>v.kind==="unknown"&&!!v.fragments)){
+            const destination=conditional?conditionalArguments:partialArguments;
+            if(destination.size<32)destination.set(argumentIdentity(args),args);
+          }
+          continue;
+        }
+        (conditional?conditionalArguments:argumentsByValue).set(argumentIdentity(args),args);
+      }
+    };
+    for(const {value:original,hypothetical} of candidates){
+      if(!supportsReceiverPrefix(method,offset,original))continue;
+      const limit=Math.max(0,BASE_RECEIVER_KEY_LIMIT-samples);
+      const domain=receiverMapSamples(method,original,limit);
+      bounded=bounded||domain.bounded;
+      for(const instance of domain.receivers){
+        if(samples>=BASE_RECEIVER_SAMPLE_LIMIT){bounded=true;break;}
+        probe(instance,hypothetical||instance!==original);
+      }
+      // Retain the original sampling order and baseline budget. Only consider
+      // extra map keys after all baseline candidates have been evaluated.
+      if(domain.bounded&&overflow.length<MAX_EXTRA_RECEIVER_SAMPLES){
+        const expanded=receiverMapSamples(method,original,limit+MAX_EXTRA_RECEIVER_SAMPLES-overflow.length);
+        overflow.push(...expanded.receivers.slice(domain.receivers.length));
       }
     }
-    return {count:receivers.size,arguments:[...argumentsByValue.values()],bounded};
+    // Exact argument-vector deduplication is generic; the SOQL adapter still
+    // validates grammar and enforces its own 32-variant cap. Never equate
+    // merely similar source objects or claim complete runtime coverage.
+    let extra=0;
+    for(const instance of overflow){
+      if(conditionalArguments.size+argumentsByValue.size>=BASE_RECEIVER_KEY_LIMIT||extra>=MAX_EXTRA_RECEIVER_SAMPLES)break;
+      probe(instance,true);
+      extra++;
+    }
+    if(extra)countApex("caller.batch_receiver_overflow_samples",extra);
+    if(samples)countApex("caller.batch_receiver_samples",samples);
+    return {count:inventory.count,arguments:[...argumentsByValue.values()],conditionalArguments:[...conditionalArguments.values()],partialArguments:[...partialArguments.values()],scenarioCount,bounded};
+  }
+
+  /** A bounded same-receiver path from a framework entry to an explicitly
+   * private instance method. Overloads are selected using lexical types.
+   * No arbitrary object dispatch, recursion, virtual calls or closed-world claim. */
+  private frameworkReceiverPaths(owner:IndexedSource,target:IndexedApexMethod,
+    entries:readonly IndexedApexMethod[]):ReceiverPath[]{
+    const key=JSON.stringify([owner.filePath,target.start,entries.map(m=>m.start)]);
+    const cached=this.lifecyclePaths.get(key);
+    if(cached){countApex("caller.lifecycle.discovery_cache_hits");return cached;}
+    countApex("caller.lifecycle.discovery_evaluations");
+    const paths=timeApex("caller.lifecycle.discovery_ms",()=>{
+    const symbols=apexSymbols(owner.source,owner.methods);
+    const paths:ReceiverPath[]=[];
+    const visit=(method:IndexedApexMethod,edges:ReceiverCallEdge[],seen:Set<IndexedApexMethod>)=>{
+      if(paths.length>=8||seen.has(method)||edges.length>3)return;
+      if(entries.includes(method)){paths.push({entry:method,edges});return;}
+      if(method.isStatic||method.visibility!=="private"||edges.length===3)return;
+      const name=method.name.toLowerCase();
+      const calls=discoverApexInvocations(owner.source,(qualified,raw)=>{
+        if(qualified.toLowerCase()!==name&&qualified.toLowerCase()!=="this."+name)return undefined;
+        const args=raw.length===1&&!raw[0].trim()?[]:raw;
+        // Direct literal/local/receiver-member arguments only. Do not ignore
+        // nested argument effects or pass the entire receiver as a value.
+        if(args.some(a=>! /^(?:(?:this\.)?[A-Za-z_]\w*|[-+]?\d+|'(?:\\.|[^'\\])*')$/i.test(a.trim())||/^this$/i.test(a.trim())))return undefined;
+        return {method:qualified,argumentIndices:args.map((_,i)=>i)};
+      });
+      for(const call of calls){
+        if(paths.length>=8)break;
+        const caller=owner.methods.filter(m=>m.start<=call.offset&&call.offset<m.end)
+          .sort((a,b)=>(a.end-a.start)-(b.end-b.start))[0];
+        if(!caller||caller.isStatic||!symbols.sameOwner(caller,method)||caller===method)continue;
+        const candidates=owner.methods.filter(m=>m.name.toLowerCase()===name&&symbols.sameOwner(caller,m));
+        if(selectApexOverload(candidates,call.arguments.length,symbols.argumentTypes(caller,call.arguments,call.offset))!==method)continue;
+        const next=new Set(seen);next.add(method);
+        visit(caller,[{caller,target:method,offset:call.offset,expressions:[...call.arguments]},...edges],next);
+      }
+    };
+    visit(target,[],new Set());
+    return paths;
+    });
+    if(this.lifecyclePaths.size>=MAX_CACHED_SUMMARIES)this.lifecyclePaths.delete(this.lifecyclePaths.keys().next().value!);
+    this.lifecyclePaths.set(key,paths);
+    return paths;
+  }
+
+  /** Preserve a proven incoming receiver while probing a private call chain
+   * or first stateful execute chunk. These are always conditional variants.
+   * The ordinary start-site analysis and its existing budgets are unchanged. */
+  private probeLifecycleReceivers(owner:IndexedSource,target:IndexedApexMethod,offset:number,
+    expressions:readonly string[],resolveExternal?:ApexCallResolver):LifecycleReceiverEvidence{
+    const empty:LifecycleReceiverEvidence={arguments:[],scenarios:0,bounded:false,diagnostics:[]};
+    if(target.isStatic||target.name.toLowerCase()==="start")return empty;
+    const cls=outerApexClass(owner.source);
+    if(!cls?.batch)return empty;
+    if(target.visibility!=="private"&&target.name.toLowerCase()!=="execute")return empty;
+    countApex("caller.lifecycle.candidate_methods");
+    const diagnostics=new Set<string>();
+    const reject=(reason:string)=>{
+      countApex("caller.lifecycle."+reason);
+      diagnostics.add(reason);
+    };
+    const rejected=(reason:string):LifecycleReceiverEvidence=>{
+      reject(reason);
+      return {...empty,diagnostics:[...diagnostics]};
+    };
+    if(cls.parent)return rejected("rejected_class_inheritance");
+    if(cls.name.toLowerCase()!==owner.className.toLowerCase())return rejected("rejected_class_identity");
+    if(this.classes.has("database"))return rejected("rejected_platform_class_shadow");
+    const symbols=apexSymbols(owner.source,owner.methods);
+    if(symbols.ownerAt(target.start)?.toLowerCase()!==owner.className.toLowerCase())return rejected("rejected_class_lexical_owner");
+    const frameworkEntry=(m:IndexedApexMethod,name:string,arity:number)=>!m.isStatic&&
+      (m.visibility==="public"||m.visibility==="global")&&m.name.toLowerCase()===name&&m.parameters.length===arity&&
+      canonicalApexType(m.parameterTypes?.[0])==="database.batchablecontext"&&symbols.sameOwner(target,m);
+    const starts=owner.methods.filter(m=>frameworkEntry(m,"start",1)&&canonicalApexType(m.returnType)==="database.querylocator");
+    if(starts.length!==1)return rejected("rejected_start_signature");
+    const start=starts[0];
+    const executes=cls.stateful&&!/\btransient\b/i.test(maskApexSource(owner.source))
+      ?owner.methods.filter(m=>frameworkEntry(m,"execute",2)&&canonicalApexType(m.returnType)==="void"&&/^list</.test(canonicalApexType(m.parameterTypes?.[1])??"")):[];
+    const entries=executes.length===1?[start,executes[0]]:[start];
+    if(target===start)return empty;
+    if(!entries.includes(target)&&target.visibility!=="private")return rejected("rejected_execute_signature_or_state");
+    // Reject lexical shadowing of platform Database for this proof.
+    const platformShadow=owner.methods.some(m=>symbols.lookup(m,"Database",m.start)!==undefined)||
+      /\b[A-Za-z_]\w*\s+Database\s*(?:[=;,)])/i.test(maskApexSource(owner.source));
+    if(platformShadow)return rejected("rejected_platform_shadow");
+    const paths=this.frameworkReceiverPaths(owner,target,entries);
+    if(!paths.length){
+      if(executes.length!==1)reject("rejected_execute_signature_or_state");
+      return rejected("rejected_dispatch");
+    }
+    countApex("caller.lifecycle.private_paths_found",paths.filter(p=>p.edges.length>0).length);
+    const inventory=this.batchReceiverInventory(owner,start,resolveExternal);
+    if(!inventory.candidates.length){
+      reject("rejected_constructor");
+      for(const failure of inventory.constructorFailures)diagnostics.add(failure);
+      return {...empty,bounded:inventory.bounded,diagnostics:[...diagnostics]};
+    }
+    let scenarios=0,bounded=inventory.bounded;
+    const results=new Map<string,ApexValue[]>();
+    let probes=0;
+    for(const {value:receiver} of inventory.candidates){
+      for(const {entry,edges} of paths){
+        const executeEntry=entry!==start;
+        if(executeEntry&&!supportsInitialBatchExecute(start,receiver)){reject("rejected_start_effects");continue;}
+        const allowStringJoin=!this.classes.has("string")&&symbols.lookup(target,"String",target.start)===undefined;
+        if(!supportsReceiverPrefix(target,offset,receiver,false,allowStringJoin)){reject("rejected_target_prefix");continue;}
+        if(edges.some(edge=>!supportsReceiverPrefix(edge.caller,edge.offset,receiver,true))){reject("rejected_caller_prefix");continue;}
+        const resolver:ApexCallResolver=(name,args,types)=>{
+          if(name==="Apex.scopeField"&&args[0]?.kind==="text"&&args[0].values[0]?.toLowerCase()===owner.className.toLowerCase()&&
+             args[1]?.kind==="text"&&args[3]?.kind==="text"&&args[3].values[0]!=="true"){
+            const fieldName=args[1].values[0]?.toLowerCase();
+            const field=receiver.entries.find(([key])=>key.toLowerCase()===fieldName);
+            if(field)return field[1];
+          }
+          return resolveExternal?.(name,args,types)??this.evaluateReturn(owner.filePath,name,args,resolveExternal,types);
+        };
+        const probe=(method:IndexedApexMethod,site:number,exprs:readonly string[],seed?:ApexValue[])=>{
+          if(++probes>32){bounded=true;return [];}
+          const engine=new ApexDataFlowEngine(owner.source,{sourceMethods:owner.methods,maxOperations:2000,resolveExternal:resolver});
+          return engine.evaluateArgumentsAt(method,site,exprs,seed);
+        };
+        let seeds:Array<ApexValue[]|undefined>=[undefined];
+        for(const edge of edges){
+          const next=new Map<string,ApexValue[]>();
+          for(const seed of seeds){
+            // A literal reachability marker distinguishes a zero-argument
+            // call from the engine's unknown/unreachable fallback result.
+            for(const vector of probe(edge.caller,edge.offset,["true",...edge.expressions],seed)){
+              if(vector[0]?.kind!=="text"||vector[0].scalarType!=="boolean"||vector[0].values[0]!=="true")continue;
+              const args=vector.slice(1);
+              if(args.length===edge.target.parameters.length&&next.size<8)next.set(argumentIdentity(args),args);
+            }
+          }
+          seeds=[...next.values()];
+          if(!seeds.length){reject("rejected_call_reachability");break;}
+        }
+        for(const seed of seeds){
+          if(probes>=32||results.size>=32){bounded=true;break;}
+          scenarios++;
+          countApex(executeEntry?"caller.batch_first_execute_scenarios":"caller.batch_private_start_scenarios");
+          if(edges.length)countApex("caller.batch_private_receiver_paths");
+          let evidence=false;
+          for(const args of probe(target,offset,expressions,seed)){
+            if(args.some(v=>v.kind==="unknown"&&!v.fragments))continue;
+            evidence=true;
+            if(results.size<32)results.set(argumentIdentity(args),args);
+          }
+          if(evidence)countApex("caller.lifecycle.proven_scenarios");
+          else reject("rejected_query_arguments");
+        }
+      }
+    }
+    if(bounded)reject("bounded");
+    return {arguments:[...results.values()],scenarios,bounded,diagnostics:[...diagnostics]};
   }
 
   /** Evaluate selected invocation arguments in proven incoming contexts.
    * Evidence is kept separate from the all-path verdict and from permissions. */
   probeInvocationContexts(filePath:string,offset:number,expressions:readonly string[],
-    resolveExternal?: (name:string,args:ApexValue[])=>ApexValue|undefined):{
-      contexts:ApexCallerContexts;arguments:ApexValue[][];partialArguments:ApexValue[][];bounded:boolean;receiverContexts?:number
+    resolveExternal?: ApexCallResolver):{
+      contexts:ApexCallerContexts;arguments:ApexValue[][];partialArguments:ApexValue[][];conditionalArguments:ApexValue[][];bounded:boolean;receiverContexts?:number;receiverScenarios?:number; lifecycleDiagnostics?:readonly string[]
     }|undefined {
     const owner=this.paths.get(path.resolve(filePath));
     const method=owner?.methods.filter(m=>m.start<=offset&&offset<m.end)
       .sort((a,b)=>(a.end-a.start)-(b.end-b.start))[0];
-    if(!owner||!method||!method.parameters.length)return undefined;
+    if(!owner||!method)return undefined;
+    if(!method.parameters.length&&(method.isStatic||method.visibility!=="private"))return undefined;
     const contexts=this.resolveCallerContexts(filePath,method,resolveExternal);
     const argumentsByValue=new Map<string,ApexValue[]>();
     const partialArguments=new Map<string,ApexValue[]>();
     const maxSeeds=8;
     const seeds=[...new Map([...contexts.known,...contexts.partial].map(seed=>[argumentIdentity(seed),seed])).values()];
     const relevant=invocationRelevantIdentifiers(method.body,offset,expressions.join(" "));
-    const selected=selectApexCallerSeeds(seeds,method.parameters,relevant,maxSeeds);
+    const selected=selectApexInvocationSeeds(seeds,method.parameters,relevant,maxSeeds);
     countApex("caller.candidate_seeds",seeds.length);
     countApex("caller.selected_seeds",selected.length);
     let bounded=contexts.bounded||seeds.length>selected.length;
@@ -622,7 +993,10 @@ export class ApexRepositoryMethodIndex {
     }
     const batch=this.probeBatchReceivers(owner,method,offset,expressions,resolveExternal);
     for(const args of batch.arguments)argumentsByValue.set(JSON.stringify(args),args);
-    return {contexts,arguments:[...argumentsByValue.values()],partialArguments:[...partialArguments.values()],bounded:bounded||batch.bounded,receiverContexts:batch.count};
+    for(const args of batch.partialArguments)if(partialArguments.size<32)partialArguments.set(argumentIdentity(args),args);
+    const lifecycle=this.probeLifecycleReceivers(owner,method,offset,expressions,resolveExternal);
+    const conditional=new Map([...batch.conditionalArguments,...lifecycle.arguments].map(args=>[argumentIdentity(args),args]));
+    return {contexts,arguments:[...argumentsByValue.values()],partialArguments:[...partialArguments.values()],conditionalArguments:[...conditional.values()],bounded:bounded||batch.bounded||lifecycle.bounded,receiverContexts:batch.count,receiverScenarios:batch.scenarioCount+lifecycle.scenarios,...(lifecycle.diagnostics.length?{lifecycleDiagnostics:lifecycle.diagnostics}:{})};
   }
 
   /**
@@ -653,7 +1027,7 @@ export class ApexRepositoryMethodIndex {
       let allKnown=true;
       for(const seed of seeds){
         const engine=new ApexDataFlowEngine(call.caller.source,{sourceMethods:call.caller.methods,
-          resolveExternal:(name,args)=>this.evaluateReturn(call.caller.filePath,name,args),
+          resolveExternal:(name,args,types)=>this.evaluateReturn(call.caller.filePath,name,args,undefined,types),
         });
         const contexts=engine.evaluateArgumentsAt(call.method,call.offset,call.expressions,seed);
         if(!contexts.length||contexts.some(args=>

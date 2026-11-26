@@ -5,7 +5,7 @@ const text=(value:string):ApexValue=>({kind:"text",values:[value]});
 const bool=(value:boolean):ApexValue=>({kind:"text",values:[String(value)],scalarType:"boolean"});
 const integer=(v:ApexValue|undefined):number|undefined=>v?.kind==="number"&&Number.isInteger(v.value)&&v.value>=-2147483648&&v.value<=2147483647?v.value:undefined;
 const one=(v:ApexValue|undefined):string|undefined=>v?.kind==="text"&&!v.scalarType&&v.values.length===1?v.values[0]:undefined;
-const allowed=new Set(["length","substring","substringbefore","substringafter","endswith","startswith","replace","size"]);
+const allowed=new Set(["length","substring","substringbefore","substringafter","substringbeforelast","substringafterlast","endswith","startswith","replace","size"]);
 export function isBoundedStringOperation(name:string):boolean{return allowed.has(name.toLowerCase());}
 
 /** Exact values only. No regex replacement or unknown substring inference,
@@ -35,6 +35,8 @@ export function evaluateBoundedStringOperation(receiver:ApexValue,operation:stri
     if(first.length&&at>=0){
       if(op==="substringbefore")return result(value.slice(0,at));
       if(op==="substringafter")return result(value.slice(at+first.length));
+      if(op==="substringbeforelast")return result(value.slice(0,value.lastIndexOf(first)));
+      if(op==="substringafterlast")return result(value.slice(value.lastIndexOf(first)+first.length));
     }
   }
   if(op==="replace"&&args.length===2&&first!==undefined&&first.length){

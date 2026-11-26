@@ -18,10 +18,25 @@ export interface CustomMetadataFilter {
 export interface CustomMetadataResult extends MetadataResult<Array<Record<string,unknown>>> {
   filterEvidence?: "SERVER_FILTERED";
 }
+/** Org schema facts, not the permissions of the persona being analyzed.
+ * An absent optional property is unknown, never a negative assertion. */
+export interface ApexSchemaField {
+  name:string;
+  type?:string;
+  relationshipName?:string|null;
+  referenceTo?:readonly string[];
+  nameField?:boolean;
+}
+export interface ApexObjectSchema {
+  name:string;
+  fields:readonly ApexSchemaField[];
+}
 export interface ApexMetadataProvider {
   /** Cache scope must include org identity and connection epoch when live. */
   readonly scopeKey: string;
   getObjectFieldNames(objectApiName: string): Promise<MetadataResult<string[]>>;
+  /** Optional richer projection of the same authoritative Describe response. */
+  getObjectSchema?(objectApiName:string):Promise<MetadataResult<ApexObjectSchema>>;
   /** Custom Label master value from the connected org; not a guessed local fixture. */
   getCustomLabelValue?(labelApiName: string): Promise<MetadataResult<string>>;
   /** Ordered SOQL-ready field paths from a uniquely identified Field Set. */

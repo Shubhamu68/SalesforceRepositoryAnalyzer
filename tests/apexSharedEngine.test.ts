@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import {test} from "node:test";
 import {ApexAnalysisEngine,analyzeApexInvocations} from "../src/core/apex/ApexAnalysisEngine.js";
 import {ApexRepositoryMethodIndex} from "../src/core/apex/ApexRepositoryMethodIndex.js";
-import {evaluateApexExpression,textValue,unknown,listValue} from "../src/core/apex/ApexValueEvaluator.js";
+import {evaluateApexExpression,textValue,unknown,listValue,booleanValue,type ApexValue} from "../src/core/apex/ApexValueEvaluator.js";
+import {resolveSchemaSnapshot,resolveSchemaFieldMap} from "../src/core/apex/ApexSchemaModel.js";
+import {traceApexDependencies} from "../src/core/apex/ApexBackwardDependencyEngine.js";
+import type {ApexObjectSchema} from "../src/core/metadata/ApexMetadataProvider.js";
 import {planCustomMetadataRequest,resolveCustomMetadataRows} from "../src/core/apex/ApexCustomMetadataQueries.js";
 import {extractDynamicSoqlQueries} from "../src/scanner/dynamicSoqlScanner.js";
 import type {ApexMetadataProvider,CustomMetadataFilter} from "../src/core/metadata/ApexMetadataProvider.js";
@@ -65,7 +68,7 @@ test("known false ternary skips malformed query, known true still reports malfor
   assert.equal(skipped.queries.length,0);assert.equal(skipped.unresolved.length,0);
   const executed=extractDynamicSoqlQueries(wrap("Map<String,String> fields=new Map<String,String>{'Name'=>'Name'}; List<Account> records=!fields.isEmpty()?Database.query('SELECT , FROM Account'):new List<Account>();"),"Consumer.cls");
   assert.equal(executed.queries.length,0);assert.equal(executed.unresolved.length,1);
-  assert.match(executed.unresolved[0].reason,/failed SOQL parsing/);
+  assert.match(executed.unresolved[0].reason,/reconstructed SOQL could not be parsed/);
 });
 test("unknown ternary guard retains both feasible invocations; adjacent arguments not skipped",()=>{
   const code="public class Consumer { public static void run(Boolean flag){ CustomInspector.inspect(flag?CustomInspector.pick('A'):CustomInspector.pick('B'),CustomInspector.pick('C')); } }";
@@ -199,4 +202,213 @@ test("36-row mapping with 13 source mappings and 12 unique fields stays within n
   ].join("\n");
   const result=await analyzeFixture(code,inventory);
   verifyFields(result,{Account:["Id",...fields(9)],Contact:fields(12),Case:fields(14)});
+});
+
+
+const schemaFixture:Record<string,ApexObjectSchema>={
+  contact:{name:"Contact",fields:[
+    {name:"Id",type:"id",nameField:false},
+    {name:"Birthdate",type:"date",nameField:false,referenceTo:[],relationshipName:null},
+    {name:"AccountId",type:"reference",nameField:false,relationshipName:"Account",referenceTo:["Account"]},
+    {name:"OwnerId",type:"reference",nameField:false,relationshipName:"Owner",referenceTo:["User","Group"]},
+    {name:"Name",type:"string",nameField:true},
+    {name:"Incomplete__c"}
+  ]},
+  account:{name:"Account",fields:[{name:"Name",type:"string",nameField:true},{name:"Id",type:"id",nameField:false},
+    {name:"ParentId",type:"reference",relationshipName:"Parent",referenceTo:["Account"],nameField:false}]}
+};
+const schemaResolver=(method:string,args:ApexValue[])=>{
+  if((method!=="Schema.objectSchema"&&method!=="Schema.fieldMap")||args.some(a=>a.kind!=="text"||a.values.length!==1))return undefined;
+  const [object,field]=args.map(a=>a.kind==="text"?a.values[0]:"");
+  const result={complete:true,source:"LIVE_ORG" as const,value:schemaFixture[object.toLowerCase()]};
+  return method==="Schema.fieldMap"?resolveSchemaFieldMap(result,object):resolveSchemaSnapshot(result,object,field);
+};
+test("typed Schema field reads preserve enum equality, relationship names, singleton reference tokens and name fields",()=>{
+  const context={values:new Map<string,ApexValue>(),resolveCall:schemaResolver};
+  for(const expression of [
+    "Contact.Birthdate.getDescribe().getType() == Schema.DisplayType.DATE",
+    "Schema.SObjectType.Contact.fields.Birthdate.getDescribe().getType() == Schema.DisplayType.DATE",
+    "Contact.Name.getDescribe().isNameField()",
+    "Schema.getGlobalDescribe().get('Contact').getDescribe().fields.getMap().get('Name').getDescribe().isNameField()"
+  ])assert.deepEqual(evaluateApexExpression(expression,context),booleanValue(true),expression);
+  assert.deepEqual(evaluateApexExpression("Contact.AccountId.getDescribe().getRelationshipName()",context),textValue("Account"));
+  assert.deepEqual(evaluateApexExpression("Contact.AccountId.getDescribe().getReferenceTo()[0].getDescribe().getName()",context),textValue("Account"));
+  assert.deepEqual(evaluateApexExpression("Contact.Birthdate.getDescribe().getType() == Schema.DisplayType.DATETIME",context),booleanValue(false));
+  assert.equal(evaluateApexExpression("Contact.Birthdate.getDescribe().getType() == 'DATE'",context).kind,"unknown");
+});
+test("unavailable and polymorphic Schema metadata never invents facts or permissions",()=>{
+  const context={values:new Map<string,ApexValue>(),resolveCall:schemaResolver};
+  for(const expression of [
+    "Contact.Incomplete__c.getDescribe().isNameField()",
+    "Contact.Incomplete__c.getDescribe().getType()",
+    "Contact.OwnerId.getDescribe().getReferenceTo()[0].getDescribe().getName()",
+    "Contact.Missing__c.getDescribe().getType()",
+    "Contact.Name.getDescribe().isAccessible()",
+    "Contact.Name.getDescribe().getType() == 'STRING'"
+  ])assert.equal(evaluateApexExpression(expression,context).kind,"unknown",expression);
+  assert.deepEqual(evaluateApexExpression("Contact.Birthdate.getDescribe().getRelationshipName()",context),{kind:"null"});
+  assert.equal(evaluateApexExpression("Contact.Name.getDescribe().getType()",{...context,values:new Map([["Contact",unknown("runtime object")]])}).kind,"unknown");
+});
+test("AUE shares a case-insensitive Schema snapshot across independent non-SOQL forward and backward consumers",async()=>{
+  const source="public class Inspector {public static void run(){Schema.DescribeFieldResult field=Contact.AccountId.getDescribe();String rel=field.getRelationshipName();Schema.DisplayType typ=field.getType();Inspector.consume(rel,typ==Schema.DisplayType.REFERENCE);} }";
+  const filePath="Inspector.cls",index=new ApexRepositoryMethodIndex([{filePath,source}]);
+  let reads=0;
+  const metadata:ApexMetadataProvider={scopeKey:"fixture-schema",getObjectFieldNames:async()=>({complete:false,source:"LIVE_ORG"}),
+    getCustomMetadataRecords:async()=>({complete:false,source:"LIVE_ORG"}),
+    getObjectSchema:async object=>{reads++;return {complete:true,source:"LIVE_ORG",value:schemaFixture[object.toLowerCase()]};}};
+  const session=new ApexAnalysisEngine(index,metadata);
+  const result=await session.analyzeInvocations(source,filePath,name=>name==="Inspector.consume"?{method:name,argumentIndices:[0,1]}:undefined);
+  assert.deepEqual(result.captures.get(result.sites[0].offset)?.[0].arguments,[textValue("Account"),booleanValue(true)]);
+  const back=await session.analyze(filePath,ctx=>traceApexDependencies(source,filePath,{expression:"rel",offset:source.indexOf("Inspector.consume")},index,ctx.resolveExternal));
+  assert.deepEqual(back.candidates.map(c=>c.value),[textValue("Account")],JSON.stringify(back));
+  await session.analyze(filePath,ctx=>evaluateApexExpression("contact.Birthdate.getDescribe().getType()",{values:new Map(),resolveCall:ctx.resolveExternal}));
+  assert.equal(reads,1);
+});
+test("known metadata can select the appropriate field transformation in generic AUE flow",()=>{
+  const source="public class Inspector {public static void run(){Set<String> fields=new Set<String>{'Id'};Schema.DescribeFieldResult dfr=Contact.Birthdate.getDescribe();if(dfr.getType()==Schema.DisplayType.DATE){fields.add('FORMAT(Birthdate)');}else{fields.add('Birthdate');}Inspector.consume(String.join(fields,','));}}";
+  const result=analyzeApexInvocations(source,"Inspector.cls",name=>name==="Inspector.consume"?{method:name,argumentIndices:[0]}:undefined,schemaResolver);
+  assert.deepEqual(result.captures.get(result.sites[0].offset)?.map(c=>c.arguments?.[0]),[textValue("Id,FORMAT(Birthdate)")]);
+});
+
+test("Schema relationship traversal resolves typed local receivers and nested reference reads without guessing targets",()=>{
+  const context={values:new Map<string,ApexValue>(),resolveCall:schemaResolver};
+  const ref=evaluateApexExpression("Contact.AccountId.getDescribe().getReferenceTo()",context);
+  const desc=evaluateApexExpression("Contact.AccountId.getDescribe().getReferenceTo()[0].getDescribe()",context);
+  const local={...context,values:new Map<string,ApexValue>([["refs",ref],["desc",desc]]),
+    argumentTypes:(parts:readonly string[])=>parts.map(p=>p==="refs"?"List<Schema.SObjectType>":p==="desc"?"Schema.DescribeSObjectResult":undefined)};
+  for(const expression of [
+    "refs[0].getDescribe().getName()",
+    "refs.get(0).getDescribe().getName()",
+    "desc.fields.getMap().get('ParentId').getDescribe().getReferenceTo()[0].getDescribe().getName()",
+    "Contact.AccountId.getDescribe().getReferenceTo()[0].getDescribe().fields.getMap().get('ParentId').getDescribe().getReferenceTo()[0].getDescribe().getName()"
+  ])assert.deepEqual(evaluateApexExpression(expression,local),textValue("Account"),expression);
+  assert.equal(evaluateApexExpression("refs[1].getDescribe().getName()",local).kind,"unknown");
+  assert.equal(evaluateApexExpression("Contact.OwnerId.getDescribe().getReferenceTo().get(0).getDescribe().getName()",local).kind,"unknown");
+});
+test("backward Schema traversal follows a local reference list and rejects a mutated list",()=>{
+  for(const mutation of ["","refs.clear();"]){
+    const source="public class Inspector {public static void run(){List<Schema.SObjectType> refs=Contact.AccountId.getDescribe().getReferenceTo();"+mutation+"Inspector.consume(refs[0].getDescribe().getName());}}";
+    const filePath="Inspector.cls",index=new ApexRepositoryMethodIndex([{filePath,source}]);
+    const back=traceApexDependencies(source,filePath,{expression:"refs[0].getDescribe().getName()",offset:source.indexOf("Inspector.consume")},index,schemaResolver);
+    if(mutation)assert.ok(back.candidates.every(c=>c.value.kind==="unknown"),JSON.stringify(back));
+    else assert.deepEqual(back.candidates.map(c=>c.value),[textValue("Account")],JSON.stringify(back));
+  }
+});
+
+test("typed Describe maps retain field tokens and case-insensitive keys; ordinary Maps remain case-sensitive",()=>{
+  const context={values:new Map<string,ApexValue>(),resolveCall:schemaResolver};
+  const fields=evaluateApexExpression("Contact.SObjectType.getDescribe().fields.getMap()",context);
+  assert.equal(fields.kind,"map");
+  const local={...context,values:new Map<string,ApexValue>([["fields",fields]])};
+  assert.deepEqual(evaluateApexExpression("fields.get('BIRTHDATE').getDescribe().getName()",local),textValue("Birthdate"));
+  assert.deepEqual(evaluateApexExpression("fields.containsKey('ACCOUNTID')",local),booleanValue(true));
+  assert.deepEqual(evaluateApexExpression("fields.get('Missing__c')",local),{kind:"null"});
+  const regular=evaluateApexExpression("new Map<String,String>{'Name'=>'Name'}",context);
+  assert.deepEqual(evaluateApexExpression("fields.containsKey('NAME')",{...context,values:new Map([["fields",regular]])}),booleanValue(false));
+});
+test("typed field maps use existing forward alias handling and isolate fresh Describe snapshots",()=>{
+  const source="public class Inspector {public static void run(){Map<String,Schema.SObjectField> fields=Contact.SObjectType.getDescribe().fields.getMap();Map<String,Schema.SObjectField> alias=fields;Map<String,Schema.SObjectField> fresh=Contact.SObjectType.getDescribe().fields.getMap();alias.remove('birthdate');fields.put('custom',Schema.SObjectType.Contact.fields.AccountId);Inspector.consume(fields.containsKey('Birthdate'),fresh.containsKey('Birthdate'),alias.get('CUSTOM').getDescribe().getName());}}";
+  const report=analyzeApexInvocations(source,"Inspector.cls",name=>name==="Inspector.consume"?{method:name,argumentIndices:[0,1,2]}:undefined,schemaResolver);
+  assert.deepEqual(report.captures.get(report.sites[0].offset)?.[0]?.arguments,[booleanValue(false),booleanValue(true),textValue("AccountId")],JSON.stringify([...report.failures]));
+});
+test("backward typed map reads replay exact local mutations but reject alias escape",()=>{
+  for(const middle of ["","fields.remove('birthdate');","Map<String,Schema.SObjectField> alias=fields;alias.clear();"]){
+    const source="public class Inspector {public static void run(){Map<String,Schema.SObjectField> fields=Contact.SObjectType.getDescribe().fields.getMap();"+middle+"Inspector.consume(fields.containsKey('Birthdate'));}}";
+    const filePath="Inspector.cls",index=new ApexRepositoryMethodIndex([{filePath,source}]);
+    const back=traceApexDependencies(source,filePath,{expression:"fields.containsKey('Birthdate')",offset:source.indexOf("Inspector.consume")},index,schemaResolver);
+    if(middle.includes("alias"))assert.ok(back.candidates.every(c=>c.value.kind==="unknown"),JSON.stringify(back));
+    else assert.deepEqual(back.candidates.map(c=>c.value),[booleanValue(!middle)],JSON.stringify(back));
+  }
+});
+
+test("source-proven metadata selector candidates preserve literal filters and row correlation",async()=>{
+  const source=[
+    "public class Inspector {",
+    "public static void run(String reportName){",
+    "Config__mdt cfg=getConfig(reportName);if(cfg==null){return;}",
+    "Inspector.consume(cfg.Object__c+'/'+cfg.Field_Set__c);}",
+    "private static Config__mdt getConfig(String developerName){",
+    "if(String.isBlank(developerName)){return null;}",
+    "List<Config__mdt> cfgs=[SELECT DeveloperName,Object__c,Field_Set__c,Optional_Field__c FROM Config__mdt WHERE DeveloperName=:developerName AND Active__c=true LIMIT 1];",
+    "return cfgs.isEmpty()?null:cfgs[0];}}"
+  ].join("\n");
+  const filePath="Inspector.cls",index=new ApexRepositoryMethodIndex([{filePath,source}]);
+  const calls:CustomMetadataFilter[][]=[];
+  const metadata:ApexMetadataProvider={
+    scopeKey:"selector-candidate-fixture",getObjectFieldNames:async()=>({complete:false,source:"LIVE_ORG"}),
+    getCustomMetadataRecords:async(type,fields,filters)=>{
+      assert.equal(type,"Config__mdt");assert.ok(fields.includes("DeveloperName"));calls.push([...(filters??[])]);
+      return {complete:true,source:"LIVE_ORG",value:[
+        {DeveloperName:"A",Object__c:"Account",Field_Set__c:"AccountFields",Optional_Field__c:null,Active__c:true},
+        {DeveloperName:"B",Object__c:"Contact",Field_Set__c:"ContactFields",Optional_Field__c:null,Active__c:true},
+        {DeveloperName:"C",Object__c:"Lead",Field_Set__c:"InactiveFields",Optional_Field__c:null,Active__c:false}
+      ]};
+    }
+  };
+  const session=new ApexAnalysisEngine(index,metadata);
+  const use={expression:"cfg.Object__c+'/'+cfg.Field_Set__c",offset:source.indexOf("Inspector.consume")};
+  const result=await session.analyze(filePath,ctx=>traceApexDependencies(source,filePath,use,index,ctx.resolveExternal,{allowMetadataCandidateRows:true}));
+  assert.deepEqual(result.candidates.map(c=>c.value).sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b))),
+    [textValue("Account/AccountFields"),textValue("Contact/ContactFields")],JSON.stringify(result));
+  assert.deepEqual(calls,[[{field:"Active__c",value:true}]]);
+  const exactOnly=await session.analyze(filePath,ctx=>traceApexDependencies(source,filePath,use,index,ctx.resolveExternal));
+  assert.ok(exactOnly.candidates.every(c=>c.value.kind==="unknown"),JSON.stringify(exactOnly));
+});
+test("metadata candidate helpers with unsupported effects or filters remain unknown",()=>{
+  for(const extra of ["System.debug(developerName);","developerName='A';"]){
+    const source="public class Inspector {public static void run(String name){Config__mdt cfg=getConfig(name);Inspector.consume(cfg.Object__c);}private static Config__mdt getConfig(String developerName){"+extra+"List<Config__mdt> cfgs=[SELECT Object__c FROM Config__mdt WHERE DeveloperName=:developerName LIMIT 1];return cfgs.isEmpty()?null:cfgs[0];}}";
+    const filePath="Inspector.cls",index=new ApexRepositoryMethodIndex([{filePath,source}]);
+    let requests=0;
+    const result=traceApexDependencies(source,filePath,{expression:"cfg.Object__c",offset:source.indexOf("Inspector.consume")},index,(name)=>{if(name==="Apex.metadataSelectorCandidates")requests++;return undefined;},{allowMetadataCandidateRows:true});
+    assert.equal(requests,0);
+    assert.ok(result.candidates.every(c=>c.value.kind==="unknown"),JSON.stringify(result));
+  }
+});
+
+test("global Describe guard reads share typed Schema evidence in forward and backward analysis",()=>{
+  const context={values:new Map<string,ApexValue>([["obj",textValue("Account")]]),resolveCall:schemaResolver};
+  for(const [condition,expected] of [
+    ["Schema.getGlobalDescribe().get(obj) == null",false],
+    ["null != Schema.getGlobalDescribe().get(obj)",true],
+    ["Schema.getGlobalDescribe().containsKey(obj)",true],
+    ["!Schema.getGlobalDescribe().containsKey(obj)",false]
+  ] as const)assert.deepEqual(evaluateApexExpression(condition,context),booleanValue(expected),condition);
+  assert.equal(evaluateApexExpression("Schema.getGlobalDescribe().containsKey('Missing__c')",context).kind,"unknown");
+  for(const condition of ["Schema.getGlobalDescribe().get(obj)==null","!Schema.getGlobalDescribe().containsKey(obj)"]){
+    const source="public class Inspector {public static void run(){String obj='Account';if("+condition+"){System.debug(obj);return;}Inspector.consume(obj);}}";
+    const filePath="Inspector.cls",index=new ApexRepositoryMethodIndex([{filePath,source}]);
+    const events:string[]=[];
+    const result=traceApexDependencies(source,filePath,{expression:"obj",offset:source.indexOf("Inspector.consume")},index,schemaResolver,{observe:e=>events.push(e.code)});
+    assert.deepEqual(result.candidates.map(c=>c.value),[textValue("Account")],JSON.stringify(result));
+    assert.ok(events.includes("SCHEMA_GUARD_RESOLVED"));
+    const unavailable=traceApexDependencies(source,filePath,{expression:"obj",offset:source.indexOf("Inspector.consume")},index,()=>undefined);
+    assert.ok(unavailable.candidates.every(c=>c.value.kind==="unknown"));
+    const missing=traceApexDependencies(source,filePath,{expression:"obj",offset:source.indexOf("Inspector.consume")},index,(method)=>method==="Schema.objectSchema"?{kind:"null"}:undefined);
+    assert.ok(missing.candidates.every(c=>c.value.kind==="unknown"));
+  }
+});
+test("global Describe guard does not bypass a reachable mutation or shadowed Schema",()=>{
+  for(const middle of ["if(Schema.getGlobalDescribe().containsKey(obj)){obj='Contact';}","String Schema='custom';if(Schema.getGlobalDescribe().get(obj)==null){return;}"]){
+    const source="public class Inspector {public static void run(){String obj='Account';"+middle+"Inspector.consume(obj);}}";
+    const filePath="Inspector.cls",index=new ApexRepositoryMethodIndex([{filePath,source}]);
+    const result=traceApexDependencies(source,filePath,{expression:"obj",offset:source.indexOf("Inspector.consume")},index,schemaResolver);
+    assert.ok(result.candidates.every(c=>c.value.kind==="unknown"||JSON.stringify(c.value)===JSON.stringify(textValue("Contact"))),JSON.stringify(result));
+  }
+});
+
+test("shared collection guard adapter reuses null, size and ordered Boolean evaluation",async()=>{
+  const {evaluateApexCollectionGuard}=await import("../src/core/apex/ApexCollectionOperations.js");
+  const nonempty=listValue(["Name"]),empty=listValue([]),nil:ApexValue={kind:"null"};
+  for(const [guard,value,expected] of [
+    ["paths == null || paths.isEmpty()",nonempty,false],
+    ["paths == null || paths.isEmpty()",empty,true],
+    ["paths == null || paths.isEmpty()",nil,true],
+    ["paths != null && !paths.isEmpty()",nil,false],
+    ["paths != null && paths.size() > 0",nonempty,true],
+    ["0 == paths.size()",empty,true],
+    ["!(paths == null || paths.isEmpty())",nonempty,true]
+  ] as const)assert.deepEqual(evaluateApexCollectionGuard(guard,"paths",value,true),booleanValue(expected),guard);
+  assert.equal(evaluateApexCollectionGuard("paths.isEmpty() || paths == null","paths",nil,true)?.kind,"unknown");
+  assert.equal(evaluateApexCollectionGuard("paths == null || paths.isEmpty()","paths",nonempty,false)?.kind,"unknown");
+  assert.equal(evaluateApexCollectionGuard("paths.size() == 0 || Other.mutate(paths)","paths",empty,true),undefined);
 });

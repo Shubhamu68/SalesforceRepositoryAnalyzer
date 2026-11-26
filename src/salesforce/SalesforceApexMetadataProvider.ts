@@ -1,4 +1,4 @@
-import type { ApexMetadataProvider, MetadataResult, CustomMetadataFilter, CustomMetadataResult } from "../core/metadata/ApexMetadataProvider.js";
+import type { ApexMetadataProvider, MetadataResult, CustomMetadataFilter, CustomMetadataResult, ApexObjectSchema } from "../core/metadata/ApexMetadataProvider.js";
 import type { SalesforceOrgConnection } from "./SalesforceOrgConnection.js";
 import {recordSoqlCount,timeSoqlPhase} from "../services/SoqlPerformanceMetrics.js";
 
@@ -38,6 +38,26 @@ export class SalesforceApexMetadataProvider implements ApexMetadataProvider {
       this.fieldsCache.set(objectApiName.toLowerCase(),cached);
     }
     return cached;
+  }
+  /** Reuse the connection's org/epoch-scoped Describe cache. No new endpoint. */
+  async getObjectSchema(objectApiName:string):Promise<MetadataResult<ApexObjectSchema>>{
+    if(!VALID_NAME.test(objectApiName))return {complete:false,source:"LIVE_ORG",reason:"Invalid object API name."};
+    try{
+      const result=await this.connection.describeSObject(objectApiName);
+      if(typeof result.name!=="string"||result.name.toLowerCase()!==objectApiName.toLowerCase()||
+        !Array.isArray(result.fields)||result.fields.some(f=>!f||typeof f.name!=="string"||!VALID_NAME.test(f.name))||
+        new Set(result.fields.map(f=>f.name.toLowerCase())).size!==result.fields.length)
+        return {complete:false,source:"LIVE_ORG",reason:"Object Describe identity or field list is incomplete."};
+      return {complete:true,source:"LIVE_ORG",value:{name:result.name,fields:result.fields.map(f=>({
+        name:f.name,
+        ...(typeof f.type==="string"?{type:f.type}:{}),
+        ...(f.relationshipName===null||typeof f.relationshipName==="string"?{relationshipName:f.relationshipName}:{}),
+        ...(Array.isArray(f.referenceTo)&&f.referenceTo.every(v=>typeof v==="string"&&VALID_NAME.test(v))?{referenceTo:[...f.referenceTo]}:{}),
+        ...(typeof f.nameField==="boolean"?{nameField:f.nameField}:{})
+      }))}};
+    }catch(error){
+      return {complete:false,source:"LIVE_ORG",reason:error instanceof Error?error.message:"Salesforce Describe unavailable."};
+    }
   }
   async getCustomLabelValue(labelApiName:string):Promise<MetadataResult<string>>{
     if(!VALID_NAME.test(labelApiName))return {

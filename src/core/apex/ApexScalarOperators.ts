@@ -48,6 +48,7 @@ export function compareScalars(left:ApexValue,right:ApexValue,operator:string):A
     let equal:boolean|undefined;
     if(left.kind==="null"||right.kind==="null")equal=left.kind===right.kind;
     else if(left.kind==="number"&&right.kind==="number")equal=left.value===right.value;
+    else if(left.kind==="schema"&&right.kind==="schema"&&left.schemaType==="displayType"&&right.schemaType==="displayType")equal=left.value===right.value;
     else if(left.kind==="text"&&right.kind==="text"&&left.values.length===1&&right.values.length===1){
       if(left.scalarType!==right.scalarType)return unknown("Comparison operand types are not proven compatible.");
       const a=left.values[0],b=right.values[0];

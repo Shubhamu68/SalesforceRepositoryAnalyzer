@@ -2,6 +2,7 @@ import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import ExcelJS from "exceljs";
 import { timeSoqlPhase, timeSoqlSync } from "../services/SoqlPerformanceMetrics.js";
+import { EXISTING_VARIANT_LIMITATION, PARTIAL_REFERENCE_LIMITATION } from "../analyzer/soqlExistingVariantReporting.js";
 
 import {
   SoqlSecurityFinding,
@@ -188,6 +189,8 @@ interface ConciseFinding {
     /** Severity and explanation are specific to this Apex query, not its group. */
     criticality: string;
     explanation: string;
+    limitedVariantCoverage?:boolean;
+    limitedPartialCoverage?:boolean;
   }>;
 }
 
@@ -257,6 +260,8 @@ function buildConciseFindings(
         runtimeImpact: finding.runtimeImpact ?? "Undetermined",
         criticality: finding.criticality ?? (finding.severity === "ERROR" ? "High" : "Unable to verify"),
         explanation: finding.reason,
+        ...(finding.limitedVariantCoverage?{limitedVariantCoverage:true}:{}),
+        ...(finding.limitedPartialCoverage?{limitedPartialCoverage:true}:{}),
         ...(finding.relationshipPath ? { relationshipPath: finding.relationshipPath } : {}),
         ...(finding.queryLevel ? { queryLevel: finding.queryLevel } : {}),
         ...(finding.apiVersion !== undefined ? { apiVersion: finding.apiVersion } : {}),
@@ -273,8 +278,12 @@ function buildConciseFindings(
     if (!highest) continue;
     entry.criticality = highest.criticality;
     const isMixed = entry.references.some(ref => ref.criticality !== highest.criticality);
-    entry.explanation = highest.explanation + (isMixed
-      ? " Severity differs across SOQL queries. Highest severity shown; see the Apex Classes column for affected locations."
+    const coverageNote=entry.references.some(ref=>ref.limitedVariantCoverage)&&!highest.limitedVariantCoverage
+      ? " Some occurrences have limited query-variant coverage. "+EXISTING_VARIANT_LIMITATION : "";
+    const partialNote=entry.references.some(ref=>ref.limitedPartialCoverage)&&!highest.limitedPartialCoverage
+      ? " Some occurrences have partial reference coverage. "+PARTIAL_REFERENCE_LIMITATION : "";
+    entry.explanation = highest.explanation + coverageNote + partialNote + (isMixed
+      ? " Severity differs across SOQL queries. The highest severity is shown; see Apex Classes for locations."
       : "");
   }
 
@@ -366,7 +375,7 @@ async function writeSummaryWorkbook(
 
   summarySheet.addRow([]);
   summarySheet.mergeCells("A5:H5");
-  summarySheet.getCell("A5").value = "High = confirmed missing Read with enforced SOQL access; Low = advisory or org-verified Read. Mixed findings show the highest severity. Dynamic SOQL uses repository initializer snapshots; detected static writes and direct collection aliases invalidate those snapshots. Indirect effects may remain unresolved; reconstructed queries are repository-based, not runtime traces.";
+  summarySheet.getCell("A5").value = "High = confirmed missing Read with enforced SOQL access or in recovered dynamic-query evidence; Unable to verify = unresolved permission or analysis review; Low = advisory or org-verified Read. High does not always mean a runtime access failure. Mixed findings show the highest severity. Dynamic SOQL uses repository initializer snapshots; detected static writes and direct collection aliases invalidate those snapshots. Indirect effects may remain unresolved; reconstructed queries are repository-based, not runtime traces.";
   summarySheet.getCell("A5").font = { italic: true, color: { argb: "FF60748D" }, size: 10 };
   summarySheet.getCell("A5").alignment = { wrapText: true, vertical: "middle" };
   summarySheet.getRow(5).height = 32;
@@ -448,14 +457,13 @@ function appendSummaryFindingRows(sheet: ExcelJS.Worksheet, findings: ConciseFin
       vertical: "top",
     };
     row.getCell(5).font = { bold: true, color: {
-      argb: finding.criticality === "High" ? "FFB42332" :
-        finding.criticality === "Low" ? "FF167349" : "FF916514",
+      argb: finding.criticality === "Low" ? "FF167349" : "FFB42332",
     } };
     row.getCell(6).alignment = { wrapText: true, vertical: "top" };
     row.getCell(7).alignment = { wrapText: true, vertical: "top" };
     row.getCell(8).alignment = { wrapText: true, vertical: "top" };
-    row.height = Math.min(112, Math.max(30,
-      15 * Math.max(groupedReferences.length, Math.ceil(finding.explanation.length / 65))));
+    row.height = Math.min(180, Math.max(30,
+      15 * Math.max(groupedReferences.length, finding.explanation.split("\n").reduce((lines,part)=>lines+Math.max(1,Math.ceil(part.length/60)),0))));
   }
 }
 

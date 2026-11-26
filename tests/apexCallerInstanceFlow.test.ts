@@ -27,7 +27,7 @@ test("multi-hop known caller variants remain separate from unknown external entr
   assert.ok(report.queries.every(q=>q.coverage==="KNOWN_CALLER_CONTEXT"));
   assert.equal(report.unresolved[0].knownVariants,2);
   assert.equal(report.unresolved.length,1);
-  assert.match(report.unresolved[0].reason,/structurally valid query variants in probed contexts: 2/);
+  assert.match(report.unresolved[0].reason,/valid query versions found: 2/);
 });
 test("unqualified static calls propagate known inputs through the repository index",()=>{
   const code="public class Entry { public static void run(){ forward('Account'); } public static void forward(String obj){ Gateway.fetch(obj); } }";

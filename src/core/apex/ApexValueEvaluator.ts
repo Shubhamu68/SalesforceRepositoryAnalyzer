@@ -1,17 +1,22 @@
+import {lexicalValue,referenceMember} from "./ApexReferenceState.js";
+import type {ApexArgumentTypes,ApexCallResolver} from "./ApexTypeSystem.js";
 import { splitApexTopLevel, stripApexComments, maskApexSource, matchingPair } from "./ApexSourceModel.js";
 import {compareScalars,integerArithmetic,knownBoolean,splitScalarOperator} from "./ApexScalarOperators.js";
 import {findApexTernary} from "./ApexConditionalInvocation.js";
 import { parseCustomMetadataQuery } from "./ApexCustomMetadataQueryModel.js";
 import {evaluateBoundedStringOperation,isBoundedStringOperation} from "./ApexBoundedStringOperations.js";
+import {readApexReadOperation} from "./ApexReadOperations.js";
+import {evaluateSchemaExpression,evaluateSchemaRead,schemaReceiverEligible,isSchemaFieldMap,type ApexSchemaValue,type ApexSchemaChoice} from "./ApexSchemaModel.js";
 
 /** Portable abstract Apex values: no Salesforce API calls and no eval(). */
 export type ApexValue =
+  | ApexSchemaValue
   | { kind: "text"; values: string[]; scalarType?: "boolean" }
   | { kind: "collection"; items: string[]; unique: boolean }
-  | { kind: "map"; entries: Array<[string,ApexValue]> }
+  | { kind: "map"; entries: Array<[string,ApexValue]>; keyType?:"integer"|"string"|"schemaField" }
   | { kind: "instance"; className:string; entries: Array<[string,ApexValue]> }
   | { kind: "instanceList"; elementType:string; items:ApexValue[] }
-  | { kind: "record"; entries: Array<[string,ApexValue]> }
+  | { kind: "record"; entries: Array<[string,ApexValue]>; metadataIdentity?:{type:string;developerName:string} }
   | { kind: "records"; items: Array<Array<[string,ApexValue]>> }
   | { kind: "fieldSet"; objectApiName:string; developerName:string }
   | { kind: "null" }
@@ -102,7 +107,12 @@ const MAX_CHARS = 100_000;
 
 export interface ApexExpressionContext {
   values: ReadonlyMap<string,ApexValue>;
-  resolveCall?: (name: string, args: ApexValue[]) => ApexValue | undefined;
+  resolveCall?: ApexCallResolver;
+  argumentTypes?: (expressions:readonly string[])=>ApexArgumentTypes;
+  schemaShadowed?: (name:string)=>boolean;
+  chooseSchemaAlternative?:ApexSchemaChoice;
+  /** Guard replay requires ordered evaluation; an unknown earlier term may throw. */
+  strictBooleanGuards?:boolean;
 }
 
 function unescapeApex(token: string): string | null {
@@ -125,7 +135,7 @@ export function addApexValues(left: ApexValue,right: ApexValue): ApexValue {
      left.kind==="map"||right.kind==="map"||
      left.kind==="record"||right.kind==="record"||left.kind==="instance"||right.kind==="instance"||
      left.kind==="records"||right.kind==="records"||left.kind==="instanceList"||right.kind==="instanceList"||
-     left.kind==="fieldSet"||right.kind==="fieldSet")
+     left.kind==="fieldSet"||right.kind==="fieldSet"||left.kind==="schema"||right.kind==="schema")
     return unknown("Cannot concatenate an Apex collection as text.");
   const from=(x:ApexValue):string[]=>
     x.kind==="text"?x.values:x.kind==="number"?[String(x.value)]:[];
@@ -135,6 +145,14 @@ export function addApexValues(left: ApexValue,right: ApexValue): ApexValue {
     joined.push(a+b);
   }
   return merged(joined);
+}
+/** Legacy JSON maps remain string-keyed. Numeric keys are only accepted
+ * for a source-declared Integer map. */
+export function apexMapKey(map:Extract<ApexValue,{kind:"map"}>,value:ApexValue):string|null{
+  if(map.keyType==="schemaField")return value.kind==="text"&&value.scalarType===undefined&&value.values.length===1?value.values[0].toLowerCase():null;
+  if(map.keyType==="integer")return value.kind==="number"&&Number.isInteger(value.value)&&value.value>=-2147483648&&value.value<=2147483647?String(value.value):null;
+  if(map.keyType==="string")return value.kind==="text"&&value.scalarType===undefined&&value.values.length===1?value.values[0]:null;
+  return onlyText(value);
 }
 function onlyText(value: ApexValue): string | null {
   return value.kind==="text"&&value.values.length===1?value.values[0]:
@@ -170,7 +188,7 @@ export function evaluateApexExpression(
   if(/^null$/i.test(expr))return {kind:"null"};
   // Qualified member overrides are method-local abstract state, not changes
   // to the repository snapshot.
-  const tracked=context.values.get(expr);
+  const tracked=/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/.test(expr)?lexicalValue(context.values,expr):context.values.get(expr);
   if(tracked!==undefined)return tracked;
   if(/^[A-Za-z_]\w*$/.test(expr))return context.values.get(expr) ??
     context.resolveCall?.("Apex.unqualifiedField",[textValue(expr)]) ??
@@ -181,19 +199,38 @@ export function evaluateApexExpression(
   const label=/^(?:System\.)?Label\.([A-Za-z_]\w*)$/i.exec(expr);
   if(label)return context.resolveCall?.("System.Label",[textValue(label[1])]) ??
     unknown("Custom Label "+label[1]+" is not available from complete org metadata.");
+  if(/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*){2,}$/.test(expr)){
+    const member=referenceMember(context.values,expr);if(member!==undefined)return member;
+  }
   const instanceMember=/^([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/.exec(expr);
-  if(instanceMember && context.values.get(instanceMember[1])?.kind==="instance"){
-    const instance=context.values.get(instanceMember[1])!;
+  if(instanceMember && lexicalValue(context.values,instanceMember[1])?.kind==="instance"){
+    const instance=lexicalValue(context.values,instanceMember[1])!;
     if(instance.kind==="instance")return instance.entries.find(([key])=>key.toLowerCase()===instanceMember[2].toLowerCase())?.[1]??unknown("Instance member "+instanceMember[2]+" is not proven.");
   }
-  if(instanceMember && context.values.get(instanceMember[1])?.kind==="record"){
-    const record=context.values.get(instanceMember[1])!;
+  if(instanceMember && lexicalValue(context.values,instanceMember[1])?.kind==="record"){
+    const record=lexicalValue(context.values,instanceMember[1])!;
+    if(record.kind==="record"&&record.metadataIdentity)
+      return context.resolveCall?.("Apex.metadataGetInstance",[textValue(record.metadataIdentity.type),textValue(record.metadataIdentity.developerName),textValue(instanceMember[2])])??unknown("Custom Metadata record field is not available.");
     if(record.kind==="record")
       return record.entries.find(([key])=>key.toLowerCase()===instanceMember[2].toLowerCase())?.[1] ??
         unknown("Metadata row field "+instanceMember[2]+" was not completely retrieved.");
   }
+  const schemaContext={
+    evaluate:(part:string)=>evaluateApexExpression(part,context,depth+1),
+    resolveCall:context.resolveCall,
+    chooseSchemaAlternative:context.chooseSchemaAlternative,
+    shadowed:(root:string)=>lexicalValue(context.values,root)!==undefined||!!context.schemaShadowed?.(root),
+    receiverEligible:(part:string)=>{
+      const value=lexicalValue(context.values,part);
+      return value?.kind==="schema"||!!value&&isSchemaFieldMap(value)||
+        schemaReceiverEligible(part,context.argumentTypes?.([part])?.[0]);
+    }
+  };
+  if(/^[A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)+$/.test(expr)){
+    const schema=evaluateSchemaExpression(expr,schemaContext);if(schema!==undefined)return schema;
+  }
   const constant=/^([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/.exec(expr);
-  if(constant&&context.values.has(constant[1]))
+  if(constant&&lexicalValue(context.values,constant[1])!==undefined)
     return unknown("Instance member expression "+expr+" depends on runtime object state.");
   if(constant)return context.resolveCall?.("Apex.constant",[textValue(expr)]) ??
     unknown(/^[a-z]/.test(constant[1])
@@ -219,7 +256,10 @@ export function evaluateApexExpression(
       let unknownTerm=false;
       for(const term of terms){
         const check=knownBoolean(evaluateApexExpression(term,context,depth+1));
-        if(check===undefined){unknownTerm=true;continue;}
+        if(check===undefined){
+          if(context.strictBooleanGuards)return unknown("Earlier guard term is not proven to evaluate safely.");
+          unknownTerm=true;continue;
+        }
         if((operator==="&&"&&!check)||(operator==="||"&&check))return booleanValue(check);
       }
       return unknownTerm?unknown("Boolean condition depends on runtime inputs."):booleanValue(operator==="&&");
@@ -312,44 +352,62 @@ export function evaluateApexExpression(
   // Schema Describe is a metadata dependency, not a method to execute.
   // A caller-supplied read-only snapshot must prove the complete field list.
   const directDescribe=/^([A-Za-z_]\w*)\.SObjectType\.getDescribe\(\)\.fields\.getMap\(\)$/i.exec(expr);
-  if(directDescribe)return context.resolveCall?.("Schema.describeFields",[textValue(directDescribe[1])]) ??
-    unknown("Schema Describe fields are unavailable for "+directDescribe[1]+".");
+  if(directDescribe){
+    if(schemaContext.shadowed(directDescribe[1]))return unknown("Schema Describe object is shadowed.");
+    const object=textValue(directDescribe[1]);
+    const typed=context.resolveCall?.("Schema.fieldMap",[object]);
+    if(typed&&isSchemaFieldMap(typed))return typed;
+    return context.resolveCall?.("Schema.describeFields",[object])??
+      unknown("Schema Describe fields are unavailable for "+directDescribe[1]+".");
+  }
   const describe=/^Schema\.getGlobalDescribe\(\)\.get\(([^)]*)\)\.getDescribe\(\)\.fields\.getMap\(\)$/i.exec(expr);
   if(describe){
     const object=evaluateApexExpression(describe[1],context,depth+1);
+    if(schemaContext.shadowed("Schema"))return unknown("Schema is shadowed.");
+    const typed=context.resolveCall?.("Schema.fieldMap",[object]);
+    if(typed&&isSchemaFieldMap(typed))return typed;
     return context.resolveCall?.("Schema.describeFields",[object]) ??
       unknown("Schema Describe fields are unavailable for the target object.");
   }
+  // Rich Schema reads use the same metadata boundary as the legacy
+  // field-name inventory above. No change to existing map/Field Set values.
+  const schema=evaluateSchemaExpression(expr,schemaContext);
+  if(schema!==undefined)return schema;
   // Apex allows a generic Map cast on JSON.deserialize results. Only remove
   // a type cast directly attached to a JSON call, never arbitrary expressions.
   const cast=/^\(Map\s*<[\w\s,.<>]+>\)\s*(JSON\.deserialize\([\s\S]*\))$/i.exec(expr);
   if(cast)return evaluateApexExpression(cast[1],context,depth+1);
-  if(/^new\s+Map\s*<[\w\s,.<>]+>\s*\(\s*\)$/i.test(expr))
-    return {kind:"map",entries:[]};
-  const mapLiteral=/^new\s+Map\s*<[\w\s,.<>]+>\s*\{([\s\S]*)\}$/i.exec(expr);
+  const emptyMap=/^new\s+Map\s*<\s*(Integer|String)\s*,[\w\s,.<>]+>\s*\(\s*\)$/i.exec(expr);
+  if(emptyMap)return {kind:"map",entries:[],keyType:emptyMap[1].toLowerCase() as "integer"|"string"};
+  if(/^new\s+Map\s*<[\w\s,.<>]+>\s*\(\s*\)$/i.test(expr))return {kind:"map",entries:[]};
+  const mapLiteral=/^new\s+Map\s*<\s*([A-Za-z_]\w*)\s*,[\w\s,.<>]+>\s*\{([\s\S]*)\}$/i.exec(expr);
   if(mapLiteral){
-    const entries:Array<[string,ApexValue]>=[];
-    for(const item of splitApexTopLevel(mapLiteral[1],",")){
+    const keyType=mapLiteral[1].toLowerCase();
+    const map:Extract<ApexValue,{kind:"map"}>={kind:"map",entries:[],...((keyType==="integer"||keyType==="string")?{keyType}: {})};
+    const entries=map.entries;
+    for(const item of splitApexTopLevel(mapLiteral[2],",")){
       if(!item.trim())continue;
       const pair=splitApexTopLevel(item,"=>");
       if(pair.length!==2)return unknown("Apex map initializer is malformed.");
       const keyValue=evaluateApexExpression(pair[0],context,depth+1);
-      const key=onlyText(keyValue);
+      const key=apexMapKey(map,keyValue);
       const val=evaluateApexExpression(pair[1],context,depth+1);
       if(key===null)return unknown("Apex map initializer has an unproven key: "+
         pair[0].trim()+"; cause: "+
         (keyValue.kind==="unknown"?keyValue.reason:"Map key is not a single scalar."));
       if(val.kind==="unknown")
         return unknown("Apex map initializer for key "+key+" is unproven: "+val.reason);
+      if(entries.some(([existing])=>existing===key))return unknown("Duplicate map initializer key is not proven.");
       entries.push([key,val]);
       if(entries.length>MAX_MAP_ENTRIES)return unknown("Apex map entry limit exceeded.");
     }
-    return {kind:"map",entries};
+    return map;
   }
   const allocation=/^new\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(([\s\S]*)\)$/i.exec(expr);
   if(allocation){
-    const args=allocation[2].trim()?splitApexTopLevel(allocation[2],",").map(x=>evaluateApexExpression(x,context,depth+1)):[];
-    return context.resolveCall?.("Apex.construct",[textValue(allocation[1]),...args])??
+    const pieces=allocation[2].trim()?splitApexTopLevel(allocation[2],","):[];
+    const args=pieces.map(x=>evaluateApexExpression(x,context,depth+1));
+    return context.resolveCall?.("Apex.construct",[textValue(allocation[1]),...args],[undefined,...(context.argumentTypes?.(pieces)??pieces.map(()=>undefined))])??
       unknown("Apex constructor "+allocation[1]+" is not proven.");
   }
   // Simple lexical list/index access. A metadata result without ORDER BY
@@ -368,17 +426,17 @@ export function evaluateApexExpression(
     }
     return unknown("Indexed Apex value or row ordering is not proven.");
   }
-  // Evaluate the trailing operation of a chain using the existing expression
-  // evaluator for its receiver; only a fixed allowlist of exact operations.
-  const visible=maskApexSource(expr);
-  for(const match of visible.matchAll(/\.\s*([A-Za-z_]\w*)\s*\(/g)){
-    if(!isBoundedStringOperation(match[1]))continue;
-    const open=match.index!+match[0].length-1;
-    if(matchingPair(visible,open)!==visible.length-1)continue;
-    const receiver=evaluateApexExpression(expr.slice(0,match.index),context,depth+1);
-    const input=expr.slice(open+1,-1).trim();
-    const args=input?splitApexTopLevel(input,",").map(x=>evaluateApexExpression(x,context,depth+1)):[];
-    return evaluateBoundedStringOperation(receiver,match[1],args);
+  // Shared read-operation syntax; preserve simple helper dispatch.
+  const operation=readApexReadOperation(expr);
+  if(operation){
+    if(isBoundedStringOperation(operation.name)){
+      return evaluateBoundedStringOperation(evaluateApexExpression(operation.receiver,context,depth+1),operation.name,
+        operation.args.map(x=>evaluateApexExpression(x,context,depth+1)));
+    }
+    if(/[)\]]$/.test(operation.receiver)){
+      return evaluateApexReadOperation(evaluateApexExpression(operation.receiver,context,depth+1),operation.name,
+        operation.args.map(x=>evaluateApexExpression(x,context,depth+1)));
+    }
   }
   const call=/^([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(([\s\S]*)\)$/s.exec(expr);
   if(call){
@@ -386,6 +444,9 @@ export function evaluateApexExpression(
     const pieces=call[2].trim()?splitApexTopLevel(call[2],","):[];
     const args=pieces.map(x=>evaluateApexExpression(x,context,depth+1));
     const lname=name.toLowerCase();
+    const metadataInstance=/^([A-Za-z_]\w*__mdt)\.getInstance$/i.exec(name);
+    if(metadataInstance&&args.length===1)
+      return context.resolveCall?.("Apex.metadataGetInstance",[textValue(metadataInstance[1]),args[0]])??unknown("Custom Metadata getInstance identity is not proven.");
     if(lname.endsWith(".getfields")&&args.length===0){
       const receiver=evaluateApexExpression(name.slice(0,-10),context,depth+1);
       if(receiver.kind==="fieldSet")
@@ -397,7 +458,7 @@ export function evaluateApexExpression(
         // getFields is also a legitimate repository static helper name.
         // A known lexical receiver must still use the Field Set semantics.
         if(/^[A-Za-z_]\w*$/.test(qualifier)&&!context.values.has(qualifier)){
-          const helper=context.resolveCall?.(name,args);
+          const helper=context.resolveCall?.(name,args,context.argumentTypes?.(pieces));
           if(helper!==undefined)return helper;
         }
         return receiver;
@@ -424,7 +485,7 @@ export function evaluateApexExpression(
     }
     if(lname.endsWith(".keyset")&&args.length===0){
       const receiver=evaluateApexExpression(name.slice(0,-7),context,depth+1);
-      return receiver.kind==="map"?listValue(receiver.entries.map(([key])=>key),true):
+      return receiver.kind==="map"?receiver.keyType==="integer"?unknown("Integer map keySet is not a String collection."):listValue(receiver.entries.map(([key])=>key),true):
         // Schema Describe maps are represented by a known field-name collection.
         receiver.kind==="collection"?listValue(receiver.items,true):
         unknown("Map keySet() receiver is unresolved: "+
@@ -432,8 +493,8 @@ export function evaluateApexExpression(
     }
     if(lname.endsWith(".containskey")&&args.length===1){
       const receiver=evaluateApexExpression(name.slice(0,-12),context,depth+1);
-      const key=onlyText(args[0]);
-      if(key===null)return unknown("Map.containsKey depends on runtime key.");
+      const key=receiver.kind==="map"?apexMapKey(receiver,args[0]):onlyText(args[0]);
+      if(key===null)return unknown("Map.containsKey depends on runtime or incompatible key.");
       if(receiver.kind==="map")return booleanValue(receiver.entries.some(([k])=>k===key));
       if(receiver.kind==="collection")return booleanValue(receiver.items.includes(key));
       if(receiver.kind==="unknown")return receiver;
@@ -450,11 +511,11 @@ export function evaluateApexExpression(
           ?receiver.items[index.value]:unknown("Custom Apex list index is not proven.");
       }
       if(receiver.kind==="map"){
-        const key=onlyText(args[0]);
-        if(key===null)return unknown("Map.get key depends on runtime input: "+
+        const key=apexMapKey(receiver,args[0]);
+        if(key===null)return unknown("Map.get key depends on runtime or incompatible input: "+
           (args[0].kind==="unknown"?args[0].reason:"key is not a single scalar."));
         return receiver.entries.find(([item])=>item===key)?.[1] ??
-          unknown("Map.get key "+key+" absent from proven configuration.");
+          (isSchemaFieldMap(receiver)?{kind:"null"}:unknown("Map.get key "+key+" absent from proven configuration."));
       }
     }
     // Pure scalar conversions used by immutable static initializers and
@@ -536,10 +597,27 @@ export function evaluateApexExpression(
       if(operation==="containsignorecase")return merged(receiver.values.map(x=>String(x.toLowerCase().includes(argument.toLowerCase()))),"boolean");
       if(operation==="split"){
         const one=onlyText(receiver);
-        return one!==null?listValue(one.split(argument)):unknown("Split has multiple possible inputs.");
+        if(one===null)return unknown("Split has multiple possible inputs.");
+        // Apex split uses a regular expression. Interpret only bounded,
+        // unambiguous delimiters, never arbitrary regex source.
+        if(argument==="\\.")return listValue(one.split("."));
+        if(argument==="\\s+")return listValue(one.split(/\s+/).filter((part,i,all)=>part!==""||i<all.length-1));
+        if(argument&&!/[\\^$.*+?()[\]{}|]/.test(argument))return listValue(one.split(argument));
+        return unknown("Apex String.split regex is outside the proven subset.");
       }
     }
-    return context.resolveCall?.(name,args)??unknown("Unsupported or external Apex method: "+name);
+    return context.resolveCall?.(name,args,context.argumentTypes?.(pieces))??unknown("Unsupported or external Apex method: "+name);
   }
   return unknown("Unsupported Apex expression: "+expr.slice(0,100));
+}
+
+
+/** Apply an existing built-in to already resolved values without inserting
+ * synthetic bindings in an execution frame or consulting external helpers. */
+export function evaluateApexReadOperation(receiver:ApexValue,name:string,args:readonly ApexValue[]):ApexValue{
+  const schema=evaluateSchemaRead(receiver,name,args);if(schema!==undefined)return schema;
+  if(isBoundedStringOperation(name))return evaluateBoundedStringOperation(receiver,name,args);
+  const values=new Map<string,ApexValue>([["receiver",receiver]]);
+  const names=args.map((value,i)=>{const key="arg"+i;values.set(key,value);return key;});
+  return evaluateApexExpression("receiver."+name+"("+names.join(",")+")",{values});
 }

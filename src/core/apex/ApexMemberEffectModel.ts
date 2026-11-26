@@ -1,5 +1,10 @@
 import {maskApexSource,matchingPair,type IndexedApexMethod,type SourceNode} from "./ApexSourceModel.js";
 import {evaluateApexExpression,unknown,type ApexValue} from "./ApexValueEvaluator.js";
+import {canonicalApexType} from "./ApexTypeSystem.js";
+import {maskProvenSchemaReads,maskProvenListReads} from "./ApexSchemaModel.js";
+import {isBoundedStringOperation} from "./ApexBoundedStringOperations.js";
+import {recognizeSchemaHelper} from "./ApexSchemaHelperModel.js";
+import {stripApexAutomaticScalarProperties} from "./ApexAutomaticProperty.js";
 
 interface ScalarMember {name:string;key:string;initial:ApexValue}
 const safeCall=/^(?:String\.(?:join|valueOf|isBlank|isNotBlank|isEmpty|escapeSingleQuotes)|Math\.(?:min|max)|System\.debug)$/i;
@@ -11,6 +16,7 @@ export class ApexMemberEffectModel{
   readonly fields=new Map<string,ScalarMember>();
   private readonly localNames=new Map<IndexedApexMethod,Set<string>>();
   private readonly safe=new Map<IndexedApexMethod,boolean>();
+  private readonly replayFailures=new Map<IndexedApexMethod,number>();
   private readonly masked:string;
   readonly owner:string|undefined;
   private freshEligible=false;
@@ -74,8 +80,8 @@ export class ApexMemberEffectModel{
       if(!writes)this.fields.delete(name);
     }
   }
-  /** A narrow DTO proof: nested non-inheriting class, scalar automatic
-   * properties, and at most one constructor assigning only those properties
+  /** A narrow DTO proof: nested non-inheriting class, scalar instance fields
+   * or automatic properties, and at most one constructor assigning only those members
    * from its parameters or literal scalars. No custom accessors or callbacks. */
   private indexInertDtos(open:number,close:number,top:Int16Array):void{
     for(const hit of this.masked.matchAll(/\bclass\s+([A-Za-z_]\w*)\s*\{/gi)){
@@ -85,9 +91,21 @@ export class ApexMemberEffectModel{
       if(end<0||end>close)continue;
       const name=hit[1],props=new Set<string>();
       let body=this.masked.slice(start+1,end);
-      body=body.replace(/(?:@\w+\s*)?(?:public|private|global)\s+(?:String|Boolean|Integer|Long|Decimal|Double|Id)\s+([A-Za-z_]\w*)\s*\{\s*get\s*;\s*set\s*;\s*\}/gi,(_all,prop:string)=>{
-        props.add(prop.toLowerCase());return "";
+      let duplicate=false;
+      const addProperty=(prop:string)=>{
+        const key=prop.toLowerCase();if(props.has(key))duplicate=true;
+        props.add(key);
+      };
+      body=stripApexAutomaticScalarProperties(body,property=>addProperty(property.name));
+      // Ordinary scalar instance fields have the same no-alias property as
+      // automatic scalar properties. Admit only declarations without an
+      // initializer, not static fields, collection members, custom accessors
+      // or arbitrary executable initialization. Remaining text is checked
+      // by the existing constructor proof below.
+      body=body.replace(/(?:@\w+\s*)?(?:public|private|global)\s+(?:String|Boolean|Integer|Long|Decimal|Double|Id)\s+([A-Za-z_]\w*)\s*;/gi,(_all,prop:string)=>{
+        addProperty(prop);return "";
       });
+      if(duplicate)continue;
       const constructor=new RegExp("^\\s*(?:public|private|global)\\s+"+name+"\\s*\\(([^()]*)\\)\\s*\\{([\\s\\S]*)\\}\\s*$","i").exec(body);
       if(constructor){
         const parameters=new Set<string>();
@@ -160,8 +178,26 @@ export class ApexMemberEffectModel{
     const type=this.types(method).get(receiver)??"";
     if(/^(?:List|Set)\s*<\s*String\s*>$|^Map\s*<\s*String\s*,\s*String\s*>$/i.test(type))
       return /^(?:get|contains|containsKey|isEmpty|size|keySet)$/i.test(operation);
-    if(/^String$/i.test(type))return /^(?:trim|length|substring|endsWith|startsWith|contains|split|isEmpty|toLowerCase|toUpperCase)$/i.test(operation);
+    if(/^String$/i.test(type))return isBoundedStringOperation(operation)||/^(?:trim|contains|split|isEmpty|toLowerCase|toUpperCase|equalsIgnoreCase|containsIgnoreCase|removeEnd)$/i.test(operation);
     return /^Schema\.FieldSetMember$/i.test(type)&&/^(?:getFieldPath|getLabel|getType)$/i.test(operation);
+  }
+  private readonly schemaHelpers=new Map<IndexedApexMethod,ReturnType<typeof recognizeSchemaHelper>>();
+  schemaHelper(method:IndexedApexMethod):ReturnType<typeof recognizeSchemaHelper>{
+    if(!this.schemaHelpers.has(method))this.schemaHelpers.set(method,this.isOuter(method)?recognizeSchemaHelper(this.source,method):undefined);
+    return this.schemaHelpers.get(method);
+  }
+  private maskPureSchemaHelpers(visible:string):string{
+    let result="",cursor=0;
+    for(const hit of visible.matchAll(/\b([A-Za-z_]\w*)\s*\(/g)){
+      const at=hit.index!;if(at<cursor||/\.\s*$/.test(visible.slice(0,at)))continue;
+      const candidates=this.methods.filter(m=>m.name.toLowerCase()===hit[1].toLowerCase());
+      if(candidates.length!==1||!this.schemaHelper(candidates[0]))continue;
+      const open=visible.indexOf("(",at),end=matchingPair(visible,open);
+      if(end<0||!/^\s*(?:[A-Za-z_]\w*|0)?\s*(?:,\s*(?:[A-Za-z_]\w*|0)?\s*)*$/.test(visible.slice(open+1,end)))continue;
+      if(/^\s*(?:\.|\[)/.test(visible.slice(end+1)))continue;
+      result+=visible.slice(cursor,at)+"0";cursor=end+1;
+    }
+    return result+visible.slice(cursor);
   }
   /** Strict replay subset: only local scalars/collections, direct member
    * writes and proven built-ins. Unsupported dispatch/callbacks fail closed. */
@@ -169,9 +205,12 @@ export class ApexMemberEffectModel{
     const old=this.safe.get(method);if(old!==undefined)return old;
     this.safe.set(method,false);
     if(!this.isOuter(method)||!method.isStatic||method.visibility!=="private")return false;
+    if(this.schemaHelper(method)){this.safe.set(method,true);return true;}
     const types=this.types(method);
     const check=(source:string,statement=false):boolean=>{
       let visible=maskApexSource(source);
+      const schemaAllowed=!this.locals(method).has("schema")&&!/\bclass\s+Schema\b/i.test(this.masked);
+      visible=this.maskPureSchemaHelpers(maskProvenSchemaReads(visible,types,schemaAllowed));
       if(/\b(?:insert|update|upsert|delete|undelete|merge|throw|switch|try|while|do)\b/i.test(visible))return false;
       // Recognize only platform constructors and independently proven inert
       // nested DTOs. Unknown allocations are not safe effect evidence.
@@ -205,7 +244,7 @@ export class ApexMemberEffectModel{
         const tail=visible.slice(hit.index!+hit[0].length);
         if(/^\s*[.(]/.test(tail))continue; // the complete call is checked below
         const receiver=hit[1].toLowerCase(),member=hit[2].toLowerCase();
-        if(receiver==="label"||receiver==="schema"&&member==="fieldsetmember"||
+        if(receiver==="label"||receiver==="schema"&&schemaAllowed&&/^(?:fieldsetmember|sobjecttype|sobjectfield|describesobjectresult|describefieldresult|displaytype)$/.test(member)||
           this.key(method,hit[1]+"."+hit[2])||
           this.inertDtos.get((types.get(receiver)??"").toLowerCase())?.has(member))continue;
         return false;
@@ -226,25 +265,95 @@ export class ApexMemberEffectModel{
         if(dot>0&&safeMember.test(name.slice(dot+1))){
           const type=types.get(name.slice(0,dot).toLowerCase())??"";
           if(/^(?:String|List\s*<\s*String\s*>|Set\s*<\s*String\s*>|Map\s*<\s*String\s*,\s*String\s*>|Schema\.FieldSetMember|List\s*<\s*Object\s*>)$/i.test(type)){
-            if(/^(?:add|addAll|clear|put|putAll|remove)$/i.test(name.slice(dot+1))&&directEffectCall(source.trim().replace(/;$/,""))!==name.toLowerCase())return false;
+            if(/^(?:add|addAll|clear|put|putAll|remove)$/i.test(name.slice(dot+1))&&directEffectCall(visible.trim().replace(/;$/,""))!==name.toLowerCase())return false;
             continue;
           }
         }
         // Allow a uniquely resolved nested local private static helper.
         const candidates=this.methods.filter(m=>m.name.toLowerCase()===name.toLowerCase());
-        if(candidates.length===1&&directEffectCall(source.trim().replace(/;$/,""))===name.toLowerCase()&&this.replaySafe(candidates[0]))continue;
+        if(candidates.length===1&&this.replaySafe(candidates[0])){
+          const expression=source.trim().replace(/;\s*$/,"");
+          if(directEffectCall(expression)===name.toLowerCase())continue;
+          // The interpreter already transfers effects for a direct local
+          // assignment RHS. Admit only this exact shape, never a nested
+          // expression, member assignment or unproven reference return.
+          const assignment=/^(?:(?:final\s+)?[\w.]+\s+)?([A-Za-z_]\w*)\s*=(?!=|>)\s*([\s\S]+)$/.exec(expression);
+          const targetType=canonicalApexType(assignment?types.get(assignment[1].toLowerCase()):undefined);
+          const scalarReturn=targetType&&/^(?:string|boolean|integer|long|decimal|double|id|date|datetime|schema\.(?:sobjecttype|sobjectfield|describesobjectresult|describefieldresult|displaytype))$/.test(targetType);
+          if(statement&&assignment&&scalarReturn&&targetType===canonicalApexType(candidates[0].returnType)&&
+            directEffectCall(assignment[2])===name.toLowerCase())continue;
+        }
         return false;
       }
       return true;
     };
-    const visit=(nodes:readonly SourceNode[]):boolean=>nodes.every(node=>
-      node.kind!=="opaque"&&!(node.kind==="for"&&!node.loopVariable)&&
-      node.condition!=="__apex_exception_path_unknown__"&&
-      !(node.kind==="statement"&&!/^\s*(?:return\b|break\s*;|continue\s*;|(?:[\w.]+(?:\s*<[\w\s,.<>]+>)?\s+)?[\w.]+\s*(?:=(?!=|>)|\+=|;)|[\w.]+\s*\()/i.test(maskApexSource(node.text??"")))&&
-      check(node.text??"",node.kind==="statement")&&check(node.condition??"")&&check(node.iterable??"")&&
-      visit(node.body??[])&&visit(node.otherwise??[]));
+    const visit=(nodes:readonly SourceNode[]):boolean=>nodes.every(node=>{
+      const valid=node.kind!=="opaque"&&!(node.kind==="for"&&!node.loopVariable)&&
+        node.condition!=="__apex_exception_path_unknown__"&&
+        !(node.kind==="statement"&&!/^\s*(?:return\b|break\s*;|continue\s*;|(?:[\w.]+(?:\s*<[\w\s,.<>]+>)?\s+)?[\w.]+\s*(?:=(?!=|>)|\+=|;)|[\w.]+\s*\()/i.test(maskApexSource(node.text??"")))&&
+        check(node.text??"",node.kind==="statement")&&check(node.condition??"")&&check(node.iterable??"");
+      if(!valid){this.replayFailures.set(method,node.start);return false;}
+      return visit(node.body??[])&&visit(node.otherwise??[]);
+    });
     const result=visit(method.body);
     this.safe.set(method,result);return result;
+  }
+  /** First source statement rejected by the shared effect proof. */
+  replayFailureOffset(method:IndexedApexMethod):number|undefined{
+    this.replaySafe(method);return this.replayFailures.get(method);
+  }
+  /** Exact reference summaries must not depend on an unspecified Set
+   * iteration order. Reuse the existing typed receiver and replay proofs;
+   * conservatively reject potentially ordered observations of a Set,
+   * including conversions to List. Ordinary forward replay is unchanged. */
+  argumentSummarySafe(method:IndexedApexMethod):boolean{
+    if(!this.replaySafe(method))return false;
+    const checked=new Set<IndexedApexMethod>();
+    const visit=(helper:IndexedApexMethod):boolean=>{
+      if(checked.has(helper))return true;
+      checked.add(helper);
+      const rawBody=this.masked.slice(helper.start,helper.end);
+      const schemaAllowed=!this.locals(helper).has("schema")&&!/\bclass\s+Schema\b/i.test(this.masked);
+      const body=maskProvenListReads(this.maskPureSchemaHelpers(maskProvenSchemaReads(rawBody,this.types(helper),schemaAllowed)),this.types(helper));
+      const hasSet=[...this.types(helper).values()].some(t=>canonicalApexType(t)?.startsWith("set<"))||
+        /\bnew\s+Set\s*</i.test(body);
+      if(hasSet&&/\bfor\s*\(|\bString\s*\.\s*join\s*\(|\bnew\s+List\s*<|\.\s*get\s*\(|\[[^\]]*\]/i.test(body))return false;
+      // replaySafe admits only uniquely resolved nested private static calls;
+      // inspect those same source targets for Set ordering as well.
+      for(const hit of body.matchAll(/\b([A-Za-z_]\w*)\s*\(/g)){
+        if(/\.\s*$/.test(body.slice(0,hit.index)))continue;
+        const candidates=this.methods.filter(m=>m.name.toLowerCase()===hit[1].toLowerCase());
+        if(candidates.length===1&&this.replaySafe(candidates[0])&&!visit(candidates[0]))return false;
+      }
+      return true;
+    };
+    return visit(method);
+  }
+  /** Lower-bound Set replay requires the contents not to influence
+   * control flow or escape: each reference must be a standalone mutation. */
+  writeOnlyStringSet(method:IndexedApexMethod,parameter:number):boolean{
+    const name=method.parameters[parameter];
+    if(!name||canonicalApexType(method.parameterTypes?.[parameter])!=="set<string>"||
+      !this.argumentSummarySafe(method)||!this.resultCannotExposeReference(method))return false;
+    const rx=new RegExp("\\b"+name+"\\b","i");
+    const use=new RegExp("^\\s*"+name+"\\s*\\.\\s*(?:add|remove)\\s*\\(([\\s\\S]*)\\)\\s*;\\s*$","i");
+    const visit=(nodes:readonly SourceNode[]):boolean=>nodes.every(n=>{
+      if(rx.test(maskApexSource((n.condition??"")+" "+(n.iterable??""))))return false;
+      if(n.loopVariable?.toLowerCase()===name.toLowerCase())return false;
+      const visible=maskApexSource(n.text??"");
+      if(rx.test(visible)){
+        const match=n.kind==="statement"?use.exec(visible):undefined;
+        if(!match||rx.test(match[1]))return false;
+      }
+      return visit(n.body??[])&&visit(n.otherwise??[]);
+    });
+    return visit(method.body);
+  }
+  /** An ignored scalar or inert DTO result cannot expose a mutable input
+   * collection through a returned alias. Do not assume arbitrary DTOs are inert. */
+  resultCannotExposeReference(method:IndexedApexMethod):boolean{
+    const type=canonicalApexType(method.returnType);
+    return !!type&&(/^(?:void|string|boolean|integer|long|decimal|double|id|date|datetime)$/.test(type)||this.inertDtos.has(type));
   }
   unknownMembers(values:Map<string,ApexValue>,reason:string):void{
     for(const {key} of this.fields.values())if(values.has(key))values.set(key,unknown(reason));
@@ -259,13 +368,20 @@ export function memberEffectModel(source:string,methods:readonly IndexedApexMeth
 
 /** A single top-level call whose arguments contain no invocations. Effects
  * cannot be replayed inside an arbitrary expression or speculative branch. */
-export function directEffectCall(source:string):string|undefined{
-  const visible=maskApexSource(source).trim();
+export function directEffectInvocation(source:string):{name:string;argumentText:string}|undefined{
+  const masked=maskApexSource(source);
+  const start=masked.length-masked.trimStart().length;
+  const end=masked.trimEnd().length;
+  const expr=source.slice(start,end);
+  const visible=masked.slice(start,end);
   const call=/^([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(/.exec(visible);
   if(!call)return undefined;
   const open=visible.indexOf("(");
   if(matchingPair(visible,open)!==visible.length-1||/[()]/.test(visible.slice(open+1,-1)))return undefined;
-  return call[1].toLowerCase();
+  return {name:call[1].toLowerCase(),argumentText:expr.slice(open+1,-1)};
+}
+export function directEffectCall(source:string):string|undefined{
+  return directEffectInvocation(source)?.name;
 }
 
 /** Exact metadata access, with no embedded executable arguments. */

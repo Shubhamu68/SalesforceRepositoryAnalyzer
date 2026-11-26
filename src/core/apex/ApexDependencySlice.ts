@@ -2,7 +2,7 @@ import {maskApexSource,type SourceNode} from "./ApexSourceModel.js";
 
 /** Shared declaration recognizer for source slicing and symbolic execution. */
 export function trackedStandaloneDeclaration(statement:string):string|undefined {
-  return /^(?:final\s+)?(?:String|List<[^>]+>|Set<[^>]+>|Integer|Boolean)\s+([A-Za-z_]\w*)\s*;?\s*$/i
+  return /^(?:final\s+)?(?:String|List<[^>]+>|Set<[^>]+>|Integer|Long|Decimal|Double|Id|Date|Datetime|Boolean)\s+([A-Za-z_]\w*)\s*;?\s*$/i
     .exec(statement.trim())?.[1];
 }
 

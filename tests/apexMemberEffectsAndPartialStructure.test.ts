@@ -5,7 +5,7 @@ import {ApexAnalysisEngine} from "../src/core/apex/ApexAnalysisEngine.js";
 import {ApexRepositoryMethodIndex} from "../src/core/apex/ApexRepositoryMethodIndex.js";
 import {indexApexMethods} from "../src/core/apex/ApexSourceModel.js";
 import {memberEffectModel} from "../src/core/apex/ApexMemberEffectModel.js";
-import {textValue,unknown,runtimeParameter,addApexValues} from "../src/core/apex/ApexValueEvaluator.js";
+import {textValue,unknown,runtimeParameter,addApexValues,listValue} from "../src/core/apex/ApexValueEvaluator.js";
 import {extractDynamicSoqlQueries} from "../src/scanner/dynamicSoqlScanner.js";
 import {provePartialSoql} from "../src/analyzer/soqlPartialStructure.js";
 
@@ -90,7 +90,7 @@ test("Field Set iterator and inert UI DTO preserve a sampled cross-class SELECT 
   const report=await new ApexAnalysisEngine(index,provider).analyze("QueryService.cls",ctx=>extractDynamicSoqlQueries(service,"QueryService.cls",ctx.resolveExternal,ctx.repositoryIndex));
   assert.equal(report.unresolved.length,1,JSON.stringify(report));
   assert.ok(report.queries.some(q=>q.query==="SELECT Id,Name,Phone FROM Account WHERE Id = :recordId WITH SECURITY_ENFORCED"&&q.coverage==="KNOWN_CALLER_CONTEXT"),JSON.stringify(report));
-  assert.match(report.unresolved[0].reason,/fresh framework entry/);
+  assert.match(report.unresolved[0].reason,/sampled new framework instances/);
 });
 
 test("numeric runtime slots are separate structural evidence; String, object and field holes stay unknown",()=>{
@@ -117,4 +117,82 @@ test("partial private caller can submit proven numeric-slot inventory without cl
   const report=extractDynamicSoqlQueries(source,"Builder.cls",undefined,index);
   assert.equal(report.unresolved.length,1);
   assert.ok(report.queries.some(q=>q.coverage==="PROVEN_PARTIAL_STRUCTURE"&&q.object==="Account"),JSON.stringify(report));
+});
+
+
+test("shared AUE effect summary keeps original argument identity across reassignment and aliases",()=>{
+  const source="public class Builder {private static void change(List<String> fields,List<String> alias,List<String> spare){fields.add('Name');alias.remove(0);fields=spare;fields.add('Email');}}";
+  const methods=indexApexMethods(source),helper=methods[0];
+  const engine=new ApexDataFlowEngine(source,{sourceMethods:methods});
+  const original=listValue(["Id"]),spare=listValue(["Phone"]);
+  const result=engine.summarizeArgumentEffects(helper,[original,original,spare]);
+  assert.deepEqual(result,[listValue(["Name"]),listValue(["Name"]),listValue(["Phone","Email"])]);
+  assert.equal(result?.[0],result?.[1]);
+  assert.deepEqual(original,listValue(["Id"]));
+  assert.deepEqual(spare,listValue(["Phone"]));
+});
+test("shared AUE effect summary rejects unsupported calls and divergent reference states",()=>{
+  for(const body of ["Other.mutate(fields);","if(flag){fields.add('Name');}else{fields.add('Phone');}"]){
+    const source="public class Builder {private static void change(List<String> fields,Boolean flag){"+body+"}}";
+    const methods=indexApexMethods(source);
+    const engine=new ApexDataFlowEngine(source,{sourceMethods:methods});
+    // A non-singleton boolean value is not one proven invocation vector.
+    assert.equal(engine.summarizeArgumentEffects(methods[0],[listValue(["Id"]),unknown("runtime")]),undefined);
+    if(body.startsWith("Other"))assert.equal(engine.summarizeArgumentEffects(methods[0],[listValue(["Id"]),{kind:"text",values:["true"],scalarType:"boolean"}]),undefined);
+  }
+});
+
+
+test("exact AUE effect summaries reject List/Set signature mismatches and order-dependent Set effects",()=>{
+  const source="public class Builder {private static void change(Set<String> cols){for(String path:cols){cols.clear();cols.add(path);}}}";
+  const methods=indexApexMethods(source);
+  const engine=new ApexDataFlowEngine(source,{sourceMethods:methods});
+  assert.equal(engine.summarizeArgumentEffects(methods[0],[listValue(["Name","Phone"],true)]),undefined);
+  assert.equal(engine.summarizeArgumentEffects(methods[0],[listValue(["Name","Phone"])]),undefined);
+});
+
+
+test("shared helper effects replay a direct nested local scalar assignment without duplicating the evaluator",()=>{
+  const source="public class Builder {private static void append(Set<String> fields,String path){String name=normalize(path);fields.add(name);}private static String normalize(String path){return path.trim();}}";
+  const methods=indexApexMethods(source),helper=methods.find(m=>m.name==="append")!;
+  assert.ok(memberEffectModel(source,methods).replaySafe(helper));
+  const original=listValue(["Id"],true);
+  const result=new ApexDataFlowEngine(source,{sourceMethods:methods}).summarizeArgumentEffects(helper,[original,textValue(" Name ")]);
+  assert.deepEqual(result?.[0],listValue(["Id","Name"],true));
+  assert.deepEqual(original,listValue(["Id"],true));
+});
+test("helper effect replay still rejects opaque nested calls and reports the source rejection",()=>{
+  const source="public class Builder {private static void append(Set<String> fields,String path){String name=Other.normalize(path);fields.add(name);}}";
+  const methods=indexApexMethods(source),events:Array<{code:string;offset:number}>=[];
+  const result=new ApexDataFlowEngine(source,{sourceMethods:methods}).summarizeArgumentEffects(methods[0],[listValue(["Id"],true),textValue("Name")],(code,offset)=>events.push({code,offset}));
+  assert.equal(result,undefined);
+  assert.deepEqual(events,[{code:"HELPER_EFFECT_SOURCE_UNSUPPORTED",offset:source.indexOf("String name=")}]);
+});
+
+
+test("inert DTO proof includes ordinary scalar instance fields alongside automatic properties",()=>{
+  for(const members of [
+    "@AuraEnabled public String name; public Boolean editable;",
+    "public String name; public Boolean editable {get;set;}",
+    "public String name; public Boolean editable; public Column(String name){this.name=name;this.editable=false;}"
+  ]){
+    const source="public class Builder {public class Column {"+members+"}private static Column make(Set<String> fields){fields.add('Name');return null;}}";
+    const methods=indexApexMethods(source),helper=methods.find(m=>m.name==="make")!;
+    assert.ok(memberEffectModel(source,methods).resultCannotExposeReference(helper),members);
+  }
+});
+test("ordinary DTO fields do not admit mutable references or executable initialization",()=>{
+  for(const members of [
+    "public String name; public Set<String> selected;",
+    "public String name; public Object value;",
+    "public String name; public Column other;",
+    "public String name; public static String state;",
+    "public String name=Other.read();",
+    "public String name {get{return Other.read();}set;}",
+    "public String name; public Column(String name){this.name=Other.read();}"
+  ]){
+    const source="public class Builder {public class Column {"+members+"}private static Column make(Set<String> fields){fields.add('Name');return null;}}";
+    const methods=indexApexMethods(source),helper=methods.find(m=>m.name==="make")!;
+    assert.equal(memberEffectModel(source,methods).resultCannotExposeReference(helper),false,members);
+  }
 });

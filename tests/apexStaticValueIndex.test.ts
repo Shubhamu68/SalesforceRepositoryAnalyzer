@@ -283,8 +283,8 @@ test("repository snapshot resolves nested maps, set/list copies and instance ali
   assert.deepEqual(idx.resolve("Fields.BASE"),list);
   assert.deepEqual(idx.resolve("Other.FIELDS"),list);
   assert.deepEqual(idx.resolve("Fields.SET_FIELDS"),{kind:"collection",items:["Id","Name"],unique:true});
-  assert.deepEqual(idx.resolve("Fields.GROUPS"),{kind:"map",entries:[["Account",list]]});
-  assert.deepEqual(idx.resolve("Fields.NESTED"),{kind:"map",entries:[["Account",{kind:"map",entries:[["1",{kind:"text",values:["Name"]}],["2",{kind:"text",values:["Phone"]}]]}]]});
+  assert.deepEqual(idx.resolve("Fields.GROUPS"),{kind:"map",keyType:"string",entries:[["Account",list]]});
+  assert.deepEqual(idx.resolve("Fields.NESTED"),{kind:"map",keyType:"string",entries:[["Account",{kind:"map",keyType:"string",entries:[["1",{kind:"text",values:["Name"]}],["2",{kind:"text",values:["Phone"]}]]}]]});
   assert.deepEqual(idx.resolveInstance("Fields","ownCopy"),{kind:"collection",items:["Email"],unique:false});
 });
 test("unknown collection initializer preserves its dependency",()=>{

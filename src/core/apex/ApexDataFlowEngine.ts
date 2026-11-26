@@ -1,3 +1,11 @@
+import {apexMapKey} from "./ApexValueEvaluator.js";
+import {isSchemaFieldMap,mutateSchemaFieldMap,type ApexSchemaChoice} from "./ApexSchemaModel.js";
+import {evaluateSchemaHelper} from "./ApexSchemaHelperModel.js";
+import {applyApexStringCollectionMutation,applyApexStringSetLowerBoundMutation,apexIterationValues} from "./ApexCollectionOperations.js";
+import {collectApexReferences,isApexReference,referenceMember,replaceApexReferences} from "./ApexReferenceState.js";
+import {proveInstanceArgumentEffects} from "./ApexInstanceEffects.js";
+import {apexSymbols,type ApexSymbolTable} from "./ApexSymbolTable.js";
+import {canonicalApexType,selectApexOverload,type ApexCallResolver} from "./ApexTypeSystem.js";
 import {countApex,timeApex} from "./ApexPerformance.js";
 import {memberEffectModel,directEffectCall,isLiteralFieldSetRead,type ApexMemberEffectModel} from "./ApexMemberEffectModel.js";
 import {
@@ -29,7 +37,7 @@ export interface ApexCallValue {
 }
 export interface ApexFlowOptions {
   /** Pluggable read-only, preloaded metadata or constant value source. */
-  resolveExternal?: (name: string, args: ApexValue[]) => ApexValue | undefined;
+  resolveExternal?: ApexCallResolver;
   /** Only completely proven private-method caller contexts can narrow entry inputs. */
   resolvePrivateContexts?: (method: IndexedApexMethod) => ApexValue[][] | undefined;
   selectInvocation?:ApexInvocationSelector;
@@ -41,6 +49,9 @@ export interface ApexFlowOptions {
 }
 interface State { values: ApexEnvironment; stopped?: boolean; loopControl?:"break"|"continue"; effectFrame?:boolean }
 interface FrameResult { states: State[]; returns: ApexValue[] }
+interface ReferenceReplay {refs:ApexValue[];instanceReplay:boolean}
+class SchemaEffectExpand {constructor(readonly key:string,readonly choices:readonly string[]){}}
+export interface ApexStringSetEvidence {value:Extract<ApexValue,{kind:"collection"}>;complete:boolean;alternatives:number}
 
 /** Identical symbolic states do not represent additional structural query variants. */
 function mergeEquivalentStates(states:State[]):State[] {
@@ -63,33 +74,8 @@ function clone(state:State):State {return {values:new Map(state.values),stopped:
 /** Replace an abstract collection in this frame, including tracked aliases
  * and references stored in a bounded nested map. Never mutate snapshot objects. */
 function replaceCollectionAliases(state:State,existing:ApexValue,next:ApexValue):boolean{
-  if(existing.kind!=="collection"&&existing.kind!=="map"&&existing.kind!=="instance"&&existing.kind!=="instanceList")return false;
-  const memo=new Map<ApexValue,ApexValue>();
-  const replace=(value:ApexValue,depth=0):ApexValue=>{
-    if(value===existing)return next;
-    const cached=memo.get(value);
-    if(cached!==undefined)return cached;
-    if(value.kind==="instanceList"&&depth<12){
-      const items=value.items.map(item=>replace(item,depth+1));
-      if(items.some((item,i)=>item!==value.items[i])){
-        const changed:ApexValue={...value,items};memo.set(value,changed);return changed;
-      }
-    }
-    if((value.kind==="map"||value.kind==="instance")&&depth<12){
-      const entries=value.entries.map(([k,v]):[string,ApexValue]=>[k,replace(v,depth+1)]);
-      if(entries.some(([,v],i)=>v!==value.entries[i][1])){
-        const changed:ApexValue=value.kind==="instance"?{...value,entries}:{kind:"map",entries};
-        memo.set(value,changed);return changed;
-      }
-    }
-    return value;
-  };
-  let found=false;
-  for(const [key,value] of state.values){
-    const changed=replace(value);
-    if(changed!==value){state.values.set(key,changed);if(value===existing)found=true;}
-  }
-  return found;
+  if(!isApexReference(existing))return false;
+  return replaceApexReferences(state.values,new Map([[existing,next]]));
 }
 function bool(value: ApexValue): boolean | undefined {
   if(value.kind!=="text"||value.scalarType!=="boolean"||value.values.length!==1)return undefined;
@@ -115,6 +101,10 @@ export class ApexDataFlowEngine {
   private readonly summaries = new Map<string,ApexValue>();
   private readonly activeCalls = new Set<string>();
   private readonly budget:ApexExecutionBudget;
+  private schemaEffectChoice?:ApexSchemaChoice;
+  private schemaSetUnknownAddition=false;
+  private effectSchemaPath?:string;
+  private schemaSetProjection?: (refs:readonly ApexValue[],result:FrameResult)=>Map<ApexValue,ApexValue>;
   private get exceeded():boolean{return this.budget.exceeded;}
   private readonly liveness=new Map<IndexedApexMethod,ApexLocalLiveness>();
   /** Per-site failure attribution: a large unrelated method never taints other sites. */
@@ -127,6 +117,8 @@ export class ApexDataFlowEngine {
   private readonly className:string|undefined;
   private currentMethod:IndexedApexMethod|undefined;
   private readonly effects:ApexMemberEffectModel;
+  private readonly symbols:ApexSymbolTable;
+  private evaluationOffset=0;
   private provenEffectCall:string|undefined;
   constructor(readonly source:string,options:ApexFlowOptions={}) {
     countApex("engine.instances");
@@ -138,11 +130,14 @@ export class ApexDataFlowEngine {
     this.className=/\bclass\s+([A-Za-z_]\w*)\b/i.exec(masked)?.[1];
     this.methods=options.sourceMethods??indexApexMethods(source);
     this.effects=memberEffectModel(source,this.methods);
+    this.symbols=apexSymbols(source,this.methods);
     this.sites=discoverApexInvocations(source,options.selectInvocation??dynamicDatabaseQuerySelector,this.methods);
   }
   private evaluate(expr:string, state:State, depth:number,allowEffects=false):ApexValue {
-    const context:ApexExpressionContext={values:state.values,
-      resolveCall:(name,args)=>{
+    const context:ApexExpressionContext={values:state.values,chooseSchemaAlternative:this.schemaEffectChoice,
+      argumentTypes:expressions=>this.symbols.argumentTypes(this.currentMethod,expressions,this.evaluationOffset),
+      schemaShadowed:name=>!!this.currentMethod&&this.symbols.hasLocalBinding(this.currentMethod,name,this.evaluationOffset)||new RegExp("\\bclass\\s+"+name+"\\b","i").test(maskApexSource(this.source)),
+      resolveCall:(name,args,argumentTypes)=>{
         if(name==="Apex.thisField"||name==="Apex.unqualifiedField"){
           const field=args[0];
           if(field?.kind!=="text"||field.values.length!==1||!this.className)
@@ -185,14 +180,23 @@ export class ApexDataFlowEngine {
           if(value?.kind==="collection"||value?.kind==="map")state.values.set(key,value);
           if(value!==undefined)return value;
         }
-        const external=this.options.resolveExternal?.(name,args);
+        const external=this.options.resolveExternal?.(name,args,argumentTypes);
         if(external!==undefined)return external;
         const ownName=name.replace(/^this\./i,"");
         const sameClass=this.className&&ownName.startsWith(this.className+".")
           ?ownName.slice(this.className.length+1):ownName;
-        const candidates=this.methods.filter(m=>m.name.toLowerCase()===sameClass.toLowerCase()
-          && m.parameters.length===args.length);
-        if(candidates.length!==1)return undefined;
+        const matches=this.methods.filter(m=>m.name.toLowerCase()===sameClass.toLowerCase()
+          && m.parameters.length===args.length&&(!this.currentMethod||this.symbols.sameOwner(this.currentMethod,m)));
+        const selected=selectApexOverload(matches,args.length,argumentTypes);
+        if(!selected)return matches.length?unknown("Apex overload is ambiguous or its source argument types are unproven: "+name):undefined;
+        const candidates=[selected];
+        const schemaHelper=this.effects.schemaHelper(selected);
+        if(schemaHelper){
+          if((schemaHelper.kind==="fieldPath"||schemaHelper.kind==="relationshipPath")&&args[0]?.kind==="text"&&args[1]?.kind==="text"&&
+            args[0].values.length===1&&args[1].values.length===1&&/^[A-Za-z_]\w*$/.test(args[0].values[0])&&/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*){0,9}$/.test(args[1].values[0]))
+            this.effectSchemaPath??=args[0].values[0]+"."+args[1].values[0];
+          return evaluateSchemaHelper(schemaHelper,args,this.options.resolveExternal,this.schemaEffectChoice);
+        }
         if(!args.length&&candidates[0].isStatic&&this.className){
           const lazy=this.options.resolveExternal?.("Apex.lazyGetter",[textValue(this.className),textValue(sameClass)]);
           if(lazy!==undefined)return lazy;
@@ -203,14 +207,10 @@ export class ApexDataFlowEngine {
         // A target-bearing helper is an invocation probe, not a reusable
         // return summary. A cached return would also suppress captures.
         const capturesTarget=this.activeQueryOffset!==undefined&&candidates[0].start<=this.activeQueryOffset&&this.activeQueryOffset<candidates[0].end;
-        const referenceInputsSafe=args.every((v,i)=>{
-          const type=candidates[0].parameterTypes?.[i]??"";
-          if(v.kind==="collection")return /^(?:List|Set)\s*<\s*String\s*>$|^List\s*<\s*Schema\.FieldSetMember\s*>$/i.test(type);
-          if(v.kind==="map")return /^Map\s*<\s*String\s*,\s*String\s*>$/i.test(type)&&v.entries.every(([,item])=>item.kind==="text"||item.kind==="null"||item.kind==="unknown");
-          return v.kind!=="instance"&&v.kind!=="instanceList";
-        });
-        const replay=allowEffects&&!capturesTarget&&referenceInputsSafe&&this.effects.replaySafe(candidates[0])&&
-          (this.effects.fields.size>0||args.some(v=>v.kind==="collection"||v.kind==="map"));
+        const plan=allowEffects&&!capturesTarget?this.referenceReplay(candidates[0],args):undefined;
+        const refs=plan?.refs;
+        const instanceReplay=plan?.instanceReplay??false;
+        const replay=!!plan;
         const cacheable=!replay&&!capturesTarget&&args.every(v=>v.kind==="text"||v.kind==="number"||v.kind==="null"||v.kind==="unknown");
         const cached=cacheable?this.summaries.get(key):undefined;
         if(cached){countApex("helper.local_cache_hit");return cached;}
@@ -220,15 +220,17 @@ export class ApexDataFlowEngine {
         candidates[0].parameters.forEach((p,i)=>env.set(p,args[i]));
         if(replay){
           for(const {key} of this.effects.fields.values())env.set(key,state.values.get(key)??unknown("Incoming mutable static state is not proven."));
-          args.forEach((v,i)=>{if(v.kind==="collection"||v.kind==="map")env.set("#effect.arg."+i,v);});
+          refs!.forEach((value,i)=>env.set("#effect.ref."+i,value));
         }
         let result:FrameResult;
         const previousMethod:IndexedApexMethod|undefined=this.currentMethod;
+        const previousOffset=this.evaluationOffset;
         this.currentMethod=candidates[0];
         try {
           result=this.execute(candidates[0].body,[{values:env,effectFrame:replay}],depth+1);
         }finally{
           this.currentMethod=previousMethod;
+          this.evaluationOffset=previousOffset;
           this.activeCalls.delete(key);
         }
         if(replay){
@@ -239,9 +241,11 @@ export class ApexDataFlowEngine {
             return first&&values.every(v=>JSON.stringify(v)===JSON.stringify(first))?first:unknown("Helper effects differ across feasible paths.");
           };
           for(const {key} of this.effects.fields.values())state.values.set(key,agreed(key));
-          args.forEach((v,i)=>{if(v.kind==="collection"||v.kind==="map")replaceCollectionAliases(state,v,agreed("#effect.arg."+i));});
+          const replacements=this.referenceReplacements(refs!,result);
+          replaceApexReferences(state.values,replacements);
           this.provenEffectCall=name.toLowerCase();
           countApex("helper.effects.transferred");
+          if(instanceReplay)countApex("helper.instance_effects.transferred");
         }else if(allowEffects&&this.effects.fields.size){
           this.effects.unknownMembers(state.values,"Unproven helper effects on mutable static state.");
         }
@@ -267,6 +271,120 @@ export class ApexDataFlowEngine {
         return value;
       }};
     return evaluateApexExpression(expr,context);
+  }
+  /** Shared admission and original-reference pin projection for forward
+   * execution and consumers requesting a bounded argument-effect summary.
+   * Preserve the existing source proof, alias topology and path agreement.
+   */
+  private referenceReplay(method:IndexedApexMethod,args:readonly ApexValue[]):ReferenceReplay|undefined{
+    const referenceInputsSafe=args.every((v,i)=>{
+      const type=method.parameterTypes?.[i]??"";
+      if(v.kind==="collection")return /^(?:List|Set)\s*<\s*String\s*>$|^List\s*<\s*Schema\.FieldSetMember\s*>$/i.test(type);
+      if(v.kind==="map")return /^Map\s*<\s*String\s*,\s*String\s*>$/i.test(type)&&v.entries.every(([,item])=>item.kind==="text"||item.kind==="null"||item.kind==="unknown");
+      return v.kind!=="instance"&&v.kind!=="instanceList";
+    });
+    const refs=collectApexReferences(args);
+    const instanceReplay=!!refs&&proveInstanceArgumentEffects(method,args);
+    if(!refs||!((referenceInputsSafe&&this.effects.replaySafe(method)&&
+      (this.effects.fields.size>0||args.some(v=>v.kind==="collection"||v.kind==="map")))||instanceReplay))return undefined;
+    return {refs,instanceReplay};
+  }
+  private referenceReplacements(refs:readonly ApexValue[],result:FrameResult):Map<ApexValue,ApexValue>{
+    const projected=result.states.map(frame=>new Map(refs.map((_,i)=>["#effect.ref."+i,frame.values.get("#effect.ref."+i)??unknown("Missing reference effect pin.")])));
+    const first=projected[0];
+    const consistent=!this.exceeded&&!!first&&result.states.every(frame=>!frame.loopControl)&&projected.every(values=>apexStateIdentity(values,false)===apexStateIdentity(first,false));
+    return new Map<ApexValue,ApexValue>(refs.map((value,i)=>[value,consistent?first.get("#effect.ref."+i)!:unknown("Reference effects differ across feasible helper paths.")]));
+  }
+  /**
+   * Reuse the ordinary interpreter and reference-effect proof for a selected
+   * source method. Inputs must represent one known argument vector, with
+   * actual reference identity (not a union of possible collections).
+   * No incoming mutable static state is assumed by this standalone API.
+   * Returns the original arguments after mutation, NOT the final parameter
+   * bindings: reassigning a parameter does not replace the caller's object.
+   */
+  summarizeArgumentEffects(method:IndexedApexMethod,args:readonly ApexValue[],
+    onReject?:(code:string,offset:number,schemaPath?:string)=>void):ApexValue[]|undefined{
+    this.effectSchemaPath=undefined;
+    const reject=(code:string,offset=method.start):undefined=>{onReject?.(code,offset,this.effectSchemaPath);return undefined;};
+    if(!this.methods.includes(method)||method.parameters.length!==args.length||this.effects.fields.size||
+      args.some(v=>v.kind!=="collection"&&v.kind!=="number"&&v.kind!=="null"&&
+        !(v.kind==="text"&&v.values.length===1)))return reject("HELPER_EFFECT_INPUT_DOMAIN_UNPROVEN");
+    // A modeled String Set and List cannot be interchanged for a source
+    // signature. Avoid order-sensitive Set observations in exact summaries.
+    if(args.some((v,i)=>v.kind==="collection"&&canonicalApexType(method.parameterTypes?.[i])!==(v.unique?"set<string>":"list<string>")))return reject("HELPER_EFFECT_COLLECTION_TYPE_UNPROVEN");
+    if(!this.effects.replaySafe(method))return reject("HELPER_EFFECT_SOURCE_UNSUPPORTED",this.effects.replayFailureOffset(method));
+    const plan=this.referenceReplay(method,args);
+    if(!plan||!plan.refs.length)return reject("HELPER_EFFECT_REFERENCE_PROOF_UNPROVEN");
+    if(!this.effects.argumentSummarySafe(method))return reject("HELPER_EFFECT_SET_ORDER_UNPROVEN");
+    this.budget.reset();this.activeSlice=undefined;this.activeQueryOffset=undefined;
+    this.activeStopOffset=undefined;this.argumentProbe=undefined;
+    this.activeCalls.clear();this.summaries.clear();this.provenEffectCall=undefined;
+    const values=new Map<string,ApexValue>(method.parameters.map((p,i)=>[p,args[i]]));
+    plan.refs.forEach((value,i)=>values.set("#effect.ref."+i,value));
+    const previous=this.currentMethod,previousOffset=this.evaluationOffset;
+    this.currentMethod=method;
+    let result:FrameResult;
+    try{result=this.execute(method.body,[{values,effectFrame:true}],1);}
+    finally{this.currentMethod=previous;this.evaluationOffset=previousOffset;this.provenEffectCall=undefined;}
+    const replacements=this.schemaSetProjection?.(plan.refs,result)??this.referenceReplacements(plan.refs,result);
+    if([...replacements.values()].some(v=>v.kind==="unknown"))return reject(this.exceeded?"HELPER_EFFECT_EXECUTION_LIMIT":"HELPER_EFFECT_RESULT_UNPROVEN");
+    countApex("helper.argument_effect_summaries");
+    return args.map(v=>replacements.get(v)??v);
+  }
+  /** Enumerate bounded metadata alternatives, never assume REST target
+   * order. Require a concrete validated Set at every feasible exit.
+   * For differing sets or unproven additions, return only proven common
+   * members, explicitly incomplete. Unknown removals still fail closed.
+   * A lower-bound input is permitted only for a write-only Set receiver. */
+  summarizeSchemaSetEffects(method:IndexedApexMethod,args:readonly ApexValue[],target:number,
+    validMember:(value:string)=>boolean,onReject?:(code:string,offset:number,schemaPath?:string)=>void):ApexStringSetEvidence|undefined{
+    const initial=args[target];
+    if(initial?.kind!=="collection"||!initial.unique||args.some((v,i)=>i!==target&&isApexReference(v))||
+      !this.effects.writeOnlyStringSet(method,target)||!initial.items.every(validMember))return undefined;
+    const reject=(code:string)=>{onReject?.(code,method.start,this.effectSchemaPath);return undefined;};
+    const queue:Array<Map<string,string>>=[new Map()],outcomes:string[][]=[];
+    let attempts=0,unknownAddition=false;
+    try{
+      while(queue.length){
+        if(++attempts>16)return reject("HELPER_SCHEMA_ALTERNATIVE_LIMIT");
+        const choices=queue.shift()!;
+        this.schemaSetUnknownAddition=false;
+        // Independent read occurrences may select independently. Correlate
+        // a choice only with the identical replay occurrence, not with an
+        // assumption that all later Describe calls have the same ordering.
+        let ordinal=0;
+        this.schemaEffectChoice=(identity,candidates)=>{
+          const key=identity+"|"+ordinal++;
+          if(choices.has(key))return choices.get(key);
+          if(candidates.length>8)throw new SchemaEffectExpand(key,[]);
+          throw new SchemaEffectExpand(key,[...new Set(candidates)]);
+        };
+        this.schemaSetProjection=(refs,result)=>{
+          const sets=result.states.map(state=>state.values.get("#effect.ref.0"));
+          if(this.exceeded||refs.length!==1||!sets.length||result.states.some(s=>s.loopControl)||
+            sets.some(v=>v?.kind!=="collection"||!v.unique||!v.items.every(validMember)))
+            return new Map(refs.map(v=>[v,unknown("Schema alternative has an unproven Set effect.")]));
+          unknownAddition||=this.schemaSetUnknownAddition;
+          for(const set of sets)if(set?.kind==="collection")outcomes.push([...set.items]);
+          return new Map([[refs[0],sets[0]!]]);
+        };
+        try{
+          if(!this.summarizeArgumentEffects(method,args,onReject))return reject("HELPER_SCHEMA_ALTERNATIVE_UNPROVEN");
+        }catch(error){
+          if(!(error instanceof SchemaEffectExpand))throw error;
+          if(!error.choices.length||queue.length+error.choices.length+attempts>16)return reject("HELPER_SCHEMA_ALTERNATIVE_LIMIT");
+          for(const choice of error.choices)queue.push(new Map([...choices,[error.key,choice]]));
+        }
+      }
+      if(!outcomes.length)return reject("HELPER_SCHEMA_ALTERNATIVE_UNPROVEN");
+      const common=outcomes[0].filter(item=>outcomes.every(set=>set.includes(item)));
+      const complete=!unknownAddition&&outcomes.every(set=>set.length===common.length);
+      if(unknownAddition)onReject?.("HELPER_SET_UNKNOWN_ADDITION",method.start,this.effectSchemaPath);
+      const value=listValue(common,true);
+      if(value.kind!=="collection")return undefined;
+      return {value,complete,alternatives:outcomes.length};
+    }finally{this.schemaEffectChoice=undefined;this.schemaSetProjection=undefined;this.schemaSetUnknownAddition=false;}
   }
   /**
    * Apex passes mutable collection references into helpers. If we cannot prove
@@ -327,7 +445,10 @@ export class ApexDataFlowEngine {
         this.skippedInvocations.set(site.offset,(this.skippedInvocations.get(site.offset)??0)+1);
         continue;
       }
+      const previousOffset=this.evaluationOffset;
+      this.evaluationOffset=site.offset;
       const args=site.arguments.map(argument=>this.evaluate(argument,state,depth));
+      this.evaluationOffset=previousOffset;
       const value=args[0]??unknown("Invocation has no selected argument.");
       const access=args[1]??textValue("(default)");
       const captures=this.captures.get(site.offset)??[];
@@ -339,7 +460,9 @@ export class ApexDataFlowEngine {
     const probe=this.argumentProbe;
     if(probe&&start<=probe.offset&&probe.offset<end&&(onlyOffset===undefined||probe.offset===onlyOffset)&&
       invocationMayExecute(this.source.slice(start,end),probe.offset-start,condition=>this.evaluate(condition,clone(state),depth)))
+      {const previousOffset=this.evaluationOffset;this.evaluationOffset=probe.offset;
       probe.results.push(probe.expressions.map(expr=>this.evaluate(expr,state,depth)));
+      this.evaluationOffset=previousOffset;}
   }
   private statement(node:SourceNode,state:State,depth:number):ApexValue|undefined{
     const original=(node.text??"").trim().replace(/;\s*$/,"");
@@ -383,7 +506,7 @@ export class ApexDataFlowEngine {
     }
     // Abstract collections are immutable snapshots; updates affect only the
     // current frame and direct aliases, never another query or repository scan.
-    const mutate=/^((?:[A-Za-z_]\w*\.)?[A-Za-z_]\w*)\s*\.\s*(add|addAll|clear|remove|put|putAll|removeAll|retainAll|set|sort|reverse)\s*\(([\s\S]*)\)$/i.exec(original);
+    const mutate=/^([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\.\s*(add|addAll|clear|remove|put|putAll|removeAll|retainAll|set|sort|reverse)\s*\(([\s\S]*)\)$/i.exec(original);
     if(mutate){
       const [,name,operation,expr]=mutate;
       const action=operation.toLowerCase();
@@ -393,20 +516,13 @@ export class ApexDataFlowEngine {
       const args=expr.trim()?splitApexTopLevel(expr,",").map(item=>this.evaluate(item,state,depth)):[];
       const arg=args[0];
       if(existing.kind==="collection"){
-        const item=arg?asText(arg):undefined;
-        if(action==="clear"&&args.length===0)next=listValue([],existing.unique);
-        else if(action==="add"&&args.length===1&&item!==undefined)
-          next=listValue([...existing.items,item],existing.unique);
-        else if(action==="addall"&&args.length===1&&arg?.kind==="collection")
-          next=listValue([...existing.items,...arg.items],existing.unique);
-        else if(action==="remove"&&args.length===1&&existing.unique&&item!==undefined)
-          next=listValue(existing.items.filter(v=>v!==item),true);
-        else if(action==="remove"&&args.length===1&&!existing.unique&&arg?.kind==="number"&&
-          Number.isInteger(arg.value)&&arg.value>=0&&arg.value<existing.items.length)
-          next=listValue(existing.items.filter((_,i)=>i!==arg.value),false);
-        else if(action==="add"||action==="addall")
-          next=unknown("Collection "+operation+" argument "+expr+" is unknown: "+(arg?cause(arg):"missing argument"));
-        else next=unknown("Unsupported mutation "+operation+" may change the complete query field inventory.");
+        // Only the pinned Set admitted by writeOnlyStringSet may use a
+        // lower bound. Other collections retain exact transfer semantics.
+        if(this.schemaSetProjection&&state.values.get("#effect.ref.0")===existing){
+          const projected=applyApexStringSetLowerBoundMutation(existing,operation,args,expr);
+          next=projected.value;
+          this.schemaSetUnknownAddition||=projected.incomplete;
+        }else next=applyApexStringCollectionMutation(existing,operation,args,expr);
       }else if(existing.kind==="instanceList"){
         const matches=(v:ApexValue)=>v.kind==="instance"&&(v.className.toLowerCase()===existing.elementType.toLowerCase()||v.className.toLowerCase().endsWith("."+existing.elementType.toLowerCase()));
         if(action==="clear"&&args.length===0)next={...existing,items:[]};
@@ -414,15 +530,17 @@ export class ApexDataFlowEngine {
         else if(action==="addall"&&args.length===1&&arg.kind==="instanceList"&&arg.items.every(matches))next={...existing,items:[...existing.items,...arg.items]};
         else if(action==="set"&&args.length===2&&arg.kind==="number"&&Number.isInteger(arg.value)&&arg.value>=0&&arg.value<existing.items.length&&matches(args[1]))next={...existing,items:existing.items.map((item,i)=>i===arg.value?args[1]:item)};
         else next=unknown("Unsupported custom Apex list mutation: "+operation);
+      }else if(isSchemaFieldMap(existing)){
+        next=mutateSchemaFieldMap(existing,operation,args);
       }else if(existing.kind==="map"){
-        const key=arg?asText(arg):undefined;
-        if(action==="clear"&&args.length===0)next={kind:"map",entries:[]};
-        else if(action==="put"&&args.length===2&&key!==undefined&&args[1].kind!=="unknown")
-          next={kind:"map",entries:[...existing.entries.filter(([k])=>k!==key),[key,args[1]]]};
-        else if(action==="remove"&&args.length===1&&key!==undefined)
-          next={kind:"map",entries:existing.entries.filter(([k])=>k!==key)};
-        else if(action==="putall"&&args.length===1&&arg?.kind==="map")
-          next={kind:"map",entries:[...existing.entries.filter(([k])=>!arg.entries.some(([other])=>other===k)),...arg.entries]};
+        const key=arg?apexMapKey(existing,arg):null;
+        if(action==="clear"&&args.length===0)next={...existing,entries:[]};
+        else if(action==="put"&&args.length===2&&key!==null&&args[1].kind!=="unknown")
+          next={...existing,entries:[...existing.entries.filter(([k])=>k!==key),[key,args[1]]]};
+        else if(action==="remove"&&args.length===1&&key!==null)
+          next={...existing,entries:existing.entries.filter(([k])=>k!==key)};
+        else if(action==="putall"&&args.length===1&&arg?.kind==="map"&&existing.keyType===arg.keyType)
+          next={...existing,entries:[...existing.entries.filter(([k])=>!arg.entries.some(([other])=>other===k)),...arg.entries]};
         else next=unknown("Map."+operation+" has an unproven key/value or unsupported mutation: "+
           (args.find(v=>v.kind==="unknown")?.kind==="unknown"?cause(args.find(v=>v.kind==="unknown")!):expr));
       }else{
@@ -430,7 +548,7 @@ export class ApexDataFlowEngine {
       }
       if(existing.kind==="instanceList"&&[...state.values].some(([key,value])=>key.startsWith("#iterator:")&&value===existing))
         next=unknown("Custom Apex list structure changed during iteration.");
-      if(next.kind==="collection"&&next.items.length>2000||next.kind==="map"&&next.entries.length>200||next.kind==="instanceList"&&next.items.length>100)
+      if(next.kind==="collection"&&next.items.length>2000||next.kind==="map"&&next.entries.length>(isSchemaFieldMap(next)?2000:200)||next.kind==="instanceList"&&next.items.length>100)
         next=unknown("Collection mutation exceeded the bounded inventory size.");
       if(!replaceCollectionAliases(state,existing,next))
         state.values.set(name.includes(".")?name.toLowerCase():name,next);
@@ -447,10 +565,11 @@ export class ApexDataFlowEngine {
     }
     // Explicit instance writes update every alias in this frame, not other
     // allocations with equal field values. Unmodeled receiver writes taint.
-    const member=/^([A-Za-z_]\w*)\s*\.\s*([A-Za-z_]\w*)\s*(\+?=)(?!=|>)\s*([\s\S]+)$/.exec(original);
+    const member=/^([A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)*?)\s*\.\s*([A-Za-z_]\w*)\s*(\+?=)(?!=|>)\s*([\s\S]+)$/.exec(original);
     if(member){
-      const [,receiver,field,operator,rhs]=member;
-      const existing=state.values.get(receiver);
+      const [,rawReceiver,field,operator,rhs]=member;
+      const receiver=rawReceiver.replace(/\s+/g,"");
+      const existing=referenceMember(state.values,receiver);
       const staticKey=existing===undefined?this.effects.key(this.currentMethod,receiver+"."+field):undefined;
       if(staticKey){
         const next=this.evaluate(rhs,state,depth);
@@ -472,10 +591,14 @@ export class ApexDataFlowEngine {
     const validPrefix=!prefix || /^(?:(?:final|static|public|private|protected|global)\s+)*(?:[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*(?:\s*<[\w\s,.<>?]+>)?(?:\[\])?)$/.test(prefix);
     if(assignment&&validPrefix){
       const [,name,operator,rhs]=assignment;
-      const key=!prefix?this.effects.key(this.currentMethod,name)??name:name;
+      const existingName=[...state.values.keys()].find(key=>key.toLowerCase()===name.toLowerCase());
+      const key=!prefix?this.effects.key(this.currentMethod,name)??existingName??name:name;
       this.provenEffectCall=undefined;
       const direct=!!directEffectCall(rhs);
-      const value=this.evaluate(rhs,state,depth,direct);
+      let value=this.evaluate(rhs,state,depth,direct);
+      const declaredType=prefix?prefix.replace(/^final\s+/i,"").trim():this.symbols.lookup(this.currentMethod,name,this.evaluationOffset);
+      if(operator==="="&&value.kind==="unknown"&&/^id$/i.test(declaredType??""))
+        value=runtimeParameter(name,"Id",value.reason);
       const proven=this.provenEffectCall===directEffectCall(rhs)?this.provenEffectCall:undefined;
       this.provenEffectCall=undefined;
       if(operator==="=")state.values.set(key,value);
@@ -599,6 +722,7 @@ export class ApexDataFlowEngine {
   private runNode(node:SourceNode,state:State,depth:number):
     {states:State[];returns:ApexValue[]}{
     if(state.stopped||state.loopControl)return {states:[state],returns:[]};
+    this.evaluationOffset=node.start;
     if(depth===0&&this.activeSlice&&!this.activeSlice.has(node))return {states:[state],returns:[]};
     if(!this.budget.visit(node.start,this.currentMethod?.name??"(unknown method)")){
       return {states:[{values:new Map([...state.values.keys()].map((k):[string,ApexValue]=>
@@ -724,20 +848,18 @@ export class ApexDataFlowEngine {
         }
         return {states,returns};
       }
-      if((iterable.kind==="collection"||iterable.kind==="records")&&
-         node.loopVariable&&iterable.items.length<=MAX_LOOP_ITEMS){
+      const iterationValues=apexIterationValues(iterable,MAX_LOOP_ITEMS);
+      if(iterationValues&&node.loopVariable){
         let states=[clone(state)], returns:ApexValue[]=[];
         let exits:State[]=[];
         const outerKeys=new Set(state.values.keys());
         const locals=declaredLoopLocals(node.body??[]);
-        for(const item of iterable.items){
+        for(const item of iterationValues){
           if(this.exceeded)break;
           states=states.map(s=>{
             if(s.stopped)return s;
             const child=clone(s);
-            child.values.set(node.loopVariable!,iterable.kind==="records"
-              ?{kind:"record",entries:item as Array<[string,ApexValue]>}
-              :textValue(item as string));
+            child.values.set(node.loopVariable!,item);
             return child;
           });
           const result=this.execute(node.body??[],states,depth);
@@ -872,6 +994,8 @@ export class ApexDataFlowEngine {
   summarizeMethodReturn(method:IndexedApexMethod,args:readonly ApexValue[]):ApexValue {
     if(method.parameters.length!==args.length)
       return unknown("Apex helper argument count does not match the declaration.");
+    const schemaHelper=this.effects.schemaHelper(method);
+    if(schemaHelper)return evaluateSchemaHelper(schemaHelper,args,this.options.resolveExternal,this.schemaEffectChoice);
     this.budget.reset();
     this.activeSlice=undefined;
     this.activeQueryOffset=undefined;
@@ -941,7 +1065,7 @@ export class ApexDataFlowEngine {
     Array<{offset:number;method:IndexedApexMethod;expressions:string[]}>{
     const masked=maskApexSource(this.source);
     const safeName=owner.name; // Apex identifiers cannot contain regex punctuation.
-    const pattern=new RegExp("\\b"+safeName+"\\s*\\(","g");
+    const pattern=new RegExp("\\b"+safeName+"\\s*\\(","gi");
     const callers:Array<{offset:number;method:IndexedApexMethod;expressions:string[]}>=[];
     let match:RegExpExecArray|null;
     while((match=pattern.exec(masked))!==null){
@@ -951,7 +1075,7 @@ export class ApexDataFlowEngine {
       const dot=/\.\s*$/.test(prior);
       if(dot){
         const receiver=/\b([A-Za-z_]\w*)\.\s*$/.exec(prior)?.[1];
-        if(receiver!=="this"&&receiver!==this.className)continue;
+        if(receiver?.toLowerCase()!=="this"&&receiver?.toLowerCase()!==this.className?.toLowerCase())continue;
       }
       const open=masked.indexOf("(",match.index),close=matchingPair(masked,open);
       if(close<0)continue;
