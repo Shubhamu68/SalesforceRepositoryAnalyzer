@@ -330,7 +330,7 @@ test("org verification bounds concurrent field checks and preserves all outcomes
   );
   assert.equal(calls.length, 14, "all unique fields must be checked");
   assert.equal(inFlight, 0);
-  assert.ok(maxInFlight <= 3, `org concurrency exceeded its cap: ${maxInFlight}`);
+  assert.equal(maxInFlight, 5, "verification must reach but not exceed the validated five-worker cap");
   assert.ok(decisions.every(result => result?.outcome === "VERIFIED"));
 });
 
