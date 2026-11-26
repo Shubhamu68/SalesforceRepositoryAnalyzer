@@ -648,8 +648,11 @@ test("phase 4: guarded predicate list preserves clause context and ignores bound
   const result=evidence([{filePath:"FilterFixture.cls",source}]);
   assert.deepEqual(fields(result.queries),new Set(["SELECT:Id","WHERE:Name","WHERE:OwnerId","WHERE:Parent.Name"]),JSON.stringify(result));
   const scan=extractDynamicSoqlQueries(source,"FilterFixture.cls",undefined,new ApexRepositoryMethodIndex([{filePath:"FilterFixture.cls",source}]));
-  assert.ok(scan.queries.some(q=>q.permissionEvidence==="AGGREGATED_STRUCTURE"&&q.query.includes("Parent.Name")),JSON.stringify(scan));
-  assert.equal(scan.unresolved.length,1);
+  // The forward engine can already enumerate both branches here. Do not
+  // force a fallback or downgrade its more precise complete coverage.
+  assert.deepEqual(fields(scan.queries.map(q=>q.query)),new Set(["SELECT:Id","WHERE:Name","WHERE:OwnerId","WHERE:Parent.Name"]),JSON.stringify(scan));
+  assert.ok(scan.queries.every(q=>q.dynamicAccessLevel==="USER_MODE"));
+  assert.equal(scan.unresolved.length,0);
 });
 test("phase 4: predicates from correlated metadata records remain associated with their root",()=>{
   const source="public class FilterFixture {public static void run(String name){Config__mdt cfg=Config__mdt.getInstance(name);List<String> clauses=new List<String>();clauses.add(cfg.Filter__c+' = :input');String filter=String.join(clauses,' AND ');String q='SELECT Id FROM '+cfg.Object__c+(String.isNotBlank(filter)?(' WHERE '+filter):'');Database.queryWithBinds(q,new Map<String,Object>(),AccessLevel.USER_MODE);}}";
