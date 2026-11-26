@@ -815,10 +815,10 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
                           /^(?:Schema\.objectSchema|Schema\.fieldMap)$/.test(call)?resolveExternal?.(call,values,types,frame.filePath):undefined});
                       effectEngines.set(frame.filePath,engine);
                     }
-                    const report=(code:string,at:number)=>note({...frame,method:helper,depth:frame.depth+1},at,code,helper.name);
+                    const report=(code:string,at:number,schemaPath?:string)=>reportApexDependency(policy.observe,code,{...frame,method:helper,depth:frame.depth+1},at,helper.name,undefined,schemaPath);
                     let failure="";
                     const values=args.map(v=>v.value);
-                    const updated=partialInput?undefined:engine.summarizeArgumentEffects(helper,values,(code,at)=>{failure=code;report(code,at);})?.[targetPositions[0]];
+                    const updated=partialInput?undefined:engine.summarizeArgumentEffects(helper,values,(code,at,schemaPath)=>{failure=code;report(code,at,schemaPath);})?.[targetPositions[0]];
                     if(updated?.kind==="collection"&&updated.items.length<=MAX_COLLECTION_ITEMS){
                       current=ev(mark(updated));
                       note(frame,n.start,"SHARED_HELPER_EFFECT_RESOLVED",helper.name);

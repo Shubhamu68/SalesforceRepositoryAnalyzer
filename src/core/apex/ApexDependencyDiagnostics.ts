@@ -10,6 +10,8 @@ export interface ApexDependencyDiagnostic {
   symbol?:string;
   depth:number;
   count?:number;
+  /** API-name path from a source-proven Schema helper, not a record value. */
+  schemaPath?:string;
 }
 export type ApexDependencyObserver=(event:ApexDependencyDiagnostic)=>void;
 export function sourceFileName(filePath:string):string{
@@ -20,11 +22,12 @@ export function sourceIdentifier(name?:string):string|undefined{
   return name&&/^[A-Za-z_][A-Za-z0-9_]{0,119}$/.test(name)?name:undefined;
 }
 export function reportApexDependency(observer:ApexDependencyObserver|undefined,code:string,
-  frame:{filePath:string;source:string;depth:number;method?:{name:string}},offset:number,symbol?:string,count?:number):void{
+  frame:{filePath:string;source:string;depth:number;method?:{name:string}},offset:number,symbol?:string,count?:number,schemaPath?:string):void{
   if(!observer)return;
   observer({code,file:sourceFileName(frame.filePath),line:sourceLine(frame.source,offset),
     method:sourceIdentifier(frame.method?.name),symbol:sourceIdentifier(symbol),depth:frame.depth,
-    ...(count===undefined?{}:{count})});
+    ...(count===undefined?{}:{count}),
+    ...(schemaPath&&schemaPath.length<=240&&/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*){1,10}$/.test(schemaPath)?{schemaPath}:{})});
 }
 
 

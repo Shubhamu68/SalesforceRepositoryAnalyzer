@@ -102,6 +102,7 @@ export class ApexDataFlowEngine {
   private readonly activeCalls = new Set<string>();
   private readonly budget:ApexExecutionBudget;
   private schemaEffectChoice?:ApexSchemaChoice;
+  private effectSchemaPath?:string;
   private schemaSetProjection?: (refs:readonly ApexValue[],result:FrameResult)=>Map<ApexValue,ApexValue>;
   private get exceeded():boolean{return this.budget.exceeded;}
   private readonly liveness=new Map<IndexedApexMethod,ApexLocalLiveness>();
@@ -189,7 +190,12 @@ export class ApexDataFlowEngine {
         if(!selected)return matches.length?unknown("Apex overload is ambiguous or its source argument types are unproven: "+name):undefined;
         const candidates=[selected];
         const schemaHelper=this.effects.schemaHelper(selected);
-        if(schemaHelper)return evaluateSchemaHelper(schemaHelper,args,this.options.resolveExternal,this.schemaEffectChoice);
+        if(schemaHelper){
+          if((schemaHelper.kind==="fieldPath"||schemaHelper.kind==="relationshipPath")&&args[0]?.kind==="text"&&args[1]?.kind==="text"&&
+            args[0].values.length===1&&args[1].values.length===1&&/^[A-Za-z_]\w*$/.test(args[0].values[0])&&/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*){0,9}$/.test(args[1].values[0]))
+            this.effectSchemaPath??=args[0].values[0]+"."+args[1].values[0];
+          return evaluateSchemaHelper(schemaHelper,args,this.options.resolveExternal,this.schemaEffectChoice);
+        }
         if(!args.length&&candidates[0].isStatic&&this.className){
           const lazy=this.options.resolveExternal?.("Apex.lazyGetter",[textValue(this.className),textValue(sameClass)]);
           if(lazy!==undefined)return lazy;
@@ -297,8 +303,9 @@ export class ApexDataFlowEngine {
    * bindings: reassigning a parameter does not replace the caller's object.
    */
   summarizeArgumentEffects(method:IndexedApexMethod,args:readonly ApexValue[],
-    onReject?:(code:string,offset:number)=>void):ApexValue[]|undefined{
-    const reject=(code:string,offset=method.start):undefined=>{onReject?.(code,offset);return undefined;};
+    onReject?:(code:string,offset:number,schemaPath?:string)=>void):ApexValue[]|undefined{
+    this.effectSchemaPath=undefined;
+    const reject=(code:string,offset=method.start):undefined=>{onReject?.(code,offset,this.effectSchemaPath);return undefined;};
     if(!this.methods.includes(method)||method.parameters.length!==args.length||this.effects.fields.size||
       args.some(v=>v.kind!=="collection"&&v.kind!=="number"&&v.kind!=="null"&&
         !(v.kind==="text"&&v.values.length===1)))return reject("HELPER_EFFECT_INPUT_DOMAIN_UNPROVEN");
@@ -329,18 +336,23 @@ export class ApexDataFlowEngine {
    * For differing sets, return only common members, explicitly incomplete.
    * A lower-bound input is permitted only for a write-only Set receiver. */
   summarizeSchemaSetEffects(method:IndexedApexMethod,args:readonly ApexValue[],target:number,
-    validMember:(value:string)=>boolean,onReject?:(code:string,offset:number)=>void):ApexStringSetEvidence|undefined{
+    validMember:(value:string)=>boolean,onReject?:(code:string,offset:number,schemaPath?:string)=>void):ApexStringSetEvidence|undefined{
     const initial=args[target];
     if(initial?.kind!=="collection"||!initial.unique||args.some((v,i)=>i!==target&&isApexReference(v))||
       !this.effects.writeOnlyStringSet(method,target)||!initial.items.every(validMember))return undefined;
-    const reject=(code:string)=>{onReject?.(code,method.start);return undefined;};
+    const reject=(code:string)=>{onReject?.(code,method.start,this.effectSchemaPath);return undefined;};
     const queue:Array<Map<string,string>>=[new Map()],outcomes:string[][]=[];
     let attempts=0;
     try{
       while(queue.length){
         if(++attempts>16)return reject("HELPER_SCHEMA_ALTERNATIVE_LIMIT");
         const choices=queue.shift()!;
-        this.schemaEffectChoice=(key,candidates)=>{
+        // Independent read occurrences may select independently. Correlate
+        // a choice only with the identical replay occurrence, not with an
+        // assumption that all later Describe calls have the same ordering.
+        let ordinal=0;
+        this.schemaEffectChoice=(identity,candidates)=>{
+          const key=identity+"|"+ordinal++;
           if(choices.has(key))return choices.get(key);
           if(candidates.length>8)throw new SchemaEffectExpand(key,[]);
           throw new SchemaEffectExpand(key,[...new Set(candidates)]);
