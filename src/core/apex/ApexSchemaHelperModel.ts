@@ -48,16 +48,64 @@ const nameTemplate=tokens(
   "for(Schema.SObjectField $field:$object.fields.getMap().values()){"+
   "Schema.DescribeFieldResult $desc=$field.getDescribe();if($desc.isNameField()){return $desc.getName();}}return null;")!;
 const reserved=new Set(["schema","string","list","map","set","integer","boolean","null","true","false","for","if","return","break","new","switch","on","when","else"]);
-function matches(actual:readonly string[],expected:readonly string[],bindings:Map<string,string>):boolean{
-  if(actual.length!==expected.length||new Set(bindings.values()).size!==bindings.size||
-    [...bindings.values()].some(v=>!identifier.test(v)||reserved.has(v)))return false;
+interface TemplateScope {start:number;end:number}
+/** The exact templates contain braced blocks and braced for loops. Include
+ * the for header in its body's scope, so its declaration does not escape
+ * the loop. Compute scopes from the trusted template, not the candidate;
+ * every non-placeholder token must still match exactly. */
+function templateScopes(expected:readonly string[]):TemplateScope[]|undefined{
+  const root={start:0,end:expected.length};
+  const scopes:TemplateScope[]=[root],blocks:TemplateScope[]=[],parens:number[]=[];
+  const forHeaders=new Map<number,number>();
+  for(let i=0;i<expected.length;i++){
+    switch(expected[i]){
+      case "(":parens.push(i);break;
+      case ")":{
+        const open=parens.pop();if(open===undefined)return undefined;
+        if(expected[open-1]==="for"){
+          if(expected[i+1]!=="{")return undefined;
+          forHeaders.set(i+1,open+1);
+        }
+        break;
+      }
+      case "{":{
+        const scope={start:forHeaders.get(i)??i+1,end:expected.length};
+        scopes.push(scope);blocks.push(scope);break;
+      }
+      case "}":{
+        const scope=blocks.pop();if(!scope)return undefined;
+        scope.end=i;break;
+      }
+    }
+  }
+  return blocks.length||parens.length?undefined:scopes;
+}
+function matches(actual:readonly string[],expected:readonly string[],parameters:Map<string,string>):boolean{
+  if(actual.length!==expected.length||new Set(parameters.values()).size!==parameters.size||
+    [...parameters.values()].some(v=>!identifier.test(v)||reserved.has(v)))return false;
+  const scopes=templateScopes(expected);if(!scopes)return false;
+  // All template placeholders are parameters or have their first occurrence
+  // at a declaration. Later occurrences must refer to that same binding.
+  const bindings=new Map<string,{name:string;scope:TemplateScope}>();
+  for(const [placeholder,name] of parameters)bindings.set(placeholder,{name,scope:scopes[0]});
+  const contains=(scope:TemplateScope,i:number)=>scope.start<=i&&i<scope.end;
+  const overlaps=(a:TemplateScope,b:TemplateScope)=>a.start<b.end&&b.start<a.end;
   for(let i=0;i<actual.length;i++){
     const want=expected[i],got=actual[i];
     if(!want.startsWith("$")){if(want!==got)return false;continue;}
     const prior=bindings.get(want);
-    if(prior!==undefined){if(prior!==got)return false;continue;}
-    if(!identifier.test(got)||reserved.has(got)||[...bindings.values()].includes(got))return false;
-    bindings.set(want,got);
+    if(prior!==undefined){
+      if(prior.name!==got||!contains(prior.scope,i))return false;
+      continue;
+    }
+    if(!identifier.test(got)||reserved.has(got))return false;
+    // Scopes are emitted in lexical nesting order. Use the innermost
+    // enclosing scope and refuse any overlapping same-name declaration,
+    // including parameter collisions and nested shadowing. Only disjoint
+    // scopes may reuse a spelling (Apex identifiers are case-insensitive).
+    const scope=[...scopes].reverse().find(s=>contains(s,i));if(!scope)return false;
+    if([...bindings.values()].some(b=>b.name===got&&overlaps(b.scope,scope)))return false;
+    bindings.set(want,{name:got,scope});
   }
   return true;
 }
