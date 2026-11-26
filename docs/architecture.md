@@ -8,13 +8,16 @@ flowchart TD
   CLI["CLI (src/index.ts)"] --> Services["Analysis services"]
   API --> Setup["Local repository + report-folder configuration"]
   API --> Runtime["AnalyzerRuntimeService"]
-  Runtime --> Scanner["Apex scanner + SOQL parser"]
+  Runtime --> Scanner["SOQL scanner / query evidence adapter"]
+  Scanner --> AUE["Shared Apex Understanding Engine"]
+  AUE --> Meta["Scan-local metadata provider / dependency validation"]
   Runtime --> Perms["Persona resolver / metadata / access policy"]
   Runtime --> Stack["Stack trace / method call analysis"]
   Scanner --> Services
   Perms --> Services
   Stack --> Services
-  SF["Salesforce org (optional)"] -. "Describe, Tooling metadata, effective-user access" .-> Perms
+  SF["Salesforce org (optional)"] -. "Describe, effective-user access" .-> Perms
+  SF -. "Labels, Field Sets, Custom Metadata, Describe" .-> Meta
   Services --> Excel["ExcelJS Summary report"]
 ```
 
@@ -24,7 +27,9 @@ flowchart TD
 | --- | --- |
 | `src/api/server.ts` | HTTP endpoints and packaged React static serving |
 | `src/services/AnalyzerRuntimeService.ts` | Shared repository-scoped analysis services |
-| `src/scanner/` | Salesforce metadata and Apex query/method extraction |
+| `src/scanner/` | Salesforce metadata and Apex query/method extraction; SOQL reconstruction adapter |
+| `src/core/apex/` | Bounded shared AUE: source, symbols, expressions, callers, dependency evidence |
+| `src/core/metadata/` | Read-only metadata provider contracts and scan-local metadata batching |
 | `src/analyzer/` | Recursive SOQL relationships, fields, query modes, permissions |
 | `src/salesforce/` | Optional org connection and metadata-backed permission checks |
 | `src/services/` | Analysis orchestration, paths/configuration and output |
@@ -38,7 +43,7 @@ flowchart TD
 ## How a SOQL analysis runs
 
 1. Validate the configured Salesforce repository and select a business persona.
-2. Discover Apex SOQL and infer query execution mode.
+2. Discover static SOQL and reconstruct supported dynamic queries through AUE; preserve query identity, evidence coverage and execution mode. Unknown runtime inputs stay reviewable.
 3. Collect referenced objects and fields, including aggregates, parent/child relationships, and nested scopes.
 4. Evaluate Profile, Permission Set, Permission Set Group, schema and field permissionability rules.
 5. Where configured, verify uncertain access through authorized live Salesforce metadata/user checks.
@@ -59,9 +64,9 @@ Optional Salesforce verification is authenticated through **Salesforce CLI-manag
 - A verified org permission does not replace object-level authorization checks; `Review` means incomplete evidence, not a denied grant.
 - Unsupported Apex patterns, dynamic SOQL, and complex call flows can limit certainty. Regression tests help prevent known false positives; they do not guarantee complete Apex language coverage.
 
-## Dynamic SOQL v0.1.1 (feature branch)
+## Dynamic SOQL v0.1.1 (merged into main)
 
-The [dynamic SOQL architecture](features/dynamic-soql-resolution-v011.md) isolates Apex source parsing, bounded field-list/value tracing and read-only metadata adapters from the persona permission engine. Fully reconstructed variants and individually validated permission evidence enter the existing OLS/FLS evaluator; unresolved execution paths retain explicit REVIEW findings. This feature remains under review.
+The [dynamic SOQL architecture](features/dynamic-soql-resolution-v011.md) isolates Apex source parsing, bounded field-list/value tracing and read-only metadata adapters from the persona permission engine. Fully reconstructed variants and individually validated permission evidence enter the existing OLS/FLS evaluator; unresolved execution paths retain explicit REVIEW findings. Metadata reads are batched within a scan; warm reconstruction is reused only after source and metadata dependency validation. Release-owned HTTP/verification/persona concurrency is fixed at 6/5/2. Stack Trace's migration to AUE is planned for v0.1.2 ([issue #58](https://github.com/Shubhamu68/SalesforceRepositoryAnalyzer/issues/58)), not included in v0.1.1.
 
 ## Shared source dependency evidence (SOQL, future DML and other consumers)
 

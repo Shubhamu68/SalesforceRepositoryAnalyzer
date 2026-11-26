@@ -10,7 +10,11 @@
 | Browser portable CI artifact | [Build Windows Portable Analyzer](../.github/workflows/windows-portable.yml), run manually | `SalesforceRepositoryAnalyzer-Windows-Portable.zip` with bundled runtime and `Start Analyzer.cmd`. For temporary smoke testing or approved ad-hoc sharing. |
 | **Official tagged GitHub Release — browser portable only** | [Publish Windows Portable Release](../.github/workflows/release-windows.yml) after an approved `v*` tag | Versioned **browser portable** ZIP, generated release notes and `SHA256SUMS.txt`. **The current workflow does not package or publish the Electron desktop ZIP.** |
 
-Temporary GitHub Actions artifacts have a configured 30-day retention period and may be wrapped in an outer archive. This public repository does not currently have a published `v0.1.0` GitHub Release. Public visibility does not automatically make any emailed ZIP a verified release.
+Temporary GitHub Actions artifacts have a configured 30-day retention period and may be wrapped in an outer archive. Public visibility does not automatically make any emailed ZIP a verified release.
+
+### v0.1.1 source and build checkpoint
+
+The owner merged [PR #56](https://github.com/Shubhamu68/SalesforceRepositoryAnalyzer/pull/56) on 2026-11-26 at `0155d51`. All five pre-merge checks and both post-merge main regression checks passed. The [successful v0.1.1 desktop CI build](https://github.com/Shubhamu68/SalesforceRepositoryAnalyzer/actions/runs/45874701327) was built from the approved pre-merge head `b5d61ce`; confirm the artifact source and perform a manual smoke test before distributing. This is a temporary CI artifact, not a published tagged release. The source merge does not itself create a tag, publish a release or update existing installations.
 
 ## Electron desktop distribution
 

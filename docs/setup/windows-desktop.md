@@ -1,6 +1,6 @@
 # Windows desktop setup — Electron folder ZIP
 
-This is the **Electron desktop-folder edition** distributed to v0.1.0 recipients. It is a complete extracted application folder, **not an installer or single-file executable**. The older browser-based `Start Analyzer.cmd` distribution is described separately in [Windows portable setup](windows-portable.md).
+This is the **Electron desktop-folder edition** used for approved desktop ZIP distributions. The current source baseline is v0.1.1; earlier shared v0.1.0 ZIPs do not automatically update. It is a complete extracted application folder, **not an installer or single-file executable**. The older browser-based `Start Analyzer.cmd` distribution is described separately in [Windows portable setup](windows-portable.md).
 
 ## Requirements
 
@@ -44,6 +44,6 @@ The Analyzer uses **Salesforce CLI-managed OAuth**. Install Salesforce CLI v2.13
 
 ## For maintainers
 
-The [desktop build workflow](https://github.com/Shubhamu68/SalesforceRepositoryAnalyzer/actions/workflows/windows-desktop.yml) runs backend/frontend builds, regression tests, staged and packaged smoke tests, and creates a **Desktop Folder ZIP** artifact. Its temporary CI artifact is distinct from the automated **browser-portable** [GitHub Release workflow](../releases.md). The current repository has no published `v0.1.0` Release; don't promise a desktop ZIP through the Releases page unless that publication mechanism is added and validated.
+The [desktop build workflow](https://github.com/Shubhamu68/SalesforceRepositoryAnalyzer/actions/workflows/windows-desktop.yml) runs backend/frontend builds, regression tests, staged and packaged smoke tests, and creates a **Desktop Folder ZIP** artifact. Its temporary CI artifact is distinct from the automated **browser-portable** [GitHub Release workflow](../releases.md). See [release status and distribution instructions](../releases.md) for the current source/build checkpoint. Do not promise a desktop ZIP through the Releases page unless that publication mechanism is added and validated.
 
 See [Electron build notes](../../desktop/electron/README.md), [Security practices](../security.md), and [Release/distribution process](../releases.md).

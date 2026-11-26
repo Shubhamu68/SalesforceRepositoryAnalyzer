@@ -7,7 +7,7 @@
 
 Analyze Salesforce Apex SOQL and metadata by business persona, understand object and field access, investigate stack traces, and export Excel findings. The application runs locally; Salesforce org verification is optional.
 
-> **Project status:** Public source repository; active development. The source package version is **0.1.1**. No official `v0.1.0` GitHub Release has been published yet. The Electron desktop-folder ZIP shared with initial recipients is a **separately distributed build**, not an official GitHub Release. Changes to `main` do not update previously shared ZIPs.
+> **Project status:** Public source repository; active development. The source package version is **0.1.1**. v0.1.1 dynamic SOQL and performance improvements are merged into `main` ([PR #56](https://github.com/Shubhamu68/SalesforceRepositoryAnalyzer/pull/56)). A source merge is not a tagged GitHub Release or a distribution of the Electron desktop ZIP. Changes to `main` do not update previously shared ZIPs.
 
 ## Getting started — Windows desktop (Electron)
 
@@ -109,8 +109,12 @@ Open the Vite URL displayed by the frontend. For desktop packaging, tests, or op
 
 > **Build/version note:** The public `main` branch may contain development changes beyond the separately emailed v0.1.0 ZIP. Verify the exact source commit used for a distributed build before describing it as an official versioned release.
 
-**Packaging distinction:** The browser-portable launcher is not an Electron app; the separate Windows desktop-folder ZIP is an Electron application.
+**Packaging distinction:** The **Windows Portable** browser-based launcher is not an Electron app; the separate Windows desktop-folder ZIP is an Electron application.
 
-## In-progress v0.1.1 dynamic SOQL analysis
+## v0.1.1 — Dynamic SOQL and performance
 
-The [dynamic SOQL design and implementation notes](docs/features/dynamic-soql-resolution-v011.md) describe the bounded Apex dependency resolver, query variants, metadata support and limitations. This is a draft feature, not a release of the **Windows Portable** launcher or the Windows desktop package. Unknown runtime fields and incomplete metadata remain Unable to verify.
+The [dynamic SOQL design and implementation notes](docs/features/dynamic-soql-resolution-v011.md) describe the shared Apex Understanding Engine (AUE), source-proven query variants, live metadata dependencies and bounded analysis limitations. Unknown runtime fields, incomplete metadata and conflicting execution modes remain explicitly reviewable. Scan-local metadata batching and dependency-validated reuse improve repeat analysis without user-configured performance variables. See [performance notes](docs/soql-analysis-performance.md) and [CHANGELOG](CHANGELOG.md).
+
+## Next — v0.1.2
+
+[Stack Trace Impact integration with AUE (issue #58)](https://github.com/Shubhamu68/SalesforceRepositoryAnalyzer/issues/58) is planned, not implemented in v0.1.1. The existing Stack Trace feature retains static query analysis. Full repository-versus-live-org permission comparison remains deferred.
