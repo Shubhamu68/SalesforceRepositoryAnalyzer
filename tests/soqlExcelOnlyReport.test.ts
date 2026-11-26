@@ -111,7 +111,9 @@ test("runtime configuration dependency is propagated to the actual Excel Explana
     assert.equal(explanation,"OLS/FLS could not be fully verified because the dynamic query’s object or field references depend on runtime inputs.");
     assert.ok(explanation.length<=200,explanation);
     assert.doesNotMatch(explanation,/Why the query could not be fully resolved|Object_API_Name__c|getFieldListFromFieldSet|OLS\/FLS analysis was not performed/);
-    assert.equal(sheet.getCell("E9").value,"Unable to verify");
+    assert.equal(sheet.getCell("E8").value,"Unable to verify");
+    assert.equal(sheet.getCell("A5").value,"User used for verification from org");
+    assert.match(String(sheet.getCell("B5").value),/No Salesforce user verified/);
     assert.equal(sheet.getCell("E8").font.color?.argb,"FFB42332");
   }finally{await rm(root,{recursive:true,force:true});}
 });
