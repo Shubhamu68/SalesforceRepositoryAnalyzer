@@ -796,3 +796,27 @@ test("phase 5: literal aggregate SELECT lists preserve fields but not aliases",(
  const source="public class AggregateFixture {public static void run(){List<String> f=new List<String>{'SUM(AnnualRevenue) total','COUNT_DISTINCT(Industry) uniqueCount'};String q='SELECT '+String.join(f,', ')+' FROM Account WHERE Type != null';Database.query(q);}}";
  assert.deepEqual(fields(evidence([{filePath:"AggregateFixture.cls",source}]).queries),new Set(["SELECT:AnnualRevenue","SELECT:Industry","WHERE:Type"]));
 });
+
+
+test("phase 5: reuse configured predicate evidence through a guarded summary call and preserve actual field inventory",()=>{
+ const summary=configuredAggregateFixture.slice(configuredAggregateFixture.indexOf("private static void summary"),-1);
+ const base=configuredPredicateFixture
+  .replace("public static void run(String payload,Set<String> overrides){String obj='Account';","public static void run(String key,String payload,Set<String> overrides){Config__mdt row=Config__mdt.getInstance(key);String obj=row.Object__c;")
+  .replace("parse('*Name:Email,Phone;Industry;Description')","parse(row.User__c)")
+  .replace("'Type=customer;AnnualRevenue > 0',overrides","row.Default__c,overrides")
+  .replace("String q='SELECT Id FROM '+obj+(String.isNotBlank(predicate)?(' WHERE '+predicate):'');Database.queryWithBinds(q,binds,AccessLevel.USER_MODE);",
+   "String ordering='Id';if(String.isNotBlank(row.Order__c)){ordering=row.Order__c.trim()+', Id';}if(String.isNotBlank(row.Summary__c)){try{summary(obj,row.Summary__c,predicate);}catch(Exception ex){System.debug(ex);}}");
+ const source=base.slice(0,-1)+"private static String kindForDisplay(Schema.DisplayType d){return 'number';}"+summary.replace("kind(d.getType())","kindForDisplay(d.getType())")+"}";
+ const resolve=(name:string,args:ApexValue[]):ApexValue|undefined=>{
+   if(name==="Apex.metadataRows")return {kind:"records",items:[
+     [["DeveloperName",textValue("A")],["Object__c",textValue("Account")],["Order__c",textValue("Name")],["User__c",textValue("*Name:Phone;Industry")],["Default__c",textValue("Type=customer")],["Summary__c",textValue("AnnualRevenue:SUM,Phone:COUNT")]],
+     [["DeveloperName",textValue("B")],["Object__c",textValue("Contact")],["Order__c",textValue("Email")],["User__c",textValue("Email")],["Default__c",textValue("Title != null")],["Summary__c",textValue("Email:MIN")]]
+   ]};
+   return aggregateSchema(name,args);
+ };
+ const result=evidence([{filePath:"ConfigFixture.cls",source}],resolve);
+ assert.deepEqual(fields(result.queries.filter(q=>q.includes("FROM Account"))),new Set(["SELECT:AnnualRevenue","SELECT:Id","WHERE:Name","WHERE:Industry","WHERE:Type"]),JSON.stringify(result));
+ assert.deepEqual(fields(result.queries.filter(q=>q.includes("FROM Contact"))),new Set(["SELECT:Email","WHERE:Email","WHERE:Title"]),JSON.stringify(result));
+ const scan=extractDynamicSoqlQueries(source,"ConfigFixture.cls",resolve,new ApexRepositoryMethodIndex([{filePath:"ConfigFixture.cls",source}]));
+ assert.ok(scan.queries.some(q=>q.dynamicAccessLevel==="USER_MODE"&&q.query.includes("AnnualRevenue")&&q.query.includes("WHERE")),JSON.stringify(scan));
+});
