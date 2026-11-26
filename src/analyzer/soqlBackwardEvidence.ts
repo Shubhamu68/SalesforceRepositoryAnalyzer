@@ -241,6 +241,7 @@ export function backtrackSoqlPermissionShapes(source:string,filePath:string,site
                 note("SOQL_PARTIAL_EFFECT_PREFIX_VALIDATED",select.fields.length);
                 if(remainder[0]?.kind==="hole"&&remainder[0].symbol?.type===optionalWhereType)note("SOQL_OPTIONAL_WHERE_UNVERIFIED");
                 if(retained!==evidence)note("SOQL_ORDER_BY_EVIDENCE_VALIDATED");
+                else note("SOQL_ORDER_BY_EVIDENCE_UNVERIFIED");
               }
             }
           }
@@ -258,6 +259,7 @@ export function backtrackSoqlPermissionShapes(source:string,filePath:string,site
             note("SOQL_SELECT_PREFIX_VALIDATED",select.fields.length);
             note("SOQL_OPTIONAL_WHERE_UNVERIFIED");
             if(retained!==evidence)note("SOQL_ORDER_BY_EVIDENCE_VALIDATED");
+                else note("SOQL_ORDER_BY_EVIDENCE_UNVERIFIED");
           }
         }
       }

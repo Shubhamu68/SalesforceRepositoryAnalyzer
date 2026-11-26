@@ -623,5 +623,21 @@ test("COUNT root survives one unknown conditional WHERE from a private caller bu
  assert.deepEqual(result.partialSelectQueries,result.queries);
  const scan=extractDynamicSoqlQueries(source,"CountRunner.cls",undefined,index);
  assert.equal(scan.unresolved.length,1);
- assert.ok(scan.queries.some(q=>q.object==="Account"&&q.selectPrefixOnly&&q.fields.length===0),JSON.stringify(scan));
+ assert.equal(scan.queries.length,1,JSON.stringify(scan));
+ assert.ok(scan.queries.some(q=>q.object==="Account"&&q.coverage==="KNOWN_CALLER_CONTEXT"&&q.fields.length===0),JSON.stringify(scan));
+});
+
+
+test("metadata candidate caller roots propagate into COUNT without synthetic fields or full-coverage claims",async()=>{
+ const source="public class CountRunner { public class Result {public Integer total;} public static void run(String reportName,String filter){Result result=new Result();Config__mdt cfg=getConfig(reportName);if(cfg==null){return;}String obj=cfg.Object__c;result.total=count(obj,filter);} private static Config__mdt getConfig(String key){if(String.isBlank(key)){return null;}List<Config__mdt> rows=[SELECT DeveloperName,Object__c FROM Config__mdt WHERE DeveloperName=:key AND Active__c=true LIMIT 1];return rows.isEmpty()?null:rows[0];} private static Integer count(String obj,String filter){String q='SELECT COUNT() FROM '+String.escapeSingleQuotes(obj);if(String.isNotBlank(filter)){q+=' WHERE '+filter;}return Database.countQueryWithBinds(q,new Map<String,Object>(),AccessLevel.USER_MODE);} }";
+ const filePath="CountRunner.cls",index=new ApexRepositoryMethodIndex([{filePath,source}]);
+ const metadata:ApexMetadataProvider={scopeKey:"count-metadata-rows",getObjectFieldNames:async()=>({complete:false,source:"LIVE_ORG"}),
+   getCustomMetadataRecords:async()=>({complete:true,source:"LIVE_ORG",value:["Account","Contact","Case"].map(object=>({DeveloperName:object,Object__c:object,Active__c:true}))})};
+ const engine=new ApexAnalysisEngine(index,metadata);
+ const scan=await engine.analyze(filePath,ctx=>extractDynamicSoqlQueries(source,filePath,ctx.resolveExternal,index));
+ assert.deepEqual(new Set(scan.queries.map(q=>q.object)),new Set(["Account","Contact","Case"]),JSON.stringify(scan));
+ assert.ok(scan.queries.every(q=>q.fields.length===0&&q.selectPrefixOnly&&q.dynamicAccessLevel==="USER_MODE"),JSON.stringify(scan));
+ assert.equal(scan.unresolved.length,1);
+ assert.equal(scan.unresolved[0].aggregatedPermissionInventories,3);
+ assert.match(scan.unresolved[0].reportReason??"",/Runtime WHERE and effective enforcement remain unverified/);
 });

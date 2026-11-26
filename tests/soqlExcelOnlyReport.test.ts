@@ -107,11 +107,12 @@ test("runtime configuration dependency is propagated to the actual Excel Explana
     const workbook=new ExcelJS.Workbook();await workbook.xlsx.readFile(result.reports.summaryReportPath);
     const sheet=workbook.getWorksheet("Summary")!;
     const explanation=String(sheet.getCell("F7").value);
-    assert.match(explanation,/Why the query could not be fully resolved/);
-    assert.match(explanation,/reportName.*no source caller could be verified/);
-    assert.match(explanation,/Custom Metadata.*Object_API_Name__c/);
-    assert.match(explanation,/getConfig.*getFieldListFromFieldSet/);
-    assert.match(explanation,/OLS\/FLS analysis was not performed/);
+    // Preserve the actionable root blocker, not the chain of downstream
+    // symptoms or repeated coverage disclaimers.
+    assert.match(explanation,/Could not determine input values: reportName \(Report\.cls:3\).*no source caller could be verified/);
+    assert.match(explanation,/Permissions not verified/);
+    assert.ok(explanation.length<=200,explanation);
+    assert.doesNotMatch(explanation,/Why the query could not be fully resolved|Object_API_Name__c|getFieldListFromFieldSet|OLS\/FLS analysis was not performed/);
     assert.equal(sheet.getCell("E7").value,"Unable to verify");
     assert.equal(sheet.getCell("E7").font.color?.argb,"FFB42332");
   }finally{await rm(root,{recursive:true,force:true});}
