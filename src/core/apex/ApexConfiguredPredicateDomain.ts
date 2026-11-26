@@ -1,3 +1,4 @@
+import {apexContractTokens as tokens,matchApexTokenContract as match,apexPrefixBefore as before,reservedApexContractNames as reserved} from "./ApexSourceContract.js";
 import {apexSymbols} from "./ApexSymbolTable.js";
 import {canonicalApexType,type ApexCallResolver} from "./ApexTypeSystem.js";
 import {maskApexSource,stripApexComments,matchingPair,splitApexTopLevel,type IndexedApexMethod,type SourceNode} from "./ApexSourceModel.js";
@@ -16,35 +17,6 @@ interface Context {source:string;methods:readonly IndexedApexMethod[];method:Ind
 const identifier=/^[a-z_]\w*$/;
 const fieldPath=/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/;
 const clean=(s:string)=>stripApexComments(s).trim();
-const reserved=new Set(["string","schema","json","list","set","map","integer","boolean","object","null","true","false","return","continue","for","if","new","this","super"]);
-function tokens(source:string):string[]|undefined{
-  const input=stripApexComments(source),result:string[]=[];let end=0;
-  for(const hit of input.matchAll(/'(?:\\.|[^'\\])*'|\$[A-Za-z_]\w*|[A-Za-z_]\w*|\d+|==|!=|\+\+|--|<=|>=|&&|\|\||[{}()[\].,:;=<>?+!*/-]/g)){
-    if(input.slice(end,hit.index).trim())return undefined;
-    result.push(hit[0].startsWith("'")?hit[0]:hit[0].toLowerCase());
-    end=hit.index!+hit[0].length;
-  }
-  return input.slice(end).trim()?undefined:result;
-}
-/** Whole-body token contracts, alpha-renamed and fail-closed. Refuse
- * collisions rather than attempting arbitrary lexical substitution. */
-function match(source:string,template:string,initial:Record<string,string>={}):Map<string,string>|undefined{
-  const actual=tokens(source),expected=tokens(template);
-  if(!actual||!expected||actual.length!==expected.length)return undefined;
-  const bindings=new Map(Object.entries(initial).map(([k,v])=>[k,v.toLowerCase()]));
-  if(new Set(bindings.values()).size!==bindings.size||[...bindings.values()].some(v=>!identifier.test(v)||reserved.has(v)))return undefined;
-  for(let i=0;i<expected.length;i++){
-    const want=expected[i],got=actual[i];
-    if(!want.startsWith("$")){if(want!==got)return undefined;continue;}
-    const prior=bindings.get(want);
-    if(prior!==undefined){if(prior!==got)return undefined;continue;}
-    if(want==="$number"){if(!/^(?:0|[1-9]\d{0,3})$/.test(got))return undefined;}
-    else if(!identifier.test(got)||reserved.has(got))return undefined;
-    if([...bindings.values()].includes(got))return undefined;
-    bindings.set(want,got);
-  }
-  return bindings;
-}
 const body=(c:Context,m:IndexedApexMethod)=>c.source.slice(m.start,m.end);
 function helper(c:Context,name:string,types:readonly string[],result:string):IndexedApexMethod|undefined{
   const symbols=apexSymbols(c.source,c.methods);
@@ -61,22 +33,6 @@ function dtoFields(c:Context,type:string):string[]|undefined{
   const start=declarations[0].index!+declarations[0][0].length-1,end=matchingPair(masked,start,"{","}");
   const actual=end<0?undefined:tokens(c.source.slice(start+1,end));
   return actual?.at(-1)===";"?actual.join("").split(";").filter(Boolean):undefined;
-}
-function before(nodes:readonly SourceNode[],at:number):SourceNode[]|undefined{
-  const result:SourceNode[]=[];
-  for(const n of nodes){
-    if(n.end<=at){result.push(n);continue;}
-    if(n.start>=at)return result;
-    if(n.kind==="statement")return result;
-    if(n.kind!=="block"&&n.kind!=="if")return undefined;
-    for(const branch of [n.body??[],n.otherwise??[]]){
-      if(branch.some(x=>x.start<=at&&at<x.end)){
-        const inner=before(branch,at);return inner?[...result,...inner]:undefined;
-      }
-    }
-    return undefined;
-  }
-  return result;
 }
 const uses=(c:Context,n:SourceNode,name:string)=>new RegExp("\\b"+name+"\\b","i").test(maskApexSource(c.source.slice(n.start,n.end)));
 const same=(a:string,b:string)=>a.trim().toLowerCase()===b.trim().toLowerCase();

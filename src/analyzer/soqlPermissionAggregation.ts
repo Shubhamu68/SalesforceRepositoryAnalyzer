@@ -18,8 +18,14 @@ export function permissionSelectFieldPath(expression:string):string|undefined{
   return /^FORMAT\s*\(\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\)$/i.exec(trimmed)?.[1];
 }
 
-/** Simple root scopes only. Do not flatten subqueries, aggregates, aliases,
- * grouped expressions or unknown security modes into an incorrect scope. */
+/** A deliberately narrow aggregate projection. Aliases are syntactic
+ * names, not Salesforce fields. Group/HAVING and nested scope rules are
+ * unchanged; this accepts only a single field argument per function. */
+export function permissionAggregateSelectFieldPath(expression:string):string|undefined{
+  return /^(?:SUM|AVG|MIN|MAX|COUNT|COUNT_DISTINCT)\s*\(\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\)(?:\s+[A-Za-z_]\w*)?$/i.exec(expression.trim())?.[1];
+}
+/** Simple root scopes only; scalar aggregate fields are permitted, but
+ * grouped expressions and nested scopes are not flattened. */
 export function simplePermissionShape(text:string,line=1,onReject?:(code:string)=>void):SoqlPermissionShape|undefined{
   const reject=(code:string):undefined=>{onReject?.(code);return undefined;};
   const root=parseNestedSoql(text,line), inventory=extractSoqlExpressionFields(text);
@@ -29,13 +35,13 @@ export function simplePermissionShape(text:string,line=1,onReject?:(code:string)
   if(inventory.limitations.length)return reject("FIELD_INVENTORY_LIMITATION");
   const countOnly=/^\s*SELECT\s+COUNT\s*\(\s*\)\s+FROM\b/i.test(text);
   if(!inventory.fields.length&&!countOnly)return reject("FIELD_INVENTORY_EMPTY");
-  if(inventory.fields.some(f=>(f.functionName&&!(f.context==="SELECT"&&f.functionName.toUpperCase()==="FORMAT"))||!fieldPath.test(f.fieldPath)||
+  if(inventory.fields.some(f=>(f.functionName&&!(f.context==="SELECT"&&["FORMAT","SUM","AVG","MIN","MAX","COUNT","COUNT_DISTINCT"].includes(f.functionName.toUpperCase())))||!fieldPath.test(f.fieldPath)||
       !["SELECT","WHERE","ORDER_BY"].includes(f.context)))return reject("FIELD_CONTEXT_UNSUPPORTED");
   const visible=maskSoqlStringsAndComments(text);
   // Restrict to ordinary bare SELECT paths and a single unaliased root.
   const match=/^\s*SELECT\s+([\w\s.,()]+?)\s+FROM\s+([A-Za-z_]\w*)\b/i.exec(visible);
   if(!match||match[2].toLowerCase()!==root.fromName.toLowerCase()||
-    (!countOnly&&match[1].split(",").some(f=>!permissionSelectFieldPath(f))))return reject("SELECT_ROOT_SHAPE_UNSUPPORTED");
+    (!countOnly&&match[1].split(",").some(f=>!permissionSelectFieldPath(f)&&!permissionAggregateSelectFieldPath(f))))return reject("SELECT_ROOT_SHAPE_UNSUPPORTED");
   const tail=visible.slice(match[0].length).trim();
   if(tail&&!/^(?:WHERE\b|WITH\b|ORDER\s+BY\b|LIMIT\b|OFFSET\b|FOR\b)/i.test(tail))return reject("ROOT_TAIL_UNSUPPORTED");
   if(/\b(?:GROUP\s+BY|HAVING|TYPEOF)\b/i.test(visible))return reject("GROUPED_SHAPE_UNSUPPORTED");

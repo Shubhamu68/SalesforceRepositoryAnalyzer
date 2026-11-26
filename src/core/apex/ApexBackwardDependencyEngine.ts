@@ -157,6 +157,9 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
         if(apexSymbols(frame.source,frame.methods).lookup(frame.method,"String",offset))return ev(reject("shadowed String","SHADOWED_STRING"));
         const args=splitApexTopLevel(join[1],",");
         if(args.length!==2)return ev(reject("join arity","JOIN_ARITY"));
+        const context={source:frame.source,methods:frame.methods,method:frame.method,expression:expr,offset};
+        const structural=policy.abstractEvidence?.(context,part=>resolve(frame,part,offset,locals,members),(part,at)=>at>=frame.method.start&&at<=offset?resolve(frame,part,at,locals,members):ev(stop("Invalid source evidence offset")));
+        if(structural!==undefined){note(frame,offset,"CONSUMER_STRUCTURAL_EVIDENCE");return structural;}
         const list=resolve(frame,args[0],offset,locals),separator=one(resolve(frame,args[1],offset,locals).value);
         if(list.value.kind!=="collection"||separator===undefined||list.value.items.length>MAX_COLLECTION_ITEMS)return ev(reject("unproven joined collection","JOIN_INPUT_UNPROVEN"));
         if(policy.join)return policy.join(list,separator)??ev(reject("consumer cannot interpret joined collection","JOIN_CONSUMER_REJECTED"));
@@ -518,7 +521,17 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
         let current=base;
         let exactCurrent=freshCollection;
         const memberRead=new RegExp("\\b"+name+"\\s*\\.\\s*[A-Za-z_]\\w*(?!\\w)(?!\\s*(?:\\(|\\.|=(?!=|>)|[+\\-*/%&|^]=|\\+\\+|--))","gi");
-        const readOnlyMetadata=(visible:string)=>!rx(name).test(visible.replace(memberRead,""));
+        const trimRead=new RegExp("\\b"+name+"\\s*\\.\\s*([A-Za-z_]\\w*)\\s*\\.\\s*trim\\s*\\(\\s*\\)(?!\\s*\\.)","gi");
+        const readOnlyMetadata=(visible:string)=>{
+          if(new RegExp("(?:\\+\\+|--)\\s*"+name+"\\b","i").test(visible))return false;
+          // A proven scalar metadata member's trim() cannot mutate/escape
+          // its record. Do not admit arbitrary receiver method calls.
+          const normalized=visible.replace(trimRead,(hit,member:string)=>{
+            const value=evaluateApexExpression("cfg."+member,{values:new Map([["cfg",current.value]])});
+            return value.kind==="text"&&!value.scalarType?"":hit;
+          });
+          return !rx(name).test(normalized.replace(memberRead,""));
+        };
         const noOpaque=(nodes:readonly SourceNode[]):boolean=>nodes.every(child=>child.kind!=="opaque"&&child.condition!=="__apex_exception_path_unknown__"&&noOpaque(child.body??[])&&noOpaque(child.otherwise??[]));
         const visit=(nodes:readonly SourceNode[],conditional:boolean,bindings:Locals):boolean=>{
           for(const n of nodes){
@@ -670,7 +683,7 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
               // A completed loop that only reads an outer scalar does not
               // change its reaching value. Reuse the lexical proof used
               // when resolving arguments inside an active iteration.
-              if(!collection&&apexSymbols(frame.source,frame.methods).isReadOnlyOuterScalar(frame.method,name,n,offset)){
+              if(!collection&&apexSymbols(frame.source,frame.methods).isReadOnlyOuterScalar(frame.method,name,n,offset,true)){
                 note(frame,n.start,"LOOP_OUTER_SCALAR_READ_PROVEN",name);
                 continue;
               }

@@ -754,3 +754,45 @@ test("phase 4.1: shadowed platform identifier is not treated as a JSON deseriali
   .replace("JSON.deserialize(payload,List<Input>.class)","JSON.deserialize(JSON,List<Input>.class)");
  assert.equal(evidence([{filePath:"ConfigFixture.cls",source}],configuredSchema).queries.length,0);
 });
+
+
+const configuredAggregateFixture="public class AggregateFixture {"+
+ scopedDescribeFixture.slice(scopedDescribeFixture.indexOf("{")+1,scopedDescribeFixture.lastIndexOf("}"))+
+ "private static String kind(Schema.DisplayType d){return 'number';}"+
+ "public static void run(String key){Config__mdt row=Config__mdt.getInstance(key);String obj=row.Object__c;String ordering='Id';if(String.isNotBlank(row.Order__c)){ordering=row.Order__c.trim()+', Id';}"+
+ "if(String.isNotBlank(row.Summary__c)){summary(obj,row.Summary__c,row.Predicate__c);}}"+
+ "private static void summary(String obj,String config,String predicate){List<String> selected=new List<String>();Integer idx=0;"+
+ "for(String def:config.split(',')){if(String.isBlank(def)) continue;String main;String alternative=null;if(def.contains('##')){main=def.substringBefore('##').trim();alternative=def.substringAfter('##').trim();}else{main=def.trim();}"+
+ "List<String> parts=main.split(':');if(parts.isEmpty()) continue;String field=parts[0].trim();String fn=parts.size()>1?parts[1].trim().toUpperCase():'SUM';String label=parts.size()>2?parts[2].trim():null;if(String.isBlank(field)){continue;}"+
+ "Set<String> allowed=new Set<String>{'SUM','AVG','MIN','MAX','COUNT'};if(!allowed.contains(fn)){continue;}Schema.DescribeFieldResult d=describeFieldPath(obj,field);String fieldLabel=d!=null?d.getLabel():field;String alias=null;"+
+ "if(d!=null){alias='agg'+idx;String expr=(fn=='COUNT')?'COUNT(Id)':(fn+'('+field+')');selected.add(expr+' '+alias);}"+
+ "Map<String,Object> display=new Map<String,Object>{'label'=>String.isNotBlank(label)?label:fieldLabel,'type'=>d!=null?kind(d.getType()):'number'};if(alias!=null){display.put('alias',alias);}if(String.isNotBlank(alternative)){display.put('fallback',alternative);}idx++;}"+
+ "if(!selected.isEmpty()){String q='SELECT '+String.join(selected,', ')+' FROM '+String.escapeSingleQuotes(obj);if(String.isNotBlank(predicate)){q+=' WHERE '+predicate;}Database.queryWithBinds(q,new Map<String,Object>(),AccessLevel.USER_MODE);}}}";
+function aggregateSchema(name:string,args:ApexValue[]):ApexValue|undefined{
+ if(name==="Apex.metadataRows")return {kind:"records",items:[
+  [["DeveloperName",textValue("A")],["Object__c",textValue("Account")],["Order__c",textValue("Name")],["Summary__c",textValue("AnnualRevenue:AVG:Label,Phone:COUNT,Industry:MAX,Missing__c:SUM,Name:BAD")],["Predicate__c",textValue("Type != null")]],
+  [["DeveloperName",textValue("B")],["Object__c",textValue("Contact")],["Order__c",textValue("Email")],["Summary__c",textValue("Email:MIN,Title:COUNT")],["Predicate__c",textValue("Title != null")]]
+ ]};
+ if(name==="Schema.fieldMap"&&args[0]?.kind==="text"&&args[0].values[0]==="Contact")
+  return {kind:"map",keyType:"schemaField",entries:["Id","Email","Title"].map(field=>[field.toLowerCase(),{kind:"schema",schemaType:"fieldToken",objectApiName:"Contact",field:{name:field,type:"string",relationshipName:null,referenceTo:[]}}])};
+ return configuredSchema(name,args);
+}
+test("phase 5: aggregate configuration across metadata rows, COUNT(Id), aliases, WHERE and read-only trim",()=>{
+ const result=evidence([{filePath:"AggregateFixture.cls",source:configuredAggregateFixture}],aggregateSchema);
+ assert.deepEqual(fields(result.queries.filter(q=>q.includes("FROM Account"))),new Set(["SELECT:AnnualRevenue","SELECT:Industry","SELECT:Id","WHERE:Type"]),JSON.stringify(result));
+ assert.deepEqual(fields(result.queries.filter(q=>q.includes("FROM Contact"))),new Set(["SELECT:Email","SELECT:Id","WHERE:Title"]),JSON.stringify(result));
+});
+test("phase 5: reject unproven configured aggregates and metadata mutations",()=>{
+ for(const source of [
+   configuredAggregateFixture.replace("ordering=row.Order__c.trim()+', Id';","row.Summary__c='Name:SUM';"),
+   configuredAggregateFixture.replace("selected.add(expr+' '+alias);","selected.add(alternative);"),
+   configuredAggregateFixture.replace("idx++;}","Other.mutate(selected);idx++;}"),
+   configuredAggregateFixture.replace("if(!allowed.contains(fn)){continue;}",""),
+   configuredAggregateFixture.replace("if(d!=null){alias=","if(true){alias="),
+   configuredAggregateFixture.replace("String.escapeSingleQuotes(obj)","'Case'")
+ ])assert.equal(evidence([{filePath:"AggregateFixture.cls",source}],aggregateSchema).queries.length,0,source);
+});
+test("phase 5: literal aggregate SELECT lists preserve fields but not aliases",()=>{
+ const source="public class AggregateFixture {public static void run(){List<String> f=new List<String>{'SUM(AnnualRevenue) total','COUNT_DISTINCT(Industry) uniqueCount'};String q='SELECT '+String.join(f,', ')+' FROM Account WHERE Type != null';Database.query(q);}}";
+ assert.deepEqual(fields(evidence([{filePath:"AggregateFixture.cls",source}]).queries),new Set(["SELECT:AnnualRevenue","SELECT:Industry","WHERE:Type"]));
+});

@@ -1,4 +1,5 @@
 import {apexSymbols} from "../core/apex/ApexSymbolTable.js";
+import {proveConfiguredAggregateDomain} from "../core/apex/ApexConfiguredAggregateDomain.js";
 import {proveConfiguredPredicateDomain} from "../core/apex/ApexConfiguredPredicateDomain.js";
 import {addApexValues,runtimeParameter,textValue,unknown,type ApexValue,type ApexTextFragment} from "../core/apex/ApexValueEvaluator.js";
 import {traceApexDependencies,type ApexDependencyEvidence,type ApexDependencyAppend,type ApexDependencyExpressionContext} from "../core/apex/ApexBackwardDependencyEngine.js";
@@ -10,7 +11,7 @@ import {parseApexAccessLevel} from "../core/apex/ApexDatabaseAccessMode.js";
 import {reportApexDependency,type ApexDependencyObserver} from "../core/apex/ApexDependencyDiagnostics.js";
 import {provePartialSoql} from "./soqlPartialStructure.js";
 import {maskSoqlStringsAndComments} from "./soqlExecutionMode.js";
-import {aggregatePermissionShapes,simplePermissionShape,permissionSelectFieldPath,type SoqlPermissionShape} from "./soqlPermissionAggregation.js";
+import {aggregatePermissionShapes,simplePermissionShape,permissionSelectFieldPath,permissionAggregateSelectFieldPath,type SoqlPermissionShape} from "./soqlPermissionAggregation.js";
 const one=(v:ApexValue)=>v.kind==="text"&&v.values.length===1&&!v.scalarType?v.values[0]:undefined;
 const stop=(reason:string)=>unknown("SOQL backward evidence: "+reason);
 const path=/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/;
@@ -261,7 +262,23 @@ export function backtrackSoqlPermissionShapes(source:string,filePath:string,site
   const trace=traceApexDependencies<Use>(source,filePath,{expression:site.argument,offset:site.offset},index,resolveExternal,{
     observe,
     abstractExpression:abstractSoqlExpression,
-    abstractEvidence:(context,resolve,resolveAt)=>abstractPredicateEvidence(context,resolve,resolveAt,["String","List","Set","Map","Schema","JSON"].some(p=>!!index?.hasSourceClass(p)),resolveExternal),
+    abstractEvidence:(context,resolve,resolveAt)=>{
+      const shadowed=["String","List","Set","Map","Schema","JSON"].some(p=>!!index?.hasSourceClass(p));
+      const join=/^String\s*\.\s*join\s*\(\s*([A-Za-z_]\w*)\s*,\s*',\s*'\s*\)$/i.exec(context.expression);
+      if(join&&!shadowed){
+        const domain=proveConfiguredAggregateDomain(context,join[1],(expr,at)=>{
+          const result=resolveAt(expr,at);
+          return result.annotations.length||result.runtimeMembers||result.describeObject?stop("Non-exact aggregate dependency"):result.value;
+        },resolveExternal);
+        if(domain?.complete&&domain.expressions.length){
+          const references:Use[]=domain.expressions.map(f=>({fieldPath:f.fieldPath,context:"SELECT",predicateRoot:domain.object}));
+          const text=domain.expressions.map((f,i)=>f.functionName+"("+f.fieldPath+") agg"+i).join(", ");
+          note("SOQL_CONFIGURED_AGGREGATE_REFERENCES_PROVEN",references.length);
+          return ev(textValue(text),references);
+        }
+      }
+      return abstractPredicateEvidence(context,resolve,resolveAt,shadowed,resolveExternal);
+    },
     allowMetadataCandidateRows:true,
     validatePartialSetMember:member=>!!permissionSelectFieldPath(member),
     join:(list,separator)=>{
@@ -272,8 +289,10 @@ export function backtrackSoqlPermissionShapes(source:string,filePath:string,site
         if(list.annotations.some(f=>!references.some(x=>x.context===f.context&&x.fieldPath.toLowerCase()===f.fieldPath.toLowerCase())))return undefined;
         return ev(textValue(predicateInventory(references)),references);
       }
-      if(list.value.kind!=="collection"||!/^,\s*$/.test(separator)||list.value.items.length>MAX_FIELDS||list.value.items.some(s=>!permissionSelectFieldPath(s)))return undefined;
-      const annotations:Use[]=list.value.items.map(field=>({fieldPath:permissionSelectFieldPath(field)!,context:"SELECT"}));
+      if(list.value.kind!=="collection"||!/^,\s*$/.test(separator)||list.value.items.length>MAX_FIELDS)return undefined;
+      const project=(member:string)=>permissionSelectFieldPath(member)??(!list.runtimeMembers?permissionAggregateSelectFieldPath(member):undefined);
+      if(list.value.items.some(member=>!project(member)))return undefined;
+      const annotations:Use[]=list.value.items.map(field=>({fieldPath:project(field)!,context:"SELECT"}));
       if(list.runtimeMembers?.schemaEffectPartial){
         if(!list.value.items.length)return undefined;
         return ev({kind:"unknown",reason:"Only common SELECT members across Schema effects are proven",fragments:[{kind:"literal",text:list.value.items.join(",")},{kind:"hole",symbol:{name:"additionalFields",type:partialEffectType}}]},annotations);

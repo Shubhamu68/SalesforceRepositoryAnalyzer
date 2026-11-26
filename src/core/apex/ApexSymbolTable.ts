@@ -73,7 +73,7 @@ export class ApexSymbolTable{
    * boundary only if its lexical binding predates that loop and no
    * iteration (including a later iteration) can reassign or shadow it.
    * This is a source proof, not a runtime-value or collection-alias proof. */
-  isReadOnlyOuterScalar(method:IndexedApexMethod,name:string,loop:SourceNode,offset:number):boolean{
+  isReadOnlyOuterScalar(method:IndexedApexMethod,name:string,loop:SourceNode,offset:number,completedLoop=false):boolean{
     if(loop.kind!=="for"||(!loop.loopVariable||!loop.iterable)&&!proveIndexedStringProjection(loop)||
       !/^[A-Za-z_]\w*$/.test(name)||offset<=loop.start)return false;
     const key=name.toLowerCase();
@@ -87,7 +87,7 @@ export class ApexSymbolTable{
       bindings.some(b=>b.start>loop.start&&b.start<loop.end))return false;
     const visible=maskApexSource(this.source.slice(loop.start,loop.end));
     const writes=new RegExp("\\b"+name+"\\s*(?:=(?!=|>)|(?:[+\\-*/%&|^]|<<|>>>?)=|\\+\\+|--)|(?:\\+\\+|--)\\s*"+name+"\\b","i");
-    if(writes.test(visible)||/\b(?:return|throw|break|continue)\b/i.test(visible))return false;
+    if(writes.test(visible)||(completedLoop?/\b(?:return|throw)\b/i:/\b(?:return|throw|break|continue)\b/i).test(visible))return false;
     const safe=(nodes:readonly SourceNode[]):boolean=>nodes.every(n=>{
       if(n.kind==="opaque"||n.condition==="__apex_exception_path_unknown__"||
         (n.kind==="for"&&!n.loopVariable&&!proveIndexedStringProjection(n)))return false;
