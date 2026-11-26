@@ -1,6 +1,6 @@
 # Documentation
 
-Start with the **Electron desktop setup** if you received the initial v0.1.0 folder ZIP. The browser-based portable launcher and source-code developer setup are separate workflows. Historical notes are preserved for traceability and may describe superseded authentication or deployment approaches.
+Start with the **Electron desktop setup** if you received an approved desktop-folder ZIP. The current source baseline is v0.1.1; previously distributed builds do not automatically update. The browser-based portable launcher and source-code developer setup are separate workflows. Historical notes are preserved for traceability and may describe superseded authentication or deployment approaches.
 
 ## Current guides
 
@@ -14,7 +14,10 @@ Start with the **Electron desktop setup** if you received the initial v0.1.0 fol
 | [Security](security.md) | Public source precautions, credentials, read-only scope, unsigned executable |
 | [Builds and releases](releases.md) | Difference between emailed ZIP, CI artifact and official tagged browser-portable Release |
 | [Repository settings](repository-settings.md) | Maintainer-only GitHub About and branch governance checklist |
-| [Dynamic SOQL v0.1.1 design and test coverage](features/dynamic-soql-resolution-v011.md) | Reusable Apex data-flow engine, resolution contracts and limitations |
+| [Dynamic SOQL v0.1.1 design and test coverage](features/dynamic-soql-resolution-v011.md) | Merged AUE implementation, resolution contracts and limitations |
+| [SOQL performance](soql-analysis-performance.md) | Metadata batching, dependency-validated reuse and release-owned defaults |
+| [Development roadmap](features/milestone-2-coverage-roadmap.md) | Historical milestones and v0.1.1 scope closure |
+| [v0.1.2 Stack Trace integration](https://github.com/Shubhamu68/SalesforceRepositoryAnalyzer/issues/58) | Planned AUE integration; not yet implemented |
 | [SOQL aggregate analysis](features/soql-aggregates.md) | Parser, field extraction, limitations and UAT |
 | [Org permission fallback](features/org-access-fallback.md) | Repository-first effective permission verification |
 
