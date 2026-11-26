@@ -431,7 +431,7 @@ export function evaluateApexExpression(
       return evaluateBoundedStringOperation(evaluateApexExpression(operation.receiver,context,depth+1),operation.name,
         operation.args.map(x=>evaluateApexExpression(x,context,depth+1)));
     }
-    if(/\)$/.test(operation.receiver)){
+    if(/[)\]]$/.test(operation.receiver)){
       return evaluateApexReadOperation(evaluateApexExpression(operation.receiver,context,depth+1),operation.name,
         operation.args.map(x=>evaluateApexExpression(x,context,depth+1)));
     }
@@ -595,7 +595,13 @@ export function evaluateApexExpression(
       if(operation==="containsignorecase")return merged(receiver.values.map(x=>String(x.toLowerCase().includes(argument.toLowerCase()))),"boolean");
       if(operation==="split"){
         const one=onlyText(receiver);
-        return one!==null?listValue(one.split(argument)):unknown("Split has multiple possible inputs.");
+        if(one===null)return unknown("Split has multiple possible inputs.");
+        // Apex split uses a regular expression. Interpret only bounded,
+        // unambiguous delimiters, never arbitrary regex source.
+        if(argument==="\\.")return listValue(one.split("."));
+        if(argument==="\\s+")return listValue(one.split(/\s+/).filter((part,i,all)=>part!==""||i<all.length-1));
+        if(argument&&!/[\\^$.*+?()[\]{}|]/.test(argument))return listValue(one.split(argument));
+        return unknown("Apex String.split regex is outside the proven subset.");
       }
     }
     return context.resolveCall?.(name,args,context.argumentTypes?.(pieces))??unknown("Unsupported or external Apex method: "+name);

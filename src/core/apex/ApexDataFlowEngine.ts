@@ -1,5 +1,6 @@
 import {apexMapKey} from "./ApexValueEvaluator.js";
 import {isSchemaFieldMap,mutateSchemaFieldMap} from "./ApexSchemaModel.js";
+import {evaluateSchemaHelper} from "./ApexSchemaHelperModel.js";
 import {applyApexStringCollectionMutation,apexIterationValues} from "./ApexCollectionOperations.js";
 import {collectApexReferences,isApexReference,referenceMember,replaceApexReferences} from "./ApexReferenceState.js";
 import {proveInstanceArgumentEffects} from "./ApexInstanceEffects.js";
@@ -183,6 +184,8 @@ export class ApexDataFlowEngine {
         const selected=selectApexOverload(matches,args.length,argumentTypes);
         if(!selected)return matches.length?unknown("Apex overload is ambiguous or its source argument types are unproven: "+name):undefined;
         const candidates=[selected];
+        const schemaHelper=this.effects.schemaHelper(selected);
+        if(schemaHelper)return evaluateSchemaHelper(schemaHelper,args,this.options.resolveExternal);
         if(!args.length&&candidates[0].isStatic&&this.className){
           const lazy=this.options.resolveExternal?.("Apex.lazyGetter",[textValue(this.className),textValue(sameClass)]);
           if(lazy!==undefined)return lazy;
@@ -919,6 +922,8 @@ export class ApexDataFlowEngine {
   summarizeMethodReturn(method:IndexedApexMethod,args:readonly ApexValue[]):ApexValue {
     if(method.parameters.length!==args.length)
       return unknown("Apex helper argument count does not match the declaration.");
+    const schemaHelper=this.effects.schemaHelper(method);
+    if(schemaHelper)return evaluateSchemaHelper(schemaHelper,args,this.options.resolveExternal);
     this.budget.reset();
     this.activeSlice=undefined;
     this.activeQueryOffset=undefined;

@@ -3,6 +3,7 @@ import {evaluateApexExpression,unknown,type ApexValue} from "./ApexValueEvaluato
 import {canonicalApexType} from "./ApexTypeSystem.js";
 import {maskProvenSchemaReads,maskProvenListReads} from "./ApexSchemaModel.js";
 import {isBoundedStringOperation} from "./ApexBoundedStringOperations.js";
+import {recognizeSchemaHelper} from "./ApexSchemaHelperModel.js";
 
 interface ScalarMember {name:string;key:string;initial:ApexValue}
 const safeCall=/^(?:String\.(?:join|valueOf|isBlank|isNotBlank|isEmpty|escapeSingleQuotes)|Math\.(?:min|max)|System\.debug)$/i;
@@ -175,17 +176,36 @@ export class ApexMemberEffectModel{
     if(/^String$/i.test(type))return isBoundedStringOperation(operation)||/^(?:trim|contains|split|isEmpty|toLowerCase|toUpperCase|equalsIgnoreCase|containsIgnoreCase|removeEnd)$/i.test(operation);
     return /^Schema\.FieldSetMember$/i.test(type)&&/^(?:getFieldPath|getLabel|getType)$/i.test(operation);
   }
+  private readonly schemaHelpers=new Map<IndexedApexMethod,ReturnType<typeof recognizeSchemaHelper>>();
+  schemaHelper(method:IndexedApexMethod):ReturnType<typeof recognizeSchemaHelper>{
+    if(!this.schemaHelpers.has(method))this.schemaHelpers.set(method,this.isOuter(method)?recognizeSchemaHelper(this.source,method):undefined);
+    return this.schemaHelpers.get(method);
+  }
+  private maskPureSchemaHelpers(visible:string):string{
+    let result="",cursor=0;
+    for(const hit of visible.matchAll(/\b([A-Za-z_]\w*)\s*\(/g)){
+      const at=hit.index!;if(at<cursor||/\.\s*$/.test(visible.slice(0,at)))continue;
+      const candidates=this.methods.filter(m=>m.name.toLowerCase()===hit[1].toLowerCase());
+      if(candidates.length!==1||!this.schemaHelper(candidates[0]))continue;
+      const open=visible.indexOf("(",at),end=matchingPair(visible,open);
+      if(end<0||!/^\s*(?:[A-Za-z_]\w*|0)?\s*(?:,\s*(?:[A-Za-z_]\w*|0)?\s*)*$/.test(visible.slice(open+1,end)))continue;
+      if(/^\s*(?:\.|\[)/.test(visible.slice(end+1)))continue;
+      result+=visible.slice(cursor,at)+"0";cursor=end+1;
+    }
+    return result+visible.slice(cursor);
+  }
   /** Strict replay subset: only local scalars/collections, direct member
    * writes and proven built-ins. Unsupported dispatch/callbacks fail closed. */
   replaySafe(method:IndexedApexMethod):boolean{
     const old=this.safe.get(method);if(old!==undefined)return old;
     this.safe.set(method,false);
     if(!this.isOuter(method)||!method.isStatic||method.visibility!=="private")return false;
+    if(this.schemaHelper(method)){this.safe.set(method,true);return true;}
     const types=this.types(method);
     const check=(source:string,statement=false):boolean=>{
       let visible=maskApexSource(source);
       const schemaAllowed=!this.locals(method).has("schema")&&!/\bclass\s+Schema\b/i.test(this.masked);
-      visible=maskProvenSchemaReads(visible,types,schemaAllowed);
+      visible=this.maskPureSchemaHelpers(maskProvenSchemaReads(visible,types,schemaAllowed));
       if(/\b(?:insert|update|upsert|delete|undelete|merge|throw|switch|try|while|do)\b/i.test(visible))return false;
       // Recognize only platform constructors and independently proven inert
       // nested DTOs. Unknown allocations are not safe effect evidence.
@@ -289,7 +309,7 @@ export class ApexMemberEffectModel{
       checked.add(helper);
       const rawBody=this.masked.slice(helper.start,helper.end);
       const schemaAllowed=!this.locals(helper).has("schema")&&!/\bclass\s+Schema\b/i.test(this.masked);
-      const body=maskProvenListReads(maskProvenSchemaReads(rawBody,this.types(helper),schemaAllowed),this.types(helper));
+      const body=maskProvenListReads(this.maskPureSchemaHelpers(maskProvenSchemaReads(rawBody,this.types(helper),schemaAllowed)),this.types(helper));
       const hasSet=[...this.types(helper).values()].some(t=>canonicalApexType(t)?.startsWith("set<"))||
         /\bnew\s+Set\s*</i.test(body);
       if(hasSet&&/\bfor\s*\(|\bString\s*\.\s*join\s*\(|\bnew\s+List\s*<|\.\s*get\s*\(|\[[^\]]*\]/i.test(body))return false;

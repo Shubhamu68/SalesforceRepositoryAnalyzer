@@ -209,7 +209,7 @@ export class ApexAnalysisEngine {
   };
   // Bound metadata discovery by passes and distinct requests per query class.
   // Never fabricate data for failed lookups or silently use partial results.
-  const MAX_PASSES=5,MAX_LABELS=40,MAX_FIELDSETS=30,MAX_DESCRIBES=40,MAX_METADATA=30;
+  const MAX_PASSES=8,MAX_LABELS=40,MAX_FIELDSETS=30,MAX_DESCRIBES=40,MAX_METADATA=30;
   for(let pass=0;;pass++){
     requestedLabels.clear();requestedFieldSets.clear();requested.clear();requestedSchemas.clear();requestedMetadata.clear();
     const {baseResolver,resolver}=makeResolver();
