@@ -1,5 +1,5 @@
 import {apexMapKey} from "./ApexValueEvaluator.js";
-import {isSchemaFieldMap,mutateSchemaFieldMap} from "./ApexSchemaModel.js";
+import {isSchemaFieldMap,mutateSchemaFieldMap,type ApexSchemaChoice} from "./ApexSchemaModel.js";
 import {evaluateSchemaHelper} from "./ApexSchemaHelperModel.js";
 import {applyApexStringCollectionMutation,apexIterationValues} from "./ApexCollectionOperations.js";
 import {collectApexReferences,isApexReference,referenceMember,replaceApexReferences} from "./ApexReferenceState.js";
@@ -50,6 +50,8 @@ export interface ApexFlowOptions {
 interface State { values: ApexEnvironment; stopped?: boolean; loopControl?:"break"|"continue"; effectFrame?:boolean }
 interface FrameResult { states: State[]; returns: ApexValue[] }
 interface ReferenceReplay {refs:ApexValue[];instanceReplay:boolean}
+class SchemaEffectExpand {constructor(readonly key:string,readonly choices:readonly string[]){}}
+export interface ApexStringSetEvidence {value:Extract<ApexValue,{kind:"collection"}>;complete:boolean;alternatives:number}
 
 /** Identical symbolic states do not represent additional structural query variants. */
 function mergeEquivalentStates(states:State[]):State[] {
@@ -99,6 +101,8 @@ export class ApexDataFlowEngine {
   private readonly summaries = new Map<string,ApexValue>();
   private readonly activeCalls = new Set<string>();
   private readonly budget:ApexExecutionBudget;
+  private schemaEffectChoice?:ApexSchemaChoice;
+  private schemaSetProjection?: (refs:readonly ApexValue[],result:FrameResult)=>Map<ApexValue,ApexValue>;
   private get exceeded():boolean{return this.budget.exceeded;}
   private readonly liveness=new Map<IndexedApexMethod,ApexLocalLiveness>();
   /** Per-site failure attribution: a large unrelated method never taints other sites. */
@@ -128,7 +132,7 @@ export class ApexDataFlowEngine {
     this.sites=discoverApexInvocations(source,options.selectInvocation??dynamicDatabaseQuerySelector,this.methods);
   }
   private evaluate(expr:string, state:State, depth:number,allowEffects=false):ApexValue {
-    const context:ApexExpressionContext={values:state.values,
+    const context:ApexExpressionContext={values:state.values,chooseSchemaAlternative:this.schemaEffectChoice,
       argumentTypes:expressions=>this.symbols.argumentTypes(this.currentMethod,expressions,this.evaluationOffset),
       schemaShadowed:name=>!!this.currentMethod&&this.symbols.hasLocalBinding(this.currentMethod,name,this.evaluationOffset)||new RegExp("\\bclass\\s+"+name+"\\b","i").test(maskApexSource(this.source)),
       resolveCall:(name,args,argumentTypes)=>{
@@ -185,7 +189,7 @@ export class ApexDataFlowEngine {
         if(!selected)return matches.length?unknown("Apex overload is ambiguous or its source argument types are unproven: "+name):undefined;
         const candidates=[selected];
         const schemaHelper=this.effects.schemaHelper(selected);
-        if(schemaHelper)return evaluateSchemaHelper(schemaHelper,args,this.options.resolveExternal);
+        if(schemaHelper)return evaluateSchemaHelper(schemaHelper,args,this.options.resolveExternal,this.schemaEffectChoice);
         if(!args.length&&candidates[0].isStatic&&this.className){
           const lazy=this.options.resolveExternal?.("Apex.lazyGetter",[textValue(this.className),textValue(sameClass)]);
           if(lazy!==undefined)return lazy;
@@ -315,10 +319,55 @@ export class ApexDataFlowEngine {
     let result:FrameResult;
     try{result=this.execute(method.body,[{values,effectFrame:true}],1);}
     finally{this.currentMethod=previous;this.evaluationOffset=previousOffset;this.provenEffectCall=undefined;}
-    const replacements=this.referenceReplacements(plan.refs,result);
+    const replacements=this.schemaSetProjection?.(plan.refs,result)??this.referenceReplacements(plan.refs,result);
     if([...replacements.values()].some(v=>v.kind==="unknown"))return reject(this.exceeded?"HELPER_EFFECT_EXECUTION_LIMIT":"HELPER_EFFECT_RESULT_UNPROVEN");
     countApex("helper.argument_effect_summaries");
     return args.map(v=>replacements.get(v)??v);
+  }
+  /** Enumerate bounded metadata alternatives, never assume REST target
+   * order. Require a concrete validated Set at every feasible exit.
+   * For differing sets, return only common members, explicitly incomplete.
+   * A lower-bound input is permitted only for a write-only Set receiver. */
+  summarizeSchemaSetEffects(method:IndexedApexMethod,args:readonly ApexValue[],target:number,
+    validMember:(value:string)=>boolean,onReject?:(code:string,offset:number)=>void):ApexStringSetEvidence|undefined{
+    const initial=args[target];
+    if(initial?.kind!=="collection"||!initial.unique||args.some((v,i)=>i!==target&&isApexReference(v))||
+      !this.effects.writeOnlyStringSet(method,target)||!initial.items.every(validMember))return undefined;
+    const reject=(code:string)=>{onReject?.(code,method.start);return undefined;};
+    const queue:Array<Map<string,string>>=[new Map()],outcomes:string[][]=[];
+    let attempts=0;
+    try{
+      while(queue.length){
+        if(++attempts>16)return reject("HELPER_SCHEMA_ALTERNATIVE_LIMIT");
+        const choices=queue.shift()!;
+        this.schemaEffectChoice=(key,candidates)=>{
+          if(choices.has(key))return choices.get(key);
+          if(candidates.length>8)throw new SchemaEffectExpand(key,[]);
+          throw new SchemaEffectExpand(key,[...new Set(candidates)]);
+        };
+        this.schemaSetProjection=(refs,result)=>{
+          const sets=result.states.map(state=>state.values.get("#effect.ref.0"));
+          if(this.exceeded||refs.length!==1||!sets.length||result.states.some(s=>s.loopControl)||
+            sets.some(v=>v?.kind!=="collection"||!v.unique||!v.items.every(validMember)))
+            return new Map(refs.map(v=>[v,unknown("Schema alternative has an unproven Set effect.")]));
+          for(const set of sets)if(set?.kind==="collection")outcomes.push([...set.items]);
+          return new Map([[refs[0],sets[0]!]]);
+        };
+        try{
+          if(!this.summarizeArgumentEffects(method,args,onReject))return reject("HELPER_SCHEMA_ALTERNATIVE_UNPROVEN");
+        }catch(error){
+          if(!(error instanceof SchemaEffectExpand))throw error;
+          if(!error.choices.length||queue.length+error.choices.length+attempts>16)return reject("HELPER_SCHEMA_ALTERNATIVE_LIMIT");
+          for(const choice of error.choices)queue.push(new Map([...choices,[error.key,choice]]));
+        }
+      }
+      if(!outcomes.length)return reject("HELPER_SCHEMA_ALTERNATIVE_UNPROVEN");
+      const common=outcomes[0].filter(item=>outcomes.every(set=>set.includes(item)));
+      const complete=outcomes.every(set=>set.length===common.length);
+      const value=listValue(common,true);
+      if(value.kind!=="collection")return undefined;
+      return {value,complete,alternatives:outcomes.length};
+    }finally{this.schemaEffectChoice=undefined;this.schemaSetProjection=undefined;}
   }
   /**
    * Apex passes mutable collection references into helpers. If we cannot prove
@@ -923,7 +972,7 @@ export class ApexDataFlowEngine {
     if(method.parameters.length!==args.length)
       return unknown("Apex helper argument count does not match the declaration.");
     const schemaHelper=this.effects.schemaHelper(method);
-    if(schemaHelper)return evaluateSchemaHelper(schemaHelper,args,this.options.resolveExternal);
+    if(schemaHelper)return evaluateSchemaHelper(schemaHelper,args,this.options.resolveExternal,this.schemaEffectChoice);
     this.budget.reset();
     this.activeSlice=undefined;
     this.activeQueryOffset=undefined;

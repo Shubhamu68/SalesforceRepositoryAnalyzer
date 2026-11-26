@@ -1,6 +1,6 @@
 import {stripApexComments,maskApexSource,type IndexedApexMethod} from "./ApexSourceModel.js";
 import {canonicalApexType,type ApexCallResolver} from "./ApexTypeSystem.js";
-import {evaluateSchemaRead,isSchemaFieldMap} from "./ApexSchemaModel.js";
+import {evaluateSchemaRead,isSchemaFieldMap,firstSchemaReference,type ApexSchemaChoice} from "./ApexSchemaModel.js";
 import {evaluateApexExpression,textValue,unknown,type ApexValue} from "./ApexValueEvaluator.js";
 
 /** Exact source contracts for common order-independent Describe traversal
@@ -148,7 +148,7 @@ export function recognizeSchemaHelper(source:string,method:IndexedApexMethod):Co
 }
 const nul:ApexValue={kind:"null"};
 const one=(value:ApexValue|undefined)=>value?.kind==="text"&&!value.scalarType&&value.values.length===1?value.values[0]:undefined;
-export function evaluateSchemaHelper(contract:Contract,args:readonly ApexValue[],resolve?:ApexCallResolver):ApexValue{
+export function evaluateSchemaHelper(contract:Contract,args:readonly ApexValue[],resolve?:ApexCallResolver,choose?:ApexSchemaChoice):ApexValue{
   if(contract.kind==="enumSwitch"){
     const v=args[0];return v?.kind==="schema"&&v.schemaType==="displayType"?
       textValue(contract.values.get(v.value)??contract.fallback):unknown("Enum switch input is not a proven DisplayType.");
@@ -162,7 +162,10 @@ export function evaluateSchemaHelper(contract:Contract,args:readonly ApexValue[]
       if(field.kind!=="schema"||field.schemaType!=="fieldToken"||typeof field.field.nameField!=="boolean")return unknown("Name-field flags are incomplete.");
       if(field.field.nameField)matches.push(textValue(field.field.name));
     }
-    return matches.length===1?matches[0]:matches.length===0?nul:unknown("Multiple name fields; Describe iteration order is not established.");
+    if(matches.length<=1)return matches[0]??nul;
+    const names=matches.map(one).filter((v):v is string=>v!==undefined);
+    const selected=names.length===matches.length?choose?.("name:"+object.objectApiName.toLowerCase(),names):undefined;
+    return selected&&names.includes(selected)?textValue(selected):unknown("Multiple name fields; Describe iteration order is not established.");
   }
   const root=one(args[0]),path=one(args[1]);
   if(!root||!path||!identifier.test(root.toLowerCase())||!path.split(".").every(p=>identifier.test(p.toLowerCase()))||path.split(".").length>10)
@@ -188,10 +191,9 @@ export function evaluateSchemaHelper(contract:Contract,args:readonly ApexValue[]
     const token=matches[0],desc=evaluateSchemaRead(token,"getDescribe",[]);
     if(!desc)return unknown("Relationship Describe unavailable.");
     if(last)return desc;
-    const targets=evaluateSchemaRead(desc,"getReferenceTo",[]);
-    if(targets?.kind!=="instanceList")return unknown("Relationship target is polymorphic or unproven.");
-    if(!targets.items.length)return nul;
-    const next=targets.items[0];if(targets.items.length!==1||next.kind!=="schema"||next.schemaType!=="objectToken")return unknown("Relationship target is not unique.");
+    const next=firstSchemaReference(desc,choose);
+    if(next.kind==="null")return nul;
+    if(next.kind!=="schema"||next.schemaType!=="objectToken")return unknown("Relationship target is polymorphic or unproven.");
     object=next.objectApiName;
   }
   return unknown("Incomplete Schema traversal.");

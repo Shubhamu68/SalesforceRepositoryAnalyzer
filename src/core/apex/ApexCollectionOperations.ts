@@ -28,9 +28,10 @@ export function apexIterationValues(value:ApexValue,limit:number):ApexValue[]|un
 /** Unknown additional String members, distinct from an exact collection.
  * A Describe domain is preserved only when every unknown member is
  * constrained to a field-map key (up to case). No runtime values invented. */
-export interface ApexRuntimeCollectionMembers {describeObject?:string}
+export interface ApexRuntimeCollectionMembers {describeObject?:string;schemaEffectPartial?:true}
 export function mergeApexRuntimeMembers(a:ApexRuntimeCollectionMembers|undefined,b:ApexRuntimeCollectionMembers|undefined):ApexRuntimeCollectionMembers|undefined{
   if(!a)return b;if(!b)return a;
+  if(a.schemaEffectPartial&&b.schemaEffectPartial)return {schemaEffectPartial:true};
   return a.describeObject&&a.describeObject.toLowerCase()===b.describeObject?.toLowerCase()?a:{};
 }
 interface AddOnlyIteration {membership?:{receiver:string;key:string};caseOnly:boolean;usesStringGuard:boolean}

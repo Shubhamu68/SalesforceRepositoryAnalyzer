@@ -15,6 +15,7 @@ const path=/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/;
 const MAX_FIELDS=2000;
 const runtimeSelectPrefix="schema-filtered-select-additions:";
 const optionalWhereType="soql-optional-where-clause";
+const partialEffectType="soql-schema-effect-partial-select";
 type Use=SoqlPermissionShape["fields"][number];
 type Evidence=ApexDependencyEvidence<Use>;
 const ev=(value:ApexValue,annotations:readonly Use[]=[]):Evidence=>({value,annotations});
@@ -145,9 +146,14 @@ export function backtrackSoqlPermissionShapes(source:string,filePath:string,site
     observe,
     abstractExpression:abstractSoqlExpression,
     allowMetadataCandidateRows:true,
+    validatePartialSetMember:member=>!!permissionSelectFieldPath(member),
     join:(list,separator)=>{
       if(list.value.kind!=="collection"||!/^,\s*$/.test(separator)||list.value.items.length>MAX_FIELDS||list.value.items.some(s=>!permissionSelectFieldPath(s)))return undefined;
       const annotations:Use[]=list.value.items.map(field=>({fieldPath:permissionSelectFieldPath(field)!,context:"SELECT"}));
+      if(list.runtimeMembers?.schemaEffectPartial){
+        if(!list.value.items.length)return undefined;
+        return ev({kind:"unknown",reason:"Only common SELECT members across Schema effects are proven",fragments:[{kind:"literal",text:list.value.items.join(",")},{kind:"hole",symbol:{name:"additionalFields",type:partialEffectType}}]},annotations);
+      }
       if(list.runtimeMembers){
         // Do not fill arbitrary runtime identifiers. The core has proven
         // only optional additions constrained by a specific Describe map.
@@ -191,6 +197,29 @@ export function backtrackSoqlPermissionShapes(source:string,filePath:string,site
     if(!runtimeObject)allRuntime=false;
     if(!text){
       const mode=parseApexAccessLevel(site.accessLevelArgument);
+      const parts=proof.value.kind==="unknown"?proof.value.fragments:undefined;
+      // The extra SELECT members were validated individually on every
+      // concrete alternative; only their common inventory is retained.
+      // Never treat this evidence as complete SOQL or verified enforcement.
+      if((mode==="USER_MODE"||mode==="SYSTEM_MODE")&&parts&&parts.length>=3){
+        const [before,hole,after]=parts;
+        if(before.kind==="literal"&&/^\s*SELECT\s+[\w\s.,()]+\s*$/i.test(before.text)&&hole.kind==="hole"&&hole.symbol?.type===partialEffectType&&after.kind==="literal"){
+          const root=/^\s+FROM\s+([A-Za-z_]\w*)(?=\s|$)/i.exec(after.text);
+          if(root){
+            const tail=after.text.slice(root[0].length);
+            const remainder=parts.slice(3);
+            const boundary=tail.trim()===""?(remainder.length===2&&remainder[0].kind==="hole"&&remainder[0].symbol?.type===optionalWhereType&&remainder[1].kind==="literal"&&/^ ORDER BY /i.test(remainder[1].text)):
+              !remainder.length&&/^\s+(?:ORDER BY|WHERE|LIMIT|OFFSET)\s+/i.test(tail);
+            if(boundary){
+              const evidence=(before.text+root[0]).trim(),select=simplePermissionShape(evidence,site.line);
+              if(select&&select.mode==="UNSPECIFIED"&&select.fields.every(f=>f.context==="SELECT")&&matches(select,proof.annotations)){
+                queries.add(evidence);partialSelectQueries.add(evidence);
+                note("SOQL_PARTIAL_EFFECT_PREFIX_VALIDATED",select.fields.length);
+              }
+            }
+          }
+        }
+      }
       const fragments=proof.value.kind==="unknown"?proof.value.fragments:undefined;
       if((mode==="USER_MODE"||mode==="SYSTEM_MODE")&&!index?.hasSourceClass("String")&&fragments&&fragments.length>=3){
         const [prefix,hole,suffix]=fragments;

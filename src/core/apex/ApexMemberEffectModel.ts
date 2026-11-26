@@ -324,6 +324,26 @@ export class ApexMemberEffectModel{
     };
     return visit(method);
   }
+  /** Lower-bound Set replay requires the contents not to influence
+   * control flow or escape: each reference must be a standalone mutation. */
+  writeOnlyStringSet(method:IndexedApexMethod,parameter:number):boolean{
+    const name=method.parameters[parameter];
+    if(!name||canonicalApexType(method.parameterTypes?.[parameter])!=="set<string>"||
+      !this.argumentSummarySafe(method)||!this.resultCannotExposeReference(method))return false;
+    const rx=new RegExp("\\b"+name+"\\b","i");
+    const use=new RegExp("^\\s*"+name+"\\s*\\.\\s*(?:add|remove)\\s*\\(([\\s\\S]*)\\)\\s*;\\s*$","i");
+    const visit=(nodes:readonly SourceNode[]):boolean=>nodes.every(n=>{
+      if(rx.test(maskApexSource((n.condition??"")+" "+(n.iterable??""))))return false;
+      if(n.loopVariable?.toLowerCase()===name.toLowerCase())return false;
+      const visible=maskApexSource(n.text??"");
+      if(rx.test(visible)){
+        const match=n.kind==="statement"?use.exec(visible):undefined;
+        if(!match||rx.test(match[1]))return false;
+      }
+      return visit(n.body??[])&&visit(n.otherwise??[]);
+    });
+    return visit(method.body);
+  }
   /** An ignored scalar or inert DTO result cannot expose a mutable input
    * collection through a returned alias. Do not assume arbitrary DTOs are inert. */
   resultCannotExposeReference(method:IndexedApexMethod):boolean{

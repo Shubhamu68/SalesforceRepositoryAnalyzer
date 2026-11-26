@@ -6,7 +6,7 @@ import {findApexTernary} from "./ApexConditionalInvocation.js";
 import { parseCustomMetadataQuery } from "./ApexCustomMetadataQueryModel.js";
 import {evaluateBoundedStringOperation,isBoundedStringOperation} from "./ApexBoundedStringOperations.js";
 import {readApexReadOperation} from "./ApexReadOperations.js";
-import {evaluateSchemaExpression,evaluateSchemaRead,schemaReceiverEligible,isSchemaFieldMap,type ApexSchemaValue} from "./ApexSchemaModel.js";
+import {evaluateSchemaExpression,evaluateSchemaRead,schemaReceiverEligible,isSchemaFieldMap,type ApexSchemaValue,type ApexSchemaChoice} from "./ApexSchemaModel.js";
 
 /** Portable abstract Apex values: no Salesforce API calls and no eval(). */
 export type ApexValue =
@@ -110,6 +110,7 @@ export interface ApexExpressionContext {
   resolveCall?: ApexCallResolver;
   argumentTypes?: (expressions:readonly string[])=>ApexArgumentTypes;
   schemaShadowed?: (name:string)=>boolean;
+  chooseSchemaAlternative?:ApexSchemaChoice;
   /** Guard replay requires ordered evaluation; an unknown earlier term may throw. */
   strictBooleanGuards?:boolean;
 }
@@ -217,6 +218,7 @@ export function evaluateApexExpression(
   const schemaContext={
     evaluate:(part:string)=>evaluateApexExpression(part,context,depth+1),
     resolveCall:context.resolveCall,
+    chooseSchemaAlternative:context.chooseSchemaAlternative,
     shadowed:(root:string)=>lexicalValue(context.values,root)!==undefined||!!context.schemaShadowed?.(root),
     receiverEligible:(part:string)=>{
       const value=lexicalValue(context.values,part);

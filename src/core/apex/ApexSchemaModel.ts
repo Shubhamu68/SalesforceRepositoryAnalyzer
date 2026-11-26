@@ -74,6 +74,18 @@ export function mutateSchemaFieldMap(map:ApexSchemaFieldMap,operation:string,arg
   return unknown("Schema field-map mutation is unsupported or not proven.");
 }
 
+/** Opt-in abstract choice, never an assertion of Salesforce target order.
+ * The effect consumer must replay every admitted choice. */
+export type ApexSchemaChoice=(key:string,candidates:readonly string[])=>string|undefined;
+export function firstSchemaReference(receiver:ApexValue,choose?:ApexSchemaChoice):ApexValue{
+  if(receiver.kind!=="schema"||receiver.schemaType!=="fieldDescribe")return unknown("Reference Describe is not proven.");
+  const targets=receiver.field.referenceTo;
+  if(!Array.isArray(targets)||!targets.every(t=>name.test(t)))return unknown("Reference targets are unavailable.");
+  const unique=[...new Set(targets)];
+  if(!unique.length)return {kind:"null"};
+  const selected=unique.length===1?unique[0]:choose?.("reference:"+receiver.objectApiName.toLowerCase()+"."+receiver.field.name.toLowerCase(),unique);
+  return selected&&unique.includes(selected)?{kind:"schema",schemaType:"objectToken",objectApiName:selected}:unknown("Reference target position is not proven.");
+}
 export function evaluateSchemaRead(receiver:ApexValue,operation:string,args:readonly ApexValue[]):ApexValue|undefined{
   if(receiver.kind!=="schema")return undefined;
   const op=operation.toLowerCase();
@@ -127,6 +139,7 @@ export interface SchemaExpressionContext {
   /** Backward traversal only probes a receiver that has a Schema source type
    * or explicit Schema syntax; do not intercept arbitrary helper calls. */
   receiverEligible?:(expression:string)=>boolean;
+  chooseSchemaAlternative?:ApexSchemaChoice;
 }
 const globalDescribe=/^Schema\s*\.\s*getGlobalDescribe\s*\(\s*\)$/i;
 const safeGlobalKey=/^(?:[A-Za-z_]\w*|'(?:\\.|[^'\\])*')$/s;
@@ -227,6 +240,22 @@ export function evaluateSchemaExpression(expr:string,ctx:SchemaExpressionContext
       if(object.kind==="schema"&&(object.schemaType==="objectDescribe"||object.schemaType==="objectToken"))
         return field&&name.test(field)?lookup(object.objectApiName,field):unknown("Schema field name is not known.");
       if(object.kind==="unknown")return object;
+    }
+  }
+  // Distinguish known emptiness from unknown first position. Do not
+  // manufacture a singleton list or alter size()/other indexed reads.
+  if(ctx.chooseSchemaAlternative){
+    const empty=readApexMemberOperation(expr,n=>/^isEmpty$/i.test(n));
+    const first=/^([\s\S]+)\s*\[\s*0\s*\]$/.exec(expr);
+    const base=empty&&!empty.args.length?empty.receiver:first?.[1].trim();
+    const reference=base?readApexMemberOperation(base,n=>/^getReferenceTo$/i.test(n)):undefined;
+    if(reference&&!reference.args.length&&eligible(reference.receiver)){
+      const field=ctx.evaluate(reference.receiver);
+      if(field.kind==="schema"&&field.schemaType==="fieldDescribe"&&Array.isArray(field.field.referenceTo)){
+        if(empty)return bool(field.field.referenceTo.length===0);
+        const result=firstSchemaReference(field,ctx.chooseSchemaAlternative);
+        return result.kind==="null"?unknown("Reference list index is out of bounds."):result;
+      }
     }
   }
   const targetIndex=/^([\s\S]+)\s*\[\s*(\d+)\s*\]$/.exec(expr);

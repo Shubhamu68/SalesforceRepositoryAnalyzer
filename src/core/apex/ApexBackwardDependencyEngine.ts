@@ -57,6 +57,8 @@ export interface ApexDependencyPolicy<A=never>{
   join?(collection:ApexDependencyEvidence<A>,separator:string):ApexDependencyEvidence<A>|undefined;
   mergeConditionalAppends?(base:ApexDependencyEvidence<A>,additions:readonly ApexDependencyAppend<A>[]):ApexDependencyEvidence<A>|undefined;
   allowMetadataCandidateRows?:boolean;
+  /** Consumer validates every possible member before lower-bound replay. */
+  validatePartialSetMember?:(member:string)=>boolean;
   /** Diagnostic-only observer; not consulted by any proof or selection rule. */
   observe?:ApexDependencyObserver;
 }
@@ -789,7 +791,8 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
                       return effectBlocked("HELPER_EFFECT_RETURN_BINDING_UNPROVEN",helper.name);
                     if(declaration&&!effects.resultCannotExposeReference(helper))
                       return effectBlocked("HELPER_EFFECT_RETURN_ALIAS_UNPROVEN",helper.name);
-                    if(!exactCurrent||conditional||current.runtimeMembers||current.annotations.length||current.value.kind!=="collection")
+                    const partialInput=!!current.runtimeMembers?.schemaEffectPartial;
+                    if((!exactCurrent&&!partialInput)||conditional||(current.runtimeMembers&&!partialInput)||current.annotations.length||current.value.kind!=="collection")
                       return effectBlocked("HELPER_EFFECT_REACHING_STATE_UNPROVEN",helper.name);
                     if(pieces.some((p,i)=>!targetPositions.includes(i)&&rx(name).test(maskApexSource(p))))
                       return effectBlocked("HELPER_EFFECT_ARGUMENT_ALIAS_UNPROVEN",helper.name);
@@ -812,12 +815,26 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
                           /^(?:Schema\.objectSchema|Schema\.fieldMap)$/.test(call)?resolveExternal?.(call,values,types,frame.filePath):undefined});
                       effectEngines.set(frame.filePath,engine);
                     }
-                    const updated=engine.summarizeArgumentEffects(helper,args.map(v=>v.value),(code,at)=>
-                      note({...frame,method:helper,depth:frame.depth+1},at,code,helper.name))?.[targetPositions[0]];
-                    if(updated?.kind!=="collection"||updated.items.length>MAX_COLLECTION_ITEMS)return blocked("SHARED_HELPER_EFFECT_UNPROVEN");
-                    current=ev(mark(updated));
-                    note(frame,n.start,"SHARED_HELPER_EFFECT_RESOLVED",helper.name);
-                    continue;
+                    const report=(code:string,at:number)=>note({...frame,method:helper,depth:frame.depth+1},at,code,helper.name);
+                    let failure="";
+                    const values=args.map(v=>v.value);
+                    const updated=partialInput?undefined:engine.summarizeArgumentEffects(helper,values,(code,at)=>{failure=code;report(code,at);})?.[targetPositions[0]];
+                    if(updated?.kind==="collection"&&updated.items.length<=MAX_COLLECTION_ITEMS){
+                      current=ev(mark(updated));
+                      note(frame,n.start,"SHARED_HELPER_EFFECT_RESOLVED",helper.name);
+                      continue;
+                    }
+                    if(policy.validatePartialSetMember&&targetPositions.length===1&&(partialInput||failure==="HELPER_EFFECT_RESULT_UNPROVEN")){
+                      const recovered=engine.summarizeSchemaSetEffects(helper,values,targetPositions[0],policy.validatePartialSetMember,report);
+                      if(recovered&&recovered.value.items.length<=MAX_COLLECTION_ITEMS){
+                        const complete=recovered.complete&&!partialInput;
+                        exactCurrent=complete;
+                        current=complete?ev(mark(recovered.value)):ev(recovered.value,[],{runtimeMembers:{schemaEffectPartial:true}});
+                        note(frame,n.start,complete?"HELPER_SCHEMA_EFFECT_CONSENSUS":"HELPER_SCHEMA_EFFECT_PARTIAL",helper.name,recovered.alternatives);
+                        continue;
+                      }
+                    }
+                    return blocked("SHARED_HELPER_EFFECT_UNPROVEN");
                   }
                 }
                 return blocked("COLLECTION_ALIAS_OR_WRITE");
