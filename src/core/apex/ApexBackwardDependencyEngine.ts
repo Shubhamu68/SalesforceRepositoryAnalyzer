@@ -56,7 +56,7 @@ export interface ApexDependencyPolicy<A=never>{
   abstractExpression?(context:ApexDependencyExpressionContext):ApexValue|undefined;
   /** Consumer-only structural proof, with source-scoped recursive dependency
    * resolution. Annotations and unknown slots must survive the abstraction. */
-  abstractEvidence?(context:ApexDependencyExpressionContext,resolve:(expression:string)=>ApexDependencyEvidence<A>):ApexDependencyEvidence<A>|undefined;
+  abstractEvidence?(context:ApexDependencyExpressionContext,resolve:(expression:string)=>ApexDependencyEvidence<A>,resolveAt:(expression:string,offset:number)=>ApexDependencyEvidence<A>):ApexDependencyEvidence<A>|undefined;
   join?(collection:ApexDependencyEvidence<A>,separator:string):ApexDependencyEvidence<A>|undefined;
   mergeConditionalAppends?(base:ApexDependencyEvidence<A>,additions:readonly ApexDependencyAppend<A>[]):ApexDependencyEvidence<A>|undefined;
   allowMetadataCandidateRows?:boolean;
@@ -204,7 +204,7 @@ export function traceApexDependencies<A=never>(source:string,filePath:string,use
         }
       }
       const context={source:frame.source,methods:frame.methods,method:frame.method,expression:expr,offset};
-      const structural=policy.abstractEvidence?.(context,part=>resolve(frame,part,offset,locals,members));
+      const structural=policy.abstractEvidence?.(context,part=>resolve(frame,part,offset,locals,members),(part,at)=>at>=frame.method.start&&at<=offset?resolve(frame,part,at,locals,members):ev(stop("Invalid source evidence offset")));
       if(structural!==undefined){note(frame,offset,"CONSUMER_STRUCTURAL_EVIDENCE");return structural;}
       const abstraction=policy.abstractExpression?.(context);
       if(abstraction!==undefined){note(frame,offset,"CONSUMER_ABSTRACTION");return ev(abstraction);}

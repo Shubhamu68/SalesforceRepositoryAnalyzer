@@ -1,4 +1,5 @@
 import {apexSymbols} from "../core/apex/ApexSymbolTable.js";
+import {proveConfiguredPredicateDomain} from "../core/apex/ApexConfiguredPredicateDomain.js";
 import {addApexValues,runtimeParameter,textValue,unknown,type ApexValue,type ApexTextFragment} from "../core/apex/ApexValueEvaluator.js";
 import {traceApexDependencies,type ApexDependencyEvidence,type ApexDependencyAppend,type ApexDependencyExpressionContext} from "../core/apex/ApexBackwardDependencyEngine.js";
 import type {ApexRepositoryMethodIndex} from "../core/apex/ApexRepositoryMethodIndex.js";
@@ -18,10 +19,10 @@ const runtimeSelectPrefix="schema-filtered-select-additions:";
 const optionalWhereType="soql-optional-where-clause";
 const partialWhereType="soql-partial-where-clause";
 const partialEffectType="soql-schema-effect-partial-select";
-type Use=SoqlPermissionShape["fields"][number];
+type Use=SoqlPermissionShape["fields"][number]&{predicateRoot?:string};
 type Evidence=ApexDependencyEvidence<Use>;
 const ev=(value:ApexValue,annotations:readonly Use[]=[]):Evidence=>({value,annotations});
-const matches=(shape:SoqlPermissionShape,required:readonly Use[])=>required.every(f=>shape.fields.some(x=>x.context===f.context&&x.fieldPath.toLowerCase()===f.fieldPath.toLowerCase()));
+const matches=(shape:SoqlPermissionShape,required:readonly Use[],checkRoot=true)=>required.every(f=>(!checkRoot||!f.predicateRoot||f.predicateRoot.toLowerCase()===shape.object.toLowerCase())&&shape.fields.some(x=>x.context===f.context&&x.fieldPath.toLowerCase()===f.fieldPath.toLowerCase()));
 function parseText(value:ApexValue):string|undefined{
   const exact=one(value);if(exact!==undefined)return exact;
   if(value.kind!=="unknown"||!value.fragments)return undefined;
@@ -99,7 +100,7 @@ function unknownPredicateAppend(value:ApexValue):boolean{
 /** Resolve only source-proven optional predicate and guarded join forms.
  * For a nonempty candidate list, its inventory is independent of whether
  * a particular runtime execution has zero, one or several predicates. */
-function abstractPredicateEvidence(context:ApexDependencyExpressionContext,resolve:(expression:string)=>Evidence,platformShadowed:boolean):Evidence|undefined{
+function abstractPredicateEvidence(context:ApexDependencyExpressionContext,resolve:(expression:string)=>Evidence,resolveAt:(expression:string,offset:number)=>Evidence,platformShadowed:boolean,resolveExternal?:ApexCallResolver):Evidence|undefined{
   const {source,methods,method,expression,offset}=context;
   if(platformShadowed||!expression.includes("?"))return undefined;
   const symbols=apexSymbols(source,methods);
@@ -111,15 +112,34 @@ function abstractPredicateEvidence(context:ApexDependencyExpressionContext,resol
     if(text===undefined)return undefined;
     if(!text.trim())return input.annotations.length?undefined:ev(textValue(""));
     const proof=strictPredicate(text);
-    if(!proof||!matches(proof,input.annotations))return undefined;
-    const references=proof.fields.filter(f=>f.context==="WHERE");
+    if(!proof||!matches(proof,input.annotations,false))return undefined;
+    const references:Use[]=proof.fields.filter(f=>f.context==="WHERE").map(f=>({...f,predicateRoot:input.annotations.find(a=>a.context===f.context&&a.fieldPath.toLowerCase()===f.fieldPath.toLowerCase())?.predicateRoot}));
     const inventory=" WHERE "+predicateInventory(references);
     return partial!==undefined?partialWhere(inventory,references):ev(textValue(inventory),references);
   }
   const guarded=/^([A-Za-z_]\w*)\s*\.\s*isEmpty\s*\(\s*\)\s*\?\s*''\s*:\s*(String\s*\.\s*join\s*\(\s*([A-Za-z_]\w*)\s*,\s*'\s+(?:AND|OR)\s+'\s*\))$/i.exec(expression);
   if(guarded&&guarded[1].toLowerCase()===guarded[3].toLowerCase()&&symbols.lookup(method,guarded[1],offset)==="list<string>"){
-    // The same typed list is used on both arms, and joining an empty list
-    // yields the empty string. Keep the join policy's proof/unknown result.
+    const domain=proveConfiguredPredicateDomain(context,guarded[1],(expr,at)=>{
+      const result=resolveAt(expr,at);
+      return result.annotations.length||result.runtimeMembers||result.describeObject?stop("Non-exact configuration dependency"):result.value;
+    },resolveExternal);
+    if(domain){
+      const fields:Use[]=domain.fields.map(fieldPath=>({fieldPath,context:"WHERE",predicateRoot:domain.object}));
+      let complete=domain.complete;
+      for(const raw of domain.rawPredicates){
+        const proof=strictPredicate(raw);
+        if(!proof){complete=false;continue;}
+        fields.push(...proof.fields.filter(f=>f.context==="WHERE").map(f=>({...f,predicateRoot:domain.object})));
+      }
+      if(fields.length){
+        const inventory=predicateInventory(fields);
+        // Even a finite field domain represents conditional execution, not
+        // reconstructed business data. A missing raw/default fragment stays
+        // structurally unknown and cannot certify effective mode.
+        return complete?ev(textValue(inventory),fields):partialWhere(inventory,fields);
+      }
+    }
+    // Ordinary source-proven list joins retain their established behavior.
     return resolve(guarded[2]);
   }
   return undefined;
@@ -177,7 +197,9 @@ function mergeSoqlAppends(base:Evidence,additions:readonly ApexDependencyAppend<
     }
     let incompleteWhere=false;
     for(const a of additions){
-      const text=fragmentText(a.evidence.value)?.trim();
+      const partial=knownPartialPredicate(a.evidence.value);
+      if(partial!==undefined){if(full.mode!=="UNSPECIFIED")return ev(stop("Unverified WHERE may affect mode"));incompleteWhere=true;}
+      const text=(partial??fragmentText(a.evidence.value))?.trim();
       if(text===undefined){
         if(full.mode==="UNSPECIFIED"&&!a.evidence.annotations.length&&unknownPredicateAppend(a.evidence.value)){
           incompleteWhere=true;continue;
@@ -239,7 +261,7 @@ export function backtrackSoqlPermissionShapes(source:string,filePath:string,site
   const trace=traceApexDependencies<Use>(source,filePath,{expression:site.argument,offset:site.offset},index,resolveExternal,{
     observe,
     abstractExpression:abstractSoqlExpression,
-    abstractEvidence:(context,resolve)=>abstractPredicateEvidence(context,resolve,!!index?.hasSourceClass("String")),
+    abstractEvidence:(context,resolve,resolveAt)=>abstractPredicateEvidence(context,resolve,resolveAt,["String","List","Set","Map","Schema","JSON"].some(p=>!!index?.hasSourceClass(p)),resolveExternal),
     allowMetadataCandidateRows:true,
     validatePartialSetMember:member=>!!permissionSelectFieldPath(member),
     join:(list,separator)=>{
