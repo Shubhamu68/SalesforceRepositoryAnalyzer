@@ -936,8 +936,10 @@ test("C: private instance member assignment domains reuse Field Set helper and l
  const files=[{filePath:"BatchFixture.cls",source:"public class BatchFixture {private List<String> selected;private String suffix='';private List<String> types;public BatchFixture(){try{init();}catch(Exception e){System.debug(e);}}private void init(){types=new List<String>();suffix=(types!=null)?' AND Type IN :types':'';selected=Fields.load('Account','FixtureSet');}private void run(Set<Id> ids){String q='SELECT '+String.join(selected,',')+',Id FROM Account WHERE Id IN :ids'+suffix;Database.query(q);}}"},
  {filePath:"Fields.cls",source:"public class Fields {public static List<String> load(String obj,String name){Schema.SObjectType t=Schema.getGlobalDescribe().get(obj);Schema.DescribeSObjectResult d=t.getDescribe();Schema.FieldSet s=d.fieldSets.getMap().get(name);List<Schema.FieldSetMember> m=s.getFields();List<String> out=new List<String>();for(Schema.FieldSetMember f:m){out.add(f.getFieldPath());}return out;}}"}];
  const resolve=(name:string,args:ApexValue[]):ApexValue|undefined=>name==="Schema.fieldSetFields"&&args[0].kind==="text"&&args[0].values[0]==="Account"?{kind:"collection",items:["Name","Industry"],unique:false}:undefined;
- const result=evidence(files,resolve);
- assert.deepEqual(fields(result.queries),new Set(["SELECT:Id","SELECT:Name","SELECT:Industry","WHERE:Id","WHERE:Type"]),JSON.stringify(result));
+ const events:unknown[]=[];
+ const root=files[0],site=discoverApexInvocations(root.source,dynamicDatabaseQuerySelector)[0];
+ const result=backtrackSoqlPermissionShapes(root.source,root.filePath,site,new ApexRepositoryMethodIndex(files),resolve,e=>events.push(e));
+ assert.deepEqual(fields(result.queries),new Set(["SELECT:Id","SELECT:Name","SELECT:Industry","WHERE:Id","WHERE:Type"]),JSON.stringify({result,events}));
  const mutated=files[0].source.replace("selected=Fields.load('Account','FixtureSet');","selected=Fields.load('Account','FixtureSet');Other.mutate(selected);");
  assert.equal(evidence([{...files[0],source:mutated},files[1]],resolve).queries.length,0);
 });
