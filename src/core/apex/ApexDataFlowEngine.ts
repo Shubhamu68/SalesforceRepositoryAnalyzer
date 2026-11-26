@@ -1,7 +1,7 @@
 import {apexMapKey} from "./ApexValueEvaluator.js";
 import {isSchemaFieldMap,mutateSchemaFieldMap,type ApexSchemaChoice} from "./ApexSchemaModel.js";
 import {evaluateSchemaHelper} from "./ApexSchemaHelperModel.js";
-import {applyApexStringCollectionMutation,apexIterationValues} from "./ApexCollectionOperations.js";
+import {applyApexStringCollectionMutation,applyApexStringSetLowerBoundMutation,apexIterationValues} from "./ApexCollectionOperations.js";
 import {collectApexReferences,isApexReference,referenceMember,replaceApexReferences} from "./ApexReferenceState.js";
 import {proveInstanceArgumentEffects} from "./ApexInstanceEffects.js";
 import {apexSymbols,type ApexSymbolTable} from "./ApexSymbolTable.js";
@@ -102,6 +102,7 @@ export class ApexDataFlowEngine {
   private readonly activeCalls = new Set<string>();
   private readonly budget:ApexExecutionBudget;
   private schemaEffectChoice?:ApexSchemaChoice;
+  private schemaSetUnknownAddition=false;
   private effectSchemaPath?:string;
   private schemaSetProjection?: (refs:readonly ApexValue[],result:FrameResult)=>Map<ApexValue,ApexValue>;
   private get exceeded():boolean{return this.budget.exceeded;}
@@ -333,7 +334,8 @@ export class ApexDataFlowEngine {
   }
   /** Enumerate bounded metadata alternatives, never assume REST target
    * order. Require a concrete validated Set at every feasible exit.
-   * For differing sets, return only common members, explicitly incomplete.
+   * For differing sets or unproven additions, return only proven common
+   * members, explicitly incomplete. Unknown removals still fail closed.
    * A lower-bound input is permitted only for a write-only Set receiver. */
   summarizeSchemaSetEffects(method:IndexedApexMethod,args:readonly ApexValue[],target:number,
     validMember:(value:string)=>boolean,onReject?:(code:string,offset:number,schemaPath?:string)=>void):ApexStringSetEvidence|undefined{
@@ -342,11 +344,12 @@ export class ApexDataFlowEngine {
       !this.effects.writeOnlyStringSet(method,target)||!initial.items.every(validMember))return undefined;
     const reject=(code:string)=>{onReject?.(code,method.start,this.effectSchemaPath);return undefined;};
     const queue:Array<Map<string,string>>=[new Map()],outcomes:string[][]=[];
-    let attempts=0;
+    let attempts=0,unknownAddition=false;
     try{
       while(queue.length){
         if(++attempts>16)return reject("HELPER_SCHEMA_ALTERNATIVE_LIMIT");
         const choices=queue.shift()!;
+        this.schemaSetUnknownAddition=false;
         // Independent read occurrences may select independently. Correlate
         // a choice only with the identical replay occurrence, not with an
         // assumption that all later Describe calls have the same ordering.
@@ -362,6 +365,7 @@ export class ApexDataFlowEngine {
           if(this.exceeded||refs.length!==1||!sets.length||result.states.some(s=>s.loopControl)||
             sets.some(v=>v?.kind!=="collection"||!v.unique||!v.items.every(validMember)))
             return new Map(refs.map(v=>[v,unknown("Schema alternative has an unproven Set effect.")]));
+          unknownAddition||=this.schemaSetUnknownAddition;
           for(const set of sets)if(set?.kind==="collection")outcomes.push([...set.items]);
           return new Map([[refs[0],sets[0]!]]);
         };
@@ -375,11 +379,12 @@ export class ApexDataFlowEngine {
       }
       if(!outcomes.length)return reject("HELPER_SCHEMA_ALTERNATIVE_UNPROVEN");
       const common=outcomes[0].filter(item=>outcomes.every(set=>set.includes(item)));
-      const complete=outcomes.every(set=>set.length===common.length);
+      const complete=!unknownAddition&&outcomes.every(set=>set.length===common.length);
+      if(unknownAddition)onReject?.("HELPER_SET_UNKNOWN_ADDITION",method.start,this.effectSchemaPath);
       const value=listValue(common,true);
       if(value.kind!=="collection")return undefined;
       return {value,complete,alternatives:outcomes.length};
-    }finally{this.schemaEffectChoice=undefined;this.schemaSetProjection=undefined;}
+    }finally{this.schemaEffectChoice=undefined;this.schemaSetProjection=undefined;this.schemaSetUnknownAddition=false;}
   }
   /**
    * Apex passes mutable collection references into helpers. If we cannot prove
@@ -511,7 +516,13 @@ export class ApexDataFlowEngine {
       const args=expr.trim()?splitApexTopLevel(expr,",").map(item=>this.evaluate(item,state,depth)):[];
       const arg=args[0];
       if(existing.kind==="collection"){
-        next=applyApexStringCollectionMutation(existing,operation,args,expr);
+        // Only the pinned Set admitted by writeOnlyStringSet may use a
+        // lower bound. Other collections retain exact transfer semantics.
+        if(this.schemaSetProjection&&state.values.get("#effect.ref.0")===existing){
+          const projected=applyApexStringSetLowerBoundMutation(existing,operation,args,expr);
+          next=projected.value;
+          this.schemaSetUnknownAddition||=projected.incomplete;
+        }else next=applyApexStringCollectionMutation(existing,operation,args,expr);
       }else if(existing.kind==="instanceList"){
         const matches=(v:ApexValue)=>v.kind==="instance"&&(v.className.toLowerCase()===existing.elementType.toLowerCase()||v.className.toLowerCase().endsWith("."+existing.elementType.toLowerCase()));
         if(action==="clear"&&args.length===0)next={...existing,items:[]};

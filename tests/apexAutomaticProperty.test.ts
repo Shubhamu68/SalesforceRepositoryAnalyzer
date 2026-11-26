@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import {test} from "node:test";
 import {ApexInstanceIndex} from "../src/core/apex/ApexInstanceModel.js";
 import {readApexAutomaticScalarProperty} from "../src/core/apex/ApexAutomaticProperty.js";
-import {textValue} from "../src/core/apex/ApexValueEvaluator.js";
+import {listValue,textValue,unknown} from "../src/core/apex/ApexValueEvaluator.js";
+import {applyApexStringSetLowerBoundMutation} from "../src/core/apex/ApexCollectionOperations.js";
 
 test("automatic scalar property and ordinary field use the same constructed instance slots",()=>{
  const source="public class Parent { public class Column { @AuraEnabled public Boolean navigable {get;set;} @AuraEnabled public String path {get;set;} public String idPath; public Column(){this.navigable=false;this.path='Header.Name';this.idPath='Header.Id';} } }";
@@ -29,4 +30,16 @@ test("automatic property proof rejects custom accessors, static, collection and 
   const index=new ApexInstanceIndex([{filePath:"C.cls",source}]);
   assert.equal(index.construct("C",[],"C.cls")?.kind,"unknown",source);
  }
+});
+
+test("lower-bound transfer retains known members only for additions; unknown removals invalidate",()=>{
+ const start=listValue(["Id","Name"],true);
+ assert.equal(start.kind,"collection");if(start.kind!=="collection")return;
+ const missing=unknown("Uncaptured metadata");
+ assert.deepEqual(applyApexStringSetLowerBoundMutation(start,"add",[missing],"x"),{value:start,incomplete:true});
+ assert.deepEqual(applyApexStringSetLowerBoundMutation(start,"remove",[textValue("Name")],"'Name'"),{value:listValue(["Id"],true),incomplete:false});
+ assert.equal(applyApexStringSetLowerBoundMutation(start,"remove",[missing],"x").value.kind,"unknown");
+ assert.equal(applyApexStringSetLowerBoundMutation(start,"removeAll",[missing],"x").value.kind,"unknown");
+ const list=listValue(["Name"]);if(list.kind!=="collection")throw Error("fixture");
+ assert.equal(applyApexStringSetLowerBoundMutation(list,"add",[missing],"x").value.kind,"unknown");
 });

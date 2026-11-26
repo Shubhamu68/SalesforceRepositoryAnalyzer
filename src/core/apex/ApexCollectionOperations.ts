@@ -17,6 +17,18 @@ export function applyApexStringCollectionMutation(existing:ApexStringCollection,
   if(action==="add"||action==="addall")return unknown("Collection "+operation+" argument "+expression+" is unknown: "+(arg?(arg.kind==="unknown"?arg.reason:"unsupported value shape"):"missing argument"));
   return unknown("Unsupported mutation "+operation+" may change the complete query field inventory.");
 }
+/** Lower-bound transfer for an isolated write-only String Set. Unknown
+ * additions cannot erase existing members; unknown removals can. Never
+ * expose this as an exact Set or use it for membership, size, ordering,
+ * aliases or arbitrary calls. The effect consumer must prove those rules. */
+export function applyApexStringSetLowerBoundMutation(existing:ApexStringCollection,operation:string,args:readonly ApexValue[],expression:string):
+  {value:ApexValue;incomplete:boolean}{
+  const value=applyApexStringCollectionMutation(existing,operation,args,expression);
+  if(existing.unique&&operation.toLowerCase()==="add"&&args.length===1&&value.kind==="unknown"&&
+    (args[0].kind==="unknown"||args[0].kind==="text"&&!args[0].scalarType&&args[0].values.length>1))
+    return {value:existing,incomplete:true};
+  return {value,incomplete:false};
+}
 /** Known bounded elements. Instance lists retain reference-aware replay in forward flow. */
 export function apexIterationValues(value:ApexValue,limit:number):ApexValue[]|undefined{
   if(value.kind==="collection"&&value.items.length<=limit)return value.items.map(textValue);

@@ -507,17 +507,17 @@ test("three metadata configurations recover SELECT fields with reference target 
      const events:Array<{code:string;schemaPath?:string}>=[];
      const result=await engine.analyze(filePath,ctx=>backtrackSoqlPermissionShapes(source,filePath,site,index,ctx.resolveExternal,e=>events.push(e)));
      const detail=JSON.stringify({scenario,result,events});
-     assert.equal(result.partialSelectQueries?.length,scenario==="missing"?2:3,detail);
+     assert.equal(result.partialSelectQueries?.length,3,detail);
      assert.deepEqual(fields(result.queries.filter(q=>q.includes("FROM Account"))),new Set(["SELECT:Id","SELECT:Name","SELECT:CreatedDate","SELECT:ParentId","SELECT:Parent.Name","SELECT:Parent.Id","SELECT:Phone"]),detail);
-     const expected=scenario==="missing"?[]:["SELECT:Id",...rootFields.Case.map(f=>"SELECT:"+f),...(scenario==="consensus"?["SELECT:Owner.Name"]:[])];
+     const expected=["SELECT:Id",...rootFields.Case.map(f=>"SELECT:"+f),...(scenario==="consensus"?["SELECT:Owner.Name"]:[])];
      assert.deepEqual(fields(result.queries.filter(q=>q.includes("FROM Case"))),new Set(expected),detail);
      assert.equal(result.bounded,false,detail);
-     assert.ok(events.some(e=>e.code===(scenario==="consensus"?"HELPER_SCHEMA_EFFECT_CONSENSUS":scenario==="different"?"HELPER_SCHEMA_EFFECT_PARTIAL":"HELPER_SCHEMA_ALTERNATIVE_UNPROVEN")),detail);
+     assert.ok(events.some(e=>e.code===(scenario==="consensus"?"HELPER_SCHEMA_EFFECT_CONSENSUS":"HELPER_SCHEMA_EFFECT_PARTIAL")),detail);
      assert.ok(events.some(e=>e.code==="HELPER_EFFECT_RESULT_UNPROVEN"&&e.schemaPath==="Case.OwnerId"),detail);
    }
    const scan=await engine.analyze(filePath,ctx=>extractDynamicSoqlQueries(source,filePath,ctx.resolveExternal,index));
    const recovered=scan.queries.filter(q=>q.selectPrefixOnly===true&&q.query.includes("FROM Case"));
-   assert.equal(recovered.length,scenario==="missing"?0:2,JSON.stringify(scan));
+   assert.equal(recovered.length,2,JSON.stringify(scan));
    assert.ok(scan.unresolved.length>=2);
  }
 });
